@@ -264,7 +264,7 @@ QPushButton:disabled {
   border: 1px solid #e0e6ed;
   border-radius: 4px;
   padding: 8px;
-  font-family: 'Courier New', monospace;
+  font-family: 'Menlo', 'Consolas', 'Courier New', monospace;
   font-size: 9pt;
   selection-background-color: #3498db;
 }
