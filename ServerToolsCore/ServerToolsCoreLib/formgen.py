@@ -50,6 +50,14 @@ def build(arguments_schema: dict, layout) -> dict:
 def _make_widget(name: str, spec: dict):
     arg_type = spec.get("type", "str")
 
+    # A scalar argument flagged server_selectable (e.g. surg_mov_pred's
+    # "model": the *name* of a model hosted on the server) is a choice among
+    # server-side files, not free text: render a dropdown. base_widget
+    # populates it from GET /tools/{tool}/data once the schema is known —
+    # formgen itself never talks HTTP (dependency rule, see ARCHITECTURE.md).
+    if spec.get("server_selectable"):
+        return qt.QComboBox()
+
     if arg_type == "str":
         return qt.QLineEdit()
     if arg_type == "int":
@@ -77,6 +85,10 @@ def collect(arg_widgets: dict) -> dict:
 def _read_widget(widget):
     if isinstance(widget, qt.QCheckBox):
         return widget.isChecked()
+    if isinstance(widget, qt.QComboBox):
+        # "" while the server-side list hasn't been loaded (or is empty) —
+        # which keeps all_required_filled() False and the Apply button disabled.
+        return widget.currentText
     if isinstance(widget, (qt.QSpinBox, qt.QDoubleSpinBox)):
         return widget.value
     if isinstance(widget, ctk.ctkPathLineEdit):
@@ -102,6 +114,8 @@ def all_required_filled(arg_widgets: dict, arguments_schema: dict) -> bool:
 def connect_changed(widget, callback) -> None:
     if isinstance(widget, qt.QCheckBox):
         widget.toggled.connect(callback)
+    elif isinstance(widget, qt.QComboBox):
+        widget.currentTextChanged.connect(callback)
     elif isinstance(widget, (qt.QSpinBox, qt.QDoubleSpinBox)):
         widget.valueChanged.connect(callback)
     elif isinstance(widget, ctk.ctkPathLineEdit):

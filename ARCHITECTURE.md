@@ -123,6 +123,13 @@ since `client.py` has no Slicer dependency to avoid).
   function instead of comparing against the literal string `"file"` — so a
   new `..._file` type the server introduces needs no client-side code change.
   Exported from `ServerToolsCoreLib/__init__.py` alongside `get_client()`.
+- `list_tool_data(tool_name)` → `{"models": [...], "testfiles": [...]}` — the
+  file names hosted server-side for this tool (`GET /tools/{tool}/data`,
+  Bearer-protected unlike `/tools`). Backs the server-selectable dropdowns
+  (see `formgen.py` / `base_widget.py` below). Not cached: fetched once per
+  module `setup()`, since the server-side list can change independently of
+  the `/tools` schema. Uses `_TOOLS_FETCH_TIMEOUT`, same rationale as the
+  schema fetch.
 - `run(tool_name, args=None, files=None, output_dir=None, progress_cb=None)`
   → `ToolResult(kind="text"|"file", text=..., path=...)`. `files` is
   `{schema_argument_name: local_file_path}` — **there is no single reserved
@@ -186,7 +193,7 @@ A subclass declares:
 ```python
 class SurgMovPredWidget(ServerToolWidgetBase):
     TOOL_NAME   = "surg_mov_pred"
-    FILE_INPUTS = {"input": "folder_zip", "model": "single_file"}   # {schema_arg_name: mode}
+    FILE_INPUTS = {"input": "folder_zip"}   # {schema_arg_name: mode}
     RESULT_KIND = "save_as"         # "text" | "segmentation" | "volume" | "model" | "save_as"
     AUTO_UI     = True              # False → override buildCustomUI()
 ```
@@ -205,8 +212,8 @@ Overridable hooks (kept deliberately few):
 (per `is_file_type`) argument the tool's schema declares that the client
 provides. A tool with a
 single file input declares a one-entry dict (e.g. `{"file": "volume_node"}`);
-a tool needing several independent files, like the real `surg_mov_pred`
-(`"model"` + `"input"`), just adds another entry — no other code changes. Each
+a tool needing several independent files just adds another entry — no other
+code changes. Each
 entry builds one row in the "Inputs" section, labeled from the argument name,
 and `prepareInputFiles`'s default handles all three modes per entry:
 
@@ -264,6 +271,7 @@ fields) into a `qt.QFormLayout`, using the type table below, and returns
 
 | Schema `type` | Qt widget |
 |---|---|
+| any non-file type with `server_selectable` set | `QComboBox` (populated by `base_widget._populateServerSelectables` from `GET /tools/{tool}/data` — `formgen` itself never talks HTTP) |
 | `str` | `QLineEdit` |
 | `int` | `QSpinBox` |
 | `float` | `QDoubleSpinBox` |
@@ -365,32 +373,36 @@ Developer mode's "Reload") to see the new fields.
 ```python
 class SurgMovPredWidget(ServerToolWidgetBase):
     TOOL_NAME   = "surg_mov_pred"
-    FILE_INPUTS = {"input": "folder_zip", "model": "folder_zip"}
+    FILE_INPUTS = {"input": "folder_zip"}
     RESULT_KIND = "save_as"
     AUTO_UI     = True
 ```
 
 That, plus the standard `ScriptedLoadableModule` metadata class, is the entire
-file (~35 lines). No overrides are needed: both the input folder of
-`.csv`/`.xlsx`/`.ods` files and the model folder are zipped automatically, and
-the result is written to a user-chosen output folder. (`model` is
-`"folder_zip"` rather than `"single_file"`: the user picks a folder of model
-files, not an already-zipped archive — either mode works against the real
-schema, since the server only cares that it receives a zip under the `model`
-field; `folder_zip` was chosen so users don't have to zip anything by hand.)
+file (~35 lines). No overrides are needed: the input folder of
+`.csv`/`.xlsx`/`.ods` files is zipped automatically, and the result is written
+to a user-chosen output folder.
 
-**Correction to the original plan**: the brief this was built from stated that
-`modelPath` "disappears from the client — it is server configuration" and that
-"the widget must no longer expose a model selector." That does not hold
-against the actual running server: its `surg_mov_pred` schema declares
-`"model"` as a required file-type argument (`"type": "zip_file"`, description:
-*"Model package: a zip archive containing one or more stacking_package.pkl
-files"*) — the client is expected to upload a model package on every call,
-not rely on server-side config. `FILE_INPUTS` reflects
-reality over the original plan; if the intent really was "model lives on the
-server," that's a server-side change to make (drop `"model"` from the
-`surg_mov_pred` schema and read the model path from server config instead),
-not something the client can paper over.
+**The model is selected on the server, not uploaded.** The server's
+`surg_mov_pred` schema declares `"model"` as
+`{"type": "str", "server_selectable": "model", "required": true}`: the client
+sends the *name* of a model hosted in the server's data store, and the server
+resolves it internally (`GET /tools/surg_mov_pred/data` lists what's
+available). Client-side this needs zero SurgMovPred-specific code: any scalar
+argument flagged `server_selectable` is rendered by `formgen` as a `QComboBox`
+and populated by `base_widget._populateServerSelectables` via
+`client.list_tool_data()` — the value collected is the selected name, sent as
+a plain form field. An unreachable server or an empty model list surfaces as a
+visible warning label in the panel, and the Apply button stays disabled while
+the dropdown is empty (an empty `currentText` fails
+`formgen.all_required_filled`). Uploading a local model package is not just
+unsupported client-side, the server actively rejects a file upload for a
+scalar argument with a 400. (Historical note: an earlier iteration had
+`"model"` as a second `zip_file` upload — `FILE_INPUTS = {"input":
+"folder_zip", "model": "folder_zip"}` — because the server of the time
+required it. The multi-file upload machinery it forced into `client.run()` /
+`FILE_INPUTS` remains, and is still exercised by tests, for any future tool
+with several genuine file inputs.)
 
 ### `SurgMovPred_CLI`
 

@@ -188,6 +188,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         for widget in self._argWidgets.values():
             formgen.connect_changed(widget, self._checkCanApply)
 
+        self._populateServerSelectables(rootLayout)
+
         if self.RESULT_KIND == "save_as":
             outputsBox = ctk.ctkCollapsibleButton()
             outputsBox.text = _("Outputs")
@@ -220,6 +222,58 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         layout.addRow(design.required_label(label), widget)
         formgen.connect_changed(widget, self._checkCanApply)
         return widget
+
+    def _populateServerSelectables(self, rootLayout) -> None:
+        """Fill every server_selectable dropdown (see formgen._make_widget)
+        with the file names hosted on the server for this tool, from
+        GET /tools/{tool}/data — e.g. surg_mov_pred's "model" argument, which
+        is picked among the server's models by name, never uploaded.
+
+        Synchronous like the schema fetch just above, and for the same reason:
+        the form needs its choices before the first paint, and the call is
+        capped at the same short timeout. A failure (or an empty list) shows a
+        visible warning instead of leaving a silently empty dropdown.
+        """
+        arguments = self._schema.get("arguments", {})
+        # File-typed server_selectable arguments (e.g. an uploadable-or-server
+        # testfile) are handled by FILE_INPUTS, never emitted by formgen.build
+        # — so restricting to _argWidgets naturally keeps only the scalar ones.
+        selectable = {
+            name: spec["server_selectable"]
+            for name, spec in arguments.items()
+            if spec.get("server_selectable") and name in self._argWidgets
+        }
+        if not selectable:
+            return
+
+        try:
+            data = self.client.list_tool_data(self.TOOL_NAME)
+        except ServerToolError as exc:
+            logger.warning("Could not list server-side data for '%s': %s", self.TOOL_NAME, exc)
+            rootLayout.addWidget(
+                design.warning_label(
+                    _("Could not list the server-side files for '{tool}': {error}").format(
+                        tool=self.TOOL_NAME, error=exc
+                    )
+                )
+            )
+            return
+
+        for arg_name, kind in selectable.items():
+            choices = data.get("models" if kind == "model" else "testfiles", [])
+            widget = self._argWidgets[arg_name]
+            widget.clear()
+            widget.addItems(choices)
+            logger.info("Populated '%s.%s' with %d server-side %s(s)",
+                        self.TOOL_NAME, arg_name, len(choices), kind)
+            if not choices:
+                rootLayout.addWidget(
+                    design.warning_label(
+                        _("No {kind} available on the server for '{tool}' — ask the server maintainer to add one.").format(
+                            kind=kind, tool=self.TOOL_NAME
+                        )
+                    )
+                )
 
     def _applyFileArgumentTooltips(self) -> None:
         """Use the server's own description for each file input, once the
