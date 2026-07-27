@@ -101,6 +101,12 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.applyButton.clicked.connect(self.onApplyButton)
         self.cancelButton.clicked.connect(self.onCancelButton)
 
+        # Without a trailing stretch, QVBoxLayout spreads its (Preferred-policy)
+        # widgets across the whole module panel height instead of packing them
+        # at the top — the same reason every hand-written .ui file in this repo
+        # ends with a vertical spacer.
+        rootLayout.addStretch(1)
+
         design.apply(self.uiWidget)
 
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)

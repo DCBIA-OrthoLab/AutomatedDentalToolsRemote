@@ -44,6 +44,15 @@ what testing against the real dev server surfaced. Each is explained in
   zip containers internally, a returned `predictions_outputs.xlsx` was being
   wrongly "extracted" into raw XML parts. Fixed to decide from the resolved
   filename's extension only (`slicer_io.is_extractable_archive`).
+- **Added beyond the original brief: a runtime settings module.** The brief's
+  "constants at the top of a config file" decision (below) covered defaults,
+  but not how a user changes server URL/API key/TLS/timeout without editing
+  source and rebuilding. Added `ServerToolsSettings` (a small visible module,
+  4 fields matching `config.py`) backed by `qt.QSettings` (persists across
+  restarts) and `ToolServerClient.configure()` (applies immediately, no
+  restart needed, via the shared `get_client()` singleton). `config.py`
+  remains the compiled-in defaults; `QSettings` is the optional user override
+  on top. See ARCHITECTURE.md, "Runtime configuration".
 
 Local/dev server endpoints, tokens, and any other non-public details used
 while testing are kept out of this file — see `claude.secret.md` (gitignored,

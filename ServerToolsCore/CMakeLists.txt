@@ -19,6 +19,7 @@ set(MODULE_PYTHON_SCRIPTS
   ServerToolsCoreLib/formgen.py
   ServerToolsCoreLib/worker.py
   ServerToolsCoreLib/base_widget.py
+  ServerToolsCoreLib/settings_qt.py
   )
 
 set(MODULE_PYTHON_RESOURCES

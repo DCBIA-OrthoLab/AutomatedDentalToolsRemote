@@ -58,6 +58,7 @@ add_subdirectory(GreedyReg_CLI)
 add_subdirectory(Agent)
 add_subdirectory(Agent_CLI)
 add_subdirectory(ServerToolsCore)
+add_subdirectory(ServerToolsSettings)
 add_subdirectory(SurgMovPred)
 ## NEXT_MODULE
 

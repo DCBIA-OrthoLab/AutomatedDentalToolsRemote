@@ -62,6 +62,42 @@ class ToolServerClient:
         self._tools_cache = None
 
     # ------------------------------------------------------------------
+    # Live (re)configuration — e.g. from a user-facing settings panel
+    # ------------------------------------------------------------------
+
+    @property
+    def server_url(self) -> str:
+        return self._server_url
+
+    @property
+    def token(self) -> str:
+        return self._token
+
+    @property
+    def verify_tls(self) -> bool:
+        return self._verify_tls
+
+    @property
+    def timeout(self) -> int:
+        return self._timeout
+
+    def configure(self, server_url=None, token=None, verify_tls=None, timeout=None) -> None:
+        """Update connection settings on the already-constructed singleton in
+        place, so every module sharing get_client() sees the change without a
+        Slicer restart. Drops the cached /tools schema unconditionally — it
+        may belong to a different server entirely once any of these change.
+        """
+        if server_url is not None:
+            self._server_url = server_url.rstrip("/")
+        if token is not None:
+            self._token = token
+        if verify_tls is not None:
+            self._verify_tls = verify_tls
+        if timeout is not None:
+            self._timeout = timeout
+        self._tools_cache = None
+
+    # ------------------------------------------------------------------
     # Schema discovery
     # ------------------------------------------------------------------
 

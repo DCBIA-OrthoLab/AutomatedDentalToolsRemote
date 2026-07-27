@@ -55,6 +55,42 @@ class ToolServerClientTest(unittest.TestCase):
     def test_server_url_is_normalized(self):
         self.assertEqual(self.client._server_url, "https://example.org")
 
+    # -- configure() (live settings panel updates) -----------------------
+
+    def test_configure_updates_fields(self):
+        self.client.configure(server_url="http://other.org/", token="new-token", verify_tls=False, timeout=42)
+
+        self.assertEqual(self.client.server_url, "http://other.org")
+        self.assertEqual(self.client.token, "new-token")
+        self.assertFalse(self.client.verify_tls)
+        self.assertEqual(self.client.timeout, 42)
+
+    def test_configure_partial_update_leaves_other_fields(self):
+        self.client.configure(token="only-token-changes")
+
+        self.assertEqual(self.client.server_url, "https://example.org")
+        self.assertEqual(self.client.token, "only-token-changes")
+        self.assertTrue(self.client.verify_tls)
+        self.assertEqual(self.client.timeout, 600)
+
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_configure_drops_cached_tools(self, mock_get):
+        mock_get.return_value = _response(json_data=TOOLS_RESPONSE)
+        self.client.list_tools()
+        self.assertEqual(mock_get.call_count, 1)
+
+        self.client.configure(server_url="http://other.org")
+
+        mock_get.return_value = _response(json_data=[])
+        self.client.list_tools()
+        self.assertEqual(mock_get.call_count, 2)  # re-fetched, not served from the old cache
+
+    def test_properties_reflect_constructor_defaults(self):
+        self.assertEqual(self.client.server_url, "https://example.org")
+        self.assertEqual(self.client.token, "secret-token")
+        self.assertTrue(self.client.verify_tls)
+        self.assertEqual(self.client.timeout, 600)
+
     # -- list_tools / get_tool_schema ---------------------------------
 
     @mock.patch("ServerToolsCoreLib.client.requests.get")

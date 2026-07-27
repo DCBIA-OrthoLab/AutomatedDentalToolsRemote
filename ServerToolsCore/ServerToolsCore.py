@@ -21,3 +21,12 @@ class ServerToolsCore(ScriptedLoadableModule):
             "— see ARCHITECTURE.md at the repository root."
         )
         self.parent.acknowledgementText = ""
+
+        # Runs once, when Slicer discovers this module at startup — before any
+        # tool module is opened. Applies any server URL/API key/etc. the user
+        # saved via "Server Tools Settings" in a previous session, on top of
+        # config.py's compiled-in defaults.
+        from ServerToolsCoreLib import get_client
+        from ServerToolsCoreLib.settings_qt import apply_saved_overrides
+
+        apply_saved_overrides(get_client())

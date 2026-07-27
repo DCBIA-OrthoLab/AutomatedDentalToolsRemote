@@ -16,25 +16,30 @@ and inherit everything else.
 
 ```
 SlicerAutomatedDentalTools/
-├── CMakeLists.txt                          # add_subdirectory(ServerToolsCore) then add_subdirectory(SurgMovPred)
+├── CMakeLists.txt                          # add_subdirectory for each module below
 ├── ARCHITECTURE.md                         # this file
 ├── ServerToolsCore/                        # hidden scripted module, no GUI
 │   ├── CMakeLists.txt
 │   ├── ServerToolsCore.py                  # ScriptedLoadableModule shell, parent.hidden = True
+│   │                                        # (also applies saved settings on Slicer startup)
 │   ├── Testing/Python/test_client.py       # plain unittest, requests mocked, no Slicer needed
 │   └── ServerToolsCoreLib/                 # the importable Python package
 │       ├── __init__.py                     # get_client() + ToolServerClient/ToolResult/ServerToolError
-│       ├── config.py                       # SERVER_URL, API_TOKEN, VERIFY_TLS, TIMEOUT
+│       ├── config.py                       # SERVER_URL, API_TOKEN, VERIFY_TLS, TIMEOUT (compiled-in defaults)
 │       ├── client.py                       # ToolServerClient — the only class that speaks HTTP
 │       ├── errors.py                       # ServerToolError + HTTP status → message mapping
 │       ├── slicer_io.py                    # TempWorkspace, node export, zip/unzip, result loading
 │       ├── design.py                       # theme tokens, dark/light detection, styled-widget factories
 │       ├── formgen.py                      # /tools schema → Qt widgets, and back
 │       ├── worker.py                       # off-UI-thread execution (BackgroundJob)
-│       └── base_widget.py                  # ServerToolWidgetBase: all the Slicer boilerplate
+│       ├── base_widget.py                  # ServerToolWidgetBase: all the Slicer boilerplate
+│       └── settings_qt.py                  # QSettings-backed override of config.py's defaults
+├── ServerToolsSettings/                    # visible module: edit server URL/API key/TLS/timeout
+│   ├── CMakeLists.txt
+│   └── ServerToolsSettings.py
 ├── SurgMovPred/
 │   ├── CMakeLists.txt
-│   └── SurgMovPred.py                      # ~30 lines, declarative
+│   └── SurgMovPred.py                      # ~35 lines, declarative
 └── SurgMovPred_CLI/                        # left in place but unwired (see "SurgMovPred_CLI" below)
 ```
 
@@ -159,6 +164,13 @@ since `client.py` has no Slicer dependency to avoid).
   propagated verbatim (already explicit per the API contract) — `_server_message`
   reads JSON `detail`/`message` first, then falls back to the raw response body
   (truncated to 500 chars) so a plain-text error response isn't dropped.
+- `configure(server_url=None, token=None, verify_tls=None, timeout=None)` /
+  read-only properties `server_url`/`token`/`verify_tls`/`timeout` — updates
+  the already-constructed singleton **in place** (only the fields passed) and
+  unconditionally drops the cached `/tools` schema, since it may no longer
+  belong to the newly-configured server. This is what lets
+  `ServerToolsSettings` change the server URL/API key at runtime without a
+  Slicer restart — see the dedicated section below.
 
 ## `base_widget.py` — `ServerToolWidgetBase`
 
@@ -305,6 +317,48 @@ actually interrupted (see limitations).
 `unzip_folder`, and `load_result(path, kind)` (dispatch to `loadSegmentation`/
 `loadVolume`/`loadModel`/`loadTransform`) are the only functions in the
 extension that touch node I/O directly.
+
+## Runtime configuration: `ServerToolsSettings` + `settings_qt.py`
+
+`config.py` holds the **compiled-in defaults**; users need a way to point the
+extension at a different server (URL, API key, TLS verification, timeout)
+without editing source and rebuilding. Two pieces:
+
+- **`settings_qt.py`** (in `ServerToolsCoreLib`, not imported by `__init__.py`):
+  reads/writes a `qt.QSettings()` group (`"ServerTools"`, one key per field).
+  `QSettings` is Slicer's native prefs mechanism — an ini/plist file on disk,
+  independent of the Slicer process, so it survives restarts. Kept out of
+  `__init__.py` on purpose: it imports `qt`, and the package must stay
+  importable outside Slicer for `client.py`'s unit tests (see the dependency
+  rule above). Only Slicer-side code imports it directly.
+  - `load_overrides()` → `{}` if the user never saved anything, otherwise only
+    the fields that were actually saved.
+  - `save_overrides(server_url, token, verify_tls, timeout)`,
+    `clear_overrides()` ("restore defaults" — removes the whole group).
+  - `apply_saved_overrides(client)` — applies `load_overrides()` onto a
+    `ToolServerClient` via `configure()`, if any override exists.
+- **`ServerToolsCore.py`** calls `apply_saved_overrides(get_client())` in its
+  `__init__` — this runs once, when Slicer discovers the module at startup
+  (before any tool module is opened), so a setting saved in a previous
+  session is already active by the time the user opens e.g. `SurgMovPred`.
+- **`ServerToolsSettings`** (new visible module, category
+  `"Automated Dental Tools.Advanced"`, depends on `ServerToolsCore`): a plain
+  `ScriptedLoadableModuleWidget` (not a `ServerToolWidgetBase` — its Apply/
+  async-job machinery is for calling remote tools, not for a local save
+  action) with four fields matching `config.py` 1:1 (Server URL, API key as a
+  password-masked `QLineEdit`, Verify TLS checkbox, Timeout spinbox), styled
+  via `design.py` for consistency. **Save** calls both `save_overrides(...)`
+  (persists) and `client.configure(...)` (applies immediately, no restart
+  needed — every module sees it since they all share the same `get_client()`
+  singleton). **Restore defaults** calls `clear_overrides()` and
+  `client.configure(...)` back to `config.py`'s values.
+
+**Limitation**: changing the server while a tool module (e.g. `SurgMovPred`)
+is already open updates its `client` (same singleton) but does **not**
+retroactively rebuild that widget's already-built AUTO_UI form — `_buildAutoUI`
+only runs once, in `setup()`. If the new server has a different schema for the
+same tool name, the user needs to close and reopen the module (or use
+Developer mode's "Reload") to see the new fields.
 
 ## `SurgMovPred`
 
