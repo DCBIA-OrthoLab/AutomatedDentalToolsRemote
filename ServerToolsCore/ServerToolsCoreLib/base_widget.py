@@ -58,6 +58,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._inputWidgets = {}  # {schema_argument_name: widget}
         self._outputFolderWidget = None
         self._statusBadge = None
+        self._statusJob = None
         self.uiWidget = None
 
     # ------------------------------------------------------------------
@@ -114,11 +115,21 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self._checkCanApply()
 
+        # Also kick off the health check here, not only in enter(): a module
+        # reload re-instantiates the widget and calls setup() but never enter()
+        # (see slicer.util.reloadScriptedModule), which would leave the freshly
+        # created badge stuck on "checking..." until the user leaves the module
+        # and comes back.
+        self._refreshServerStatus()
+
     def cleanup(self) -> None:
         self.removeObservers()
         if self._job:
             self._job.cancel()
             self._job = None
+        if self._statusJob:
+            self._statusJob.cancel()
+            self._statusJob = None
         if self._workspace:
             self._workspace.__exit__(None, None, None)
             self._workspace = None
@@ -438,12 +449,25 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # ------------------------------------------------------------------
 
     def _refreshServerStatus(self) -> None:
+        """Keep the job on the instance, never in a local: a BackgroundJob is
+        only kept alive by its own reference cycle (job -> QTimer -> bound
+        _drain -> job), so a cyclic-GC pass — a module reload triggers one —
+        can collect it mid-flight. Its timer dies with it, the callback never
+        runs, and the badge stays stuck on "checking...". Owning it also lets
+        cleanup() cancel it, so a job started by a widget Qt has since deleted
+        can't write into a destroyed badge."""
+        if self._statusJob:
+            self._statusJob.cancel()
+
         def task(_progress_cb):
             return self.client.health()
 
-        job = BackgroundJob(task, on_success=self._onStatusChecked, on_error=lambda _exc: self._onStatusChecked(False))
-        job.start()
+        self._statusJob = BackgroundJob(
+            task, on_success=self._onStatusChecked, on_error=lambda _exc: self._onStatusChecked(False)
+        )
+        self._statusJob.start()
 
     def _onStatusChecked(self, ok: bool) -> None:
+        self._statusJob = None
         if self._statusBadge:
             design.update_status_badge(self._statusBadge, ok)

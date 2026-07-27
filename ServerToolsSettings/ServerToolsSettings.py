@@ -40,6 +40,7 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         self.client = get_client()
         self.uiWidget = None
         self._statusBadge = None
+        self._statusJob = None
 
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
@@ -85,6 +86,11 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         design.apply(self.uiWidget)
         self._loadFromClient()
 
+    def cleanup(self) -> None:
+        if self._statusJob:
+            self._statusJob.cancel()
+            self._statusJob = None
+
     def enter(self) -> None:
         design.apply(self.uiWidget)
         self._refreshStatus()
@@ -126,12 +132,19 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         slicer.util.showStatusMessage(_("Restored default server settings."), 3000)
 
     def _refreshStatus(self) -> None:
+        """Owned by the widget, not a local — see ServerToolWidgetBase._refreshServerStatus()."""
+        if self._statusJob:
+            self._statusJob.cancel()
+
         def task(_progress_cb):
             return self.client.health()
 
-        job = BackgroundJob(task, on_success=self._onStatusChecked, on_error=lambda _exc: self._onStatusChecked(False))
-        job.start()
+        self._statusJob = BackgroundJob(
+            task, on_success=self._onStatusChecked, on_error=lambda _exc: self._onStatusChecked(False)
+        )
+        self._statusJob.start()
 
     def _onStatusChecked(self, ok: bool) -> None:
+        self._statusJob = None
         if self._statusBadge:
             design.update_status_badge(self._statusBadge, ok)
