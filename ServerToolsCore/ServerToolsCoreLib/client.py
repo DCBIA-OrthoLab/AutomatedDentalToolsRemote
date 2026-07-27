@@ -124,6 +124,39 @@ class ToolServerClient:
             raise ServerToolError(f"Unknown tool '{tool_name}'. Available: {available}")
         return tools[tool_name]
 
+    def list_tool_data(self, tool_name: str) -> dict:
+        """Return {"models": [...], "testfiles": [...]} — the file names hosted
+        on the server for this tool (GET /tools/{tool}/data, Bearer-protected).
+
+        This is what lets a server_selectable argument (e.g. surg_mov_pred's
+        "model") be offered as a dropdown of server-side choices instead of a
+        local file picker. Not cached: called once per module setup(), and the
+        server-side list can change independently of the /tools schema.
+        """
+        try:
+            response = requests.get(
+                f"{self._server_url}/tools/{tool_name}/data",
+                headers={"Authorization": f"Bearer {self._token}"},
+                timeout=_TOOLS_FETCH_TIMEOUT,
+                verify=self._verify_tls,
+            )
+        except requests.RequestException as exc:
+            raise ServerToolError(f"Could not reach the tool server: {exc}") from exc
+
+        if not response.ok:
+            raise error_for_status(response.status_code, self._server_message(response))
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise ServerToolError(f"Malformed response from the tool server: {exc}") from exc
+
+        logger.info(
+            "GET %s/tools/%s/data -> %d model(s), %d testfile(s)",
+            self._server_url, tool_name, len(data.get("models", [])), len(data.get("testfiles", [])),
+        )
+        return {"models": data.get("models", []), "testfiles": data.get("testfiles", [])}
+
     def _fetch_tools(self) -> dict:
         try:
             response = requests.get(

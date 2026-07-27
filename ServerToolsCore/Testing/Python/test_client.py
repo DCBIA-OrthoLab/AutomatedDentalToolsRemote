@@ -145,6 +145,44 @@ class ToolServerClientTest(unittest.TestCase):
         with self.assertRaises(ServerToolError):
             self.client.list_tools()
 
+    # -- list_tool_data (server-side models/testfiles) -----------------
+
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_list_tool_data_request_shape_and_result(self, mock_get):
+        mock_get.return_value = _response(
+            json_data={"models": ["stacking_v1.zip", "stacking_v2.zip"], "testfiles": ["demo.zip"]}
+        )
+
+        data = self.client.list_tool_data("surg_mov_pred")
+
+        self.assertEqual(data, {"models": ["stacking_v1.zip", "stacking_v2.zip"], "testfiles": ["demo.zip"]})
+        args, kwargs = mock_get.call_args
+        self.assertEqual(args[0], "https://example.org/tools/surg_mov_pred/data")
+        # The endpoint is Bearer-protected, unlike /tools.
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer secret-token")
+        # Called synchronously from a module's setup(), like the schema fetch:
+        # must use the short timeout, never the 600s tool-execution one.
+        self.assertEqual(kwargs["timeout"], _TOOLS_FETCH_TIMEOUT)
+
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_list_tool_data_tolerates_missing_keys(self, mock_get):
+        mock_get.return_value = _response(json_data={})
+
+        self.assertEqual(self.client.list_tool_data("surg_mov_pred"), {"models": [], "testfiles": []})
+
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_list_tool_data_network_error_wrapped(self, mock_get):
+        mock_get.side_effect = requests.RequestException("boom")
+        with self.assertRaises(ServerToolError):
+            self.client.list_tool_data("surg_mov_pred")
+
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_list_tool_data_maps_error_status(self, mock_get):
+        mock_get.return_value = _response(status_code=401, json_data={})
+        with self.assertRaises(ServerToolError) as ctx:
+            self.client.list_tool_data("surg_mov_pred")
+        self.assertEqual(ctx.exception.status_code, 401)
+
     # -- local validation ----------------------------------------------
 
     @mock.patch("ServerToolsCoreLib.client.requests.get")
@@ -553,56 +591,65 @@ class RealServerSchemaTest(unittest.TestCase):
         # (schema-driven), not a generic/unrelated failure.
         self.assertIn("example_tool", str(ctx.exception))
 
+    # The real surg_mov_pred schema since the model moved fully server-side:
+    # "model" is a scalar str (the *name* of a server-hosted model, picked
+    # from GET /tools/{tool}/data), only "input" is still uploaded.
+    _SURG_MOV_PRED_SCHEMA = [
+        {
+            "name": "surg_mov_pred",
+            "arguments": {
+                "model": {"type": "str", "required": True, "server_selectable": "model"},
+                "input": {"type": "zip_file", "required": True, "server_selectable": "testfile"},
+            },
+            "output_kind": "file",
+        }
+    ]
+
     @mock.patch("ServerToolsCoreLib.client.requests.post")
     @mock.patch("ServerToolsCoreLib.client.requests.get")
-    def test_surg_mov_pred_zip_file_arguments_both_required(self, mock_get, mock_post):
-        mock_get.return_value = _response(
-            json_data=[
-                {
-                    "name": "surg_mov_pred",
-                    "arguments": {
-                        "model": {"type": "zip_file", "required": True},
-                        "input": {"type": "zip_file", "required": True},
-                    },
-                    "output_kind": "file",
-                }
-            ]
-        )
+    def test_surg_mov_pred_sends_model_name_as_form_value(self, mock_get, mock_post):
+        mock_get.return_value = _response(json_data=self._SURG_MOV_PRED_SCHEMA)
         mock_post.return_value = _response(content=b"zip", headers={"Content-Type": "application/zip"})
 
         import tempfile
 
         with tempfile.TemporaryDirectory() as out_dir:
-            # Both files provided: must pass validation and reach requests.post.
             self.client.run(
-                "surg_mov_pred", args={}, files={"model": __file__, "input": __file__}, output_dir=out_dir
+                "surg_mov_pred",
+                args={"model": "stacking_v2.zip"},
+                files={"input": __file__},
+                output_dir=out_dir,
             )
-        self.assertTrue(mock_post.called)
+
+        _, kwargs = mock_post.call_args
+        # The model travels as a plain form value (its server-side name)...
+        self.assertEqual(kwargs["data"], {"model": "stacking_v2.zip"})
+        # ...and only "input" is uploaded as a file.
+        self.assertEqual(set(kwargs["files"].keys()), {"input"})
 
     @mock.patch("ServerToolsCoreLib.client.requests.get")
-    def test_surg_mov_pred_does_not_leak_into_scalar_args(self, mock_get):
-        # Before is_file_type(), "model"/"input" (type "zip_file") were
-        # wrongly treated as required *scalar* arguments, since they don't
-        # equal the literal string "file" — this must no longer happen.
-        mock_get.return_value = _response(
-            json_data=[
-                {
-                    "name": "surg_mov_pred",
-                    "arguments": {
-                        "model": {"type": "zip_file", "required": True},
-                        "input": {"type": "zip_file", "required": True},
-                    },
-                    "output_kind": "file",
-                }
-            ]
-        )
-        schema = self.client.get_tool_schema("surg_mov_pred")
+    def test_surg_mov_pred_missing_model_name_fails_locally(self, mock_get):
+        mock_get.return_value = _response(json_data=self._SURG_MOV_PRED_SCHEMA)
 
-        # Supplying both as files (not as scalar args) must satisfy validation.
-        try:
-            self.client._validate_against_schema(schema, {}, {"model": __file__, "input": __file__})
-        except ServerToolError as exc:
-            self.fail(f"zip_file arguments must be satisfied via `files`, not `args`: {exc}")
+        with self.assertRaises(ServerToolError) as ctx:
+            self.client._validate_against_schema(
+                self.client.get_tool_schema("surg_mov_pred"), {}, {"input": __file__}
+            )
+        self.assertIn("model", str(ctx.exception))
+
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_surg_mov_pred_model_is_not_a_file_argument(self, mock_get):
+        # Uploading a local model package is no longer supported: "model" is a
+        # scalar, so passing it under `files` must be rejected before any
+        # network round-trip.
+        mock_get.return_value = _response(json_data=self._SURG_MOV_PRED_SCHEMA)
+
+        with self.assertRaises(ServerToolError):
+            self.client._validate_against_schema(
+                self.client.get_tool_schema("surg_mov_pred"),
+                {},
+                {"model": __file__, "input": __file__},
+            )
 
 
 if __name__ == "__main__":
