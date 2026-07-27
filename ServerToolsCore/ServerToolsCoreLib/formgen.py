@@ -50,7 +50,7 @@ def build(arguments_schema: dict, layout) -> dict:
 def _make_widget(name: str, spec: dict):
     arg_type = spec.get("type", "str")
 
-    # A scalar argument flagged server_selectable (e.g. surg_mov_pred's
+    # A scalar argument flagged server_selectable (e.g. SurgMovPred's
     # "model": the *name* of a model hosted on the server) is a choice among
     # server-side files, not free text: render a dropdown. base_widget
     # populates it from GET /tools/{tool}/data once the schema is known —

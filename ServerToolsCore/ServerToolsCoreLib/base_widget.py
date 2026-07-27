@@ -215,7 +215,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _populateServerSelectables(self, rootLayout) -> None:
         """Fill every server_selectable dropdown (see formgen._make_widget)
         with the file names hosted on the server for this tool, from
-        GET /tools/{tool}/data — e.g. surg_mov_pred's "model" argument, which
+        GET /tools/{tool}/data — e.g. SurgMovPred's "model" argument, which
         is picked among the server's models by name, never uploaded.
 
         Synchronous like the schema fetch just above, and for the same reason:

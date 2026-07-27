@@ -30,7 +30,7 @@ class SurgMovPredWidget(ServerToolWidgetBase):
     """Thin GUI: everything else (HTTP, async, form generation, styling, lifecycle)
     lives in ServerToolsCoreLib. See ARCHITECTURE.md."""
 
-    TOOL_NAME = "surg_mov_pred"
+    TOOL_NAME = "SurgMovPred"
     # Only "input" (folder of measurement files, zipped client-side) is a file
     # the user provides. "model" is a server-side choice: the schema declares
     # it as a server_selectable str, so the auto-UI renders it as a dropdown
