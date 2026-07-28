@@ -1,9 +1,9 @@
 """Generic Slicer widget for any tool exposed by the tool server.
 
-A concrete module declares a handful of class attributes (TOOL_NAME,
-FILE_INPUTS, RESULT_KIND) and optionally overrides a few hooks; everything
-else — Slicer lifecycle, schema-driven GUI, theme, async call, error
-handling, temp-file cleanup — is inherited from here.
+A concrete module declares TOOL_NAME, optionally overrides what its tool's
+schema cannot state (FILE_INPUTS, RESULT_KIND) and optionally overrides a few
+hooks; everything else — Slicer lifecycle, schema-driven GUI, theme, async
+call, error handling, temp-file cleanup — is inherited from here.
 
 See ARCHITECTURE.md, "How to add a new module in 5 minutes".
 """
@@ -26,18 +26,30 @@ logger = logging.getLogger("ServerToolsCore.base_widget")
 
 # "auto" is the schema-driven default: the argument's `types` decide whether it
 # gets a file picker, a folder picker, or the choice between both (and which
-# extensions the file picker offers). The explicit modes stay available for
-# what the schema cannot express — picking a volume from the MRML scene — or to
-# force one selection kind for an argument that accepts several.
-_FILE_INPUT_MODES = ("auto", "single_file", "folder_zip", "file_or_folder", "volume_node")
+# extensions the file picker offers). The explicit modes are for what the
+# schema cannot express — picking a volume from the MRML scene — for forcing
+# one selection kind, or ("none") for not offering an argument at all.
+_FILE_INPUT_MODES = ("auto", "single_file", "folder_zip", "file_or_folder", "volume_node", "none")
 _RESULT_KINDS = ("text", "segmentation", "volume", "model", "save_as")
 
 
 class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
+    """Only TOOL_NAME is required. Everything the tool's own schema already
+    states — which arguments are file inputs, what each picker looks like, what
+    comes back — is derived from it (see formgen.file_input_modes and
+    formgen.result_kind_for); the two attributes below are *overrides*, for the
+    handful of things the server cannot know."""
+
     # -- declared by subclasses --------------------------------------
     TOOL_NAME = None
-    FILE_INPUTS = {}  # {schema_argument_name: mode}, see _FILE_INPUT_MODES ("auto" recommended)
-    RESULT_KIND = "text"
+    # {schema_argument_name: mode} merged over the schema's own file arguments.
+    # Only what the schema cannot say: "volume_node", a forced picker kind, or
+    # "none" to leave an optional file argument out. See _FILE_INPUT_MODES.
+    FILE_INPUTS = {}
+    # None -> derived from the tool's output_kind. Declare one only when that
+    # is ambiguous: output_kind "file" says a file comes back, not whether to
+    # load it into the scene ("volume"/"model") or save it ("save_as").
+    RESULT_KIND = None
     AUTO_UI = True
 
     def __init__(self, parent=None):
@@ -49,7 +61,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         for arg_name, mode in self.FILE_INPUTS.items():
             if mode not in _FILE_INPUT_MODES:
                 raise ValueError(f"{type(self).__name__}: unknown file input mode '{mode}' for '{arg_name}'.")
-        if self.RESULT_KIND not in _RESULT_KINDS:
+        if self.RESULT_KIND is not None and self.RESULT_KIND not in _RESULT_KINDS:
             raise ValueError(f"{type(self).__name__}: unknown RESULT_KIND '{self.RESULT_KIND}'.")
 
         # Imported lazily to keep ServerToolsCoreLib importable outside Slicer for tests.
@@ -65,6 +77,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._outputFolderWidget = None
         self._statusBadge = None
         self._statusJob = None
+        self._schemaError = None  # set while the panel could not be built from a schema
+        self._rootLayout = None
+        self._formWidget = None  # the schema-driven part, replaced wholesale on a rebuild
+        self.applyButton = None
+        self.cancelButton = None
         self.uiWidget = None
 
     # ------------------------------------------------------------------
@@ -81,19 +98,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._statusBadge = design.status_badge()
         rootLayout.addWidget(self._statusBadge)
 
-        try:
-            if self.AUTO_UI:
-                self._buildAutoUI(rootLayout)
-            else:
-                self.buildCustomUI(rootLayout)
-        except Exception as exc:
-            # Never leave the user with a silently blank/half-built panel: a bad
-            # CTK/Qt call, a module misconfiguration, etc. must be visible right
-            # here, not just in the Python console.
-            logger.exception("Failed to build the UI for tool '%s'", self.TOOL_NAME)
-            rootLayout.addWidget(
-                design.warning_label(_("Could not build this module's UI: {error}").format(error=exc))
-            )
+        # The schema-driven part lives in its own container so it can be thrown
+        # away and rebuilt in place — see _buildForm.
+        self._rootLayout = rootLayout
+        self._buildForm()
 
         extraLayout = qt.QVBoxLayout()
         rootLayout.addLayout(extraLayout)
@@ -158,18 +166,78 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # GUI construction
     # ------------------------------------------------------------------
 
-    def _buildAutoUI(self, rootLayout) -> None:
-        logger.info("Building AUTO_UI for TOOL_NAME='%s' (FILE_INPUTS=%s, RESULT_KIND=%s)",
-                    self.TOOL_NAME, self.FILE_INPUTS, self.RESULT_KIND)
+    def _buildForm(self, force_refresh: bool = False) -> None:
+        """Build the schema-driven part of the panel into a fresh container,
+        replacing the previous one if there was any.
+
+        Called once from setup(), and again by _onStatusChecked when a server
+        that was unreachable at setup() time comes back: the panel is built
+        from the schema, so a failed fetch leaves nothing but an error label,
+        and nothing else would ever clear it — the module would stay broken for
+        the rest of the Slicer session even though the server is back.
+
+        Replacing the whole container rather than clearing a layout keeps this
+        simple and total: no widget of the previous attempt survives, including
+        the error label and any stale server-side dropdown.
+        """
+        formWidget = qt.QWidget()
+        formLayout = qt.QVBoxLayout(formWidget)
+        formLayout.setContentsMargins(0, 0, 0, 0)
+
+        try:
+            if self.AUTO_UI:
+                self._buildAutoUI(formLayout, force_refresh=force_refresh)
+            else:
+                self.buildCustomUI(formLayout)
+        except Exception as exc:
+            # Never leave the user with a silently blank/half-built panel: a bad
+            # CTK/Qt call, a module misconfiguration, etc. must be visible right
+            # here, not just in the Python console.
+            logger.exception("Failed to build the UI for tool '%s'", self.TOOL_NAME)
+            formLayout.addWidget(
+                design.warning_label(_("Could not build this module's UI: {error}").format(error=exc))
+            )
+
+        previous = self._formWidget
+        if previous is None:
+            self._rootLayout.addWidget(formWidget)
+        else:
+            self._rootLayout.insertWidget(self._rootLayout.indexOf(previous), formWidget)
+            # Hide and unparent so the old panel leaves the layout now, but let
+            # Qt destroy it later: this can run from a signal emitted by one of
+            # its own children (the Retry button below).
+            previous.setVisible(False)
+            previous.setParent(None)
+            previous.deleteLater()
+        self._formWidget = formWidget
+
+        if previous is not None:
+            # A rebuild: the stylesheet was applied to widgets that no longer
+            # exist, and the Apply button's state was computed from them.
+            design.apply(self.uiWidget)
+            self._checkCanApply()
+
+    def _onRetryButton(self) -> None:
+        """Rebuild from a fresh /tools fetch. Safe to call from the button's own
+        handler: _buildForm hides the old container and defers its destruction
+        with deleteLater(), so the button outlives the click it is handling."""
+        self._buildForm(force_refresh=True)
+        self._refreshServerStatus()
+
+    def _buildAutoUI(self, rootLayout, force_refresh: bool = False) -> None:
+        logger.info("Building AUTO_UI for TOOL_NAME='%s' (FILE_INPUTS overrides=%s, RESULT_KIND=%s)",
+                    self.TOOL_NAME, self.FILE_INPUTS, self.RESULT_KIND or "<from output_kind>")
 
         # The schema is fetched before any widget is built, not after: a file
         # argument's declared `types` decide what its picker looks like (file,
         # folder, or both — and with which extensions), so the widgets cannot
         # be built without it. The failure path below still builds them, from
         # an empty schema, so the panel is never blank.
-        schemaError = None
+        # _schemaError is what tells _onStatusChecked this panel is worth
+        # rebuilding once the server answers again.
+        self._schemaError = None
         try:
-            self._schema = self.client.get_tool_schema(self.TOOL_NAME)
+            self._schema = self.client.get_tool_schema(self.TOOL_NAME, force_refresh=force_refresh)
             logger.info(
                 "Schema for '%s': output_kind=%s, argument keys=%s",
                 self.TOOL_NAME,
@@ -179,7 +247,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         except ServerToolError as exc:
             logger.warning("Could not load schema for '%s': %s", self.TOOL_NAME, exc)
             self._schema = {"arguments": {}}
-            schemaError = exc
+            self._schemaError = exc
 
         inputsBox = ctk.ctkCollapsibleButton()
         inputsBox.text = _("Inputs")
@@ -188,14 +256,20 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self._inputWidgets = self._buildInputWidgets(inputsLayout)
 
-        if schemaError is not None:
+        if self._schemaError is not None:
             rootLayout.addWidget(
                 design.warning_label(
                     _("Could not load '{tool}' from the server: {error}").format(
-                        tool=self.TOOL_NAME, error=schemaError
+                        tool=self.TOOL_NAME, error=self._schemaError
                     )
                 )
             )
+            # Leaving and re-entering the module also retries (see
+            # _onStatusChecked), but a user staring at this error should not
+            # have to discover that.
+            retryButton = design.primary_button(_("Retry"))
+            retryButton.clicked.connect(self._onRetryButton)
+            rootLayout.addWidget(retryButton)
         else:
             self._warnAboutFileInputsMismatch(rootLayout)
 
@@ -207,7 +281,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self._populateServerSelectables(rootLayout)
 
-        if self.RESULT_KIND == "save_as":
+        if self.resultKind == "save_as":
             outputsBox = ctk.ctkCollapsibleButton()
             outputsBox.text = _("Outputs")
             outputsLayout = qt.QFormLayout(outputsBox)
@@ -218,23 +292,22 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             outputsLayout.addRow(design.required_label(_("Output folder")), self._outputFolderWidget)
             formgen.connect_changed(self._outputFolderWidget, self._checkCanApply)
 
+    @property
+    def resultKind(self) -> str:
+        """RESULT_KIND if the module declares one, otherwise derived from the
+        tool's own output_kind (see formgen.result_kind_for)."""
+        return formgen.result_kind_for((self._schema or {}).get("output_kind"), self.RESULT_KIND)
+
     def _buildInputWidgets(self, layout) -> dict:
-        self._inputModes = {
-            arg_name: self._resolveInputMode(arg_name, mode) for arg_name, mode in self.FILE_INPUTS.items()
-        }
+        # Resolved once, here: each mode is needed both to build the widget and,
+        # later, to know whether the selection has to be zipped before upload.
+        self._inputModes = formgen.file_input_modes(
+            (self._schema or {}).get("arguments", {}), self.FILE_INPUTS
+        )
         return {
             arg_name: self._buildFileInputWidget(layout, arg_name, mode)
             for arg_name, mode in self._inputModes.items()
         }
-
-    def _resolveInputMode(self, arg_name: str, mode: str) -> str:
-        """Turn the schema-driven "auto" mode into a concrete one, from the
-        argument's declared `types` (see formgen.auto_file_mode). Resolved once,
-        here, because the answer is needed both to build the widget and to know
-        whether to zip at upload time."""
-        if mode != "auto":
-            return mode
-        return formgen.auto_file_mode(self._schemaArgument(arg_name))
 
     def _schemaArgument(self, arg_name: str) -> dict:
         return (self._schema or {}).get("arguments", {}).get(arg_name, {})
@@ -314,9 +387,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 )
 
     def _warnAboutFileInputsMismatch(self, rootLayout) -> None:
-        """Catch schema drift early: FILE_INPUTS is written by hand against a
-        remembered schema, so if the server renames/drops a file argument this
-        surfaces immediately instead of failing later with a confusing 422."""
+        """Catch schema drift early. The set of file inputs is derived from the
+        schema and so cannot drift; FILE_INPUTS *overrides* are written by hand
+        against a remembered schema, so an override naming an argument the
+        server no longer declares as a file surfaces immediately here instead
+        of being silently ignored (or failing later with a confusing 422)."""
         declared = {name for name, spec in self._schema.get("arguments", {}).items() if is_file_type(spec.get("type", ""))}
         missing = set(self.FILE_INPUTS) - declared
         if missing:
@@ -345,8 +420,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return formgen.collect(self._argWidgets)
 
     def prepareInputFiles(self, workspace: slicer_io.TempWorkspace) -> dict:
-        """Override for exotic input cases. Default behavior covers all three
-        file input modes for every entry declared in FILE_INPUTS. Returns
+        """Override for exotic input cases. Default behavior covers every file
+        input mode, for each of the tool's file arguments. Returns
         {schema_argument_name: local_file_path}."""
         files = {}
         for arg_name, mode in self._inputModes.items():
@@ -381,11 +456,12 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def handleResult(self, result) -> None:
         """Override for custom result display."""
-        if self.RESULT_KIND == "text":
+        kind = self.resultKind
+        if kind == "text":
             slicer.util.infoDisplay(result.text or "")
-        elif self.RESULT_KIND in ("segmentation", "volume", "model"):
-            slicer_io.load_result(result.path, self.RESULT_KIND)
-        elif self.RESULT_KIND == "save_as":
+        elif kind in ("segmentation", "volume", "model"):
+            slicer_io.load_result(result.path, kind)
+        elif kind == "save_as":
             self._handleSaveAsResult(result)
 
     def _handleSaveAsResult(self, result) -> None:
@@ -409,9 +485,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # ------------------------------------------------------------------
 
     def _checkCanApply(self, *_args) -> None:
+        if not self.applyButton:
+            return  # a widget signal fired while the panel is still being built
         arguments = (self._schema or {}).get("arguments", {})
         canApply = self._inputReady() and formgen.all_required_filled(self._argWidgets, arguments)
-        if self.RESULT_KIND == "save_as":
+        if self.resultKind == "save_as":
             canApply = canApply and bool(self._outputFolderWidget and self._outputFolderWidget.currentPath)
         self.applyButton.enabled = canApply
 
@@ -511,3 +589,15 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._statusJob = None
         if self._statusBadge:
             design.update_status_badge(self._statusBadge, ok)
+
+        # The panel is built from the schema, once. If the server was down when
+        # this module was opened, all it holds is an error label — and the
+        # health check coming back green is the one signal that it is worth
+        # trying again. Without this the module stays broken for the whole
+        # Slicer session, still showing a connection error against a server
+        # that is now up.
+        if ok and self._schemaError is not None and self.uiWidget:
+            logger.info("Server is reachable again, rebuilding the panel for '%s'", self.TOOL_NAME)
+            # force_refresh: the cached /tools may be exactly what is wrong
+            # (fetched from another server, or before this tool was registered).
+            self._buildForm(force_refresh=True)

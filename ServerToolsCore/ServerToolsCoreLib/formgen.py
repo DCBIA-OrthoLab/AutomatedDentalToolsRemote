@@ -6,10 +6,14 @@ to a tool server-side makes it appear here without touching any module code.
 
 File-type arguments (any type accepted by `is_file_type` — "file", "zip_file",
 "nifti_file", ...) are skipped by build()/collect(): they are not generic
-scalar fields, they are produced by base_widget according to the module's
-FILE_INPUTS (see base_widget.py). The *widget* for such an input is still
-built here (`FileOrFolderInput`), so that every "schema shape -> Qt widget"
-decision lives in one file; base_widget only decides which arguments get one.
+scalar fields, they get their own row in base_widget's "Inputs" section. The
+*widget* for such an input is still built here (`file_widget`), so that every
+"schema shape -> Qt widget" decision lives in one file.
+
+So is the translation from the server's vocabulary to the one base_widget acts
+on — `file_input_modes`, `auto_file_mode`, `result_kind_for` — for the same
+reason: it is all "what does the schema say this panel should be". A module
+then declares only what the schema *cannot* say (see file_input_modes).
 
 Two schema types render as several widgets rather than one, so they get a small
 Python holder class each (`MultiChoiceGroup`, `FileOrFolderInput`) instead of a
@@ -275,6 +279,66 @@ def auto_file_mode(spec: dict) -> str:
     if any(is_file_type(type_name) for type_name in argument_types(spec)):
         return "file_or_folder"
     return "folder_zip"
+
+
+def file_input_modes(arguments_schema: dict, overrides=None) -> dict:
+    """`{argument_name: mode}` for every file argument the client provides, in
+    schema order.
+
+    **Which arguments those are is the schema's answer, not a module's**: every
+    file-typed argument gets an input row. A module's `FILE_INPUTS` is merged
+    on top and only has to say what the schema cannot express —
+
+    - `"volume_node"`: filled from a node in the MRML scene rather than from
+      disk. The server does not know a scene exists;
+    - a forced `"folder_zip"`/`"single_file"`: SurgMovPred's `input` is typed
+      `zip_file`, and the module still wants to hand the user a folder picker
+      and zip it client-side. "Give me a zip" is the contract; "let them pick a
+      folder" is an ergonomics decision that lives here;
+    - `"none"`: an optional file argument this module deliberately doesn't
+      offer.
+
+    Everything else stays `"auto"` and is resolved by `auto_file_mode`.
+    """
+    modes = {
+        name: "auto"
+        for name, spec in arguments_schema.items()
+        if is_file_type(spec.get("type", ""))
+    }
+    modes.update(overrides or {})
+
+    resolved = {}
+    for name, mode in modes.items():
+        if mode == "none":
+            continue
+        resolved[name] = auto_file_mode(arguments_schema.get(name, {})) if mode == "auto" else mode
+    return resolved
+
+
+# How a tool's server-side `output_kind` maps onto the client's RESULT_KIND.
+_RESULT_KIND_FOR_OUTPUT = {
+    "text": "text",
+    "segmentation": "segmentation",
+    "file": "save_as",
+    "files": "save_as",
+}
+
+
+def result_kind_for(output_kind, declared=None) -> str:
+    """The client's RESULT_KIND for a tool's declared `output_kind`.
+
+    Three of the server's four output kinds settle the question on their own:
+    `text` is text, `segmentation` is a segmentation, and `files` can only be
+    saved (a zip of several files cannot become one MRML node).
+
+    **`file` is the one genuinely ambiguous case**: the server says a single
+    file comes back, it cannot say whether that file is meant to be loaded into
+    the scene as a volume or as a mesh, or just written to disk — that is MRML
+    knowledge, and the server has no business holding it. It defaults to
+    `save_as`, and a module wanting the result loaded declares
+    `RESULT_KIND = "volume"` / `"model"`. A declared value always wins.
+    """
+    return declared or _RESULT_KIND_FOR_OUTPUT.get(output_kind, "text")
 
 
 def file_widget(spec: dict, mode: str = "auto"):

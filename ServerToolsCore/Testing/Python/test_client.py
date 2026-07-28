@@ -133,6 +133,27 @@ class ToolServerClientTest(unittest.TestCase):
         self.assertIn("alpha_tool, beta_tool", str(ctx.exception))
 
     @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_get_tool_schema_can_bypass_the_cache(self, mock_get):
+        # What a panel retrying after a failure needs: the cached list may be
+        # the very reason the tool wasn't found.
+        mock_get.return_value = _response(json_data=[])
+        with self.assertRaises(ServerToolError):
+            self.client.get_tool_schema("example_tool")
+
+        mock_get.return_value = _response(json_data=TOOLS_RESPONSE)
+
+        self.assertIn("label", self.client.get_tool_schema("example_tool", force_refresh=True)["arguments"])
+        self.assertEqual(mock_get.call_count, 2)
+
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_get_tool_schema_uses_the_cache_by_default(self, mock_get):
+        mock_get.return_value = _response(json_data=TOOLS_RESPONSE)
+        self.client.get_tool_schema("example_tool")
+        self.client.get_tool_schema("example_tool")
+
+        self.assertEqual(mock_get.call_count, 1)
+
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
     def test_list_tools_uses_short_timeout(self, mock_get):
         # get_tool_schema() runs synchronously from a module's setup(); it must
         # not be able to freeze Slicer for up to self._timeout (600s).

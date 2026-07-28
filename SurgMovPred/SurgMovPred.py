@@ -31,11 +31,17 @@ class SurgMovPredWidget(ServerToolWidgetBase):
     lives in ServerToolsCoreLib. See ARCHITECTURE.md."""
 
     TOOL_NAME = "SurgMovPred"
-    # Only "input" (folder of measurement files, zipped client-side) is a file
-    # the user provides. "model" is a server-side choice: the schema declares
-    # it as a server_selectable str, so the auto-UI renders it as a dropdown
-    # populated from GET /tools/surg_mov_pred/data and sends the chosen model's
-    # *name* — no model file ever leaves or reaches this machine.
+    # Both attributes below are overrides — the two things this tool's schema
+    # cannot state. Everything else is derived from it: "model" is declared as
+    # a server_selectable str, so the auto-UI renders it as a dropdown filled
+    # from GET /tools/SurgMovPred/data and sends the chosen model's *name* —
+    # no model file ever leaves or reaches this machine.
+    #
+    # The server types "input" as a plain zip_file, so it would get a file
+    # picker; what the user actually has is a folder of measurement files, and
+    # zipping it is the client's job.
     FILE_INPUTS = {"input": "folder_zip"}
+    # output_kind is "file", which says a file comes back but not what to do
+    # with it: save it, rather than load it into the scene.
     RESULT_KIND = "save_as"
     AUTO_UI = True

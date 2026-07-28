@@ -85,7 +85,7 @@ class ChoiceWidgetTest(unittest.TestCase):
         self.assertIsInstance(self.combo, qt.QComboBox)
 
     def test_items_are_the_choice_keys_in_declaration_order(self):
-        self.assertEqual([self.combo.itemText(i) for i in range(self.combo.count())], ["csv", "json"])
+        self.assertEqual([self.combo.itemText(i) for i in range(self.combo.count)], ["csv", "json"])
 
     def test_initial_selection_is_the_true_entry(self):
         self.assertEqual(self.combo.currentText, "csv")
@@ -297,6 +297,98 @@ class AutoFileModeTest(unittest.TestCase):
     def test_an_unknown_argument_falls_back_to_a_single_file(self):
         # What base_widget resolves against when the schema could not be loaded.
         self.assertEqual(formgen.auto_file_mode({}), "single_file")
+
+
+class FileInputModesTest(unittest.TestCase):
+    """Which arguments get an input row, and with which picker, is the
+    schema's answer; a module's FILE_INPUTS only overrides it."""
+
+    ARGUMENTS = EXAMPLE_TOOL_SCHEMA["arguments"]
+
+    def test_every_file_argument_is_offered_without_being_declared(self):
+        self.assertEqual(formgen.file_input_modes(self.ARGUMENTS), {"input": "file_or_folder"})
+
+    def test_scalar_arguments_are_not_file_inputs(self):
+        modes = formgen.file_input_modes(self.ARGUMENTS)
+
+        for name in ("label", "threshold", "iterations", "outputs", "preview_format"):
+            self.assertNotIn(name, modes)
+
+    def test_declaring_auto_changes_nothing(self):
+        # What ExampleTool used to spell out by hand.
+        self.assertEqual(
+            formgen.file_input_modes(self.ARGUMENTS, {"input": "auto"}),
+            formgen.file_input_modes(self.ARGUMENTS),
+        )
+
+    def test_an_override_wins_over_the_derived_mode(self):
+        # SurgMovPred: the schema types "input" as a zip_file, the module wants
+        # to hand the user a folder picker and zip it client-side.
+        arguments = {"input": {"type": "zip_file", "types": ["zip_file"], "required": True}}
+
+        self.assertEqual(formgen.file_input_modes(arguments), {"input": "single_file"})
+        self.assertEqual(
+            formgen.file_input_modes(arguments, {"input": "folder_zip"}), {"input": "folder_zip"}
+        )
+
+    def test_a_scene_node_input_can_only_come_from_an_override(self):
+        # AMASSS: the server declares a nifti_file; that it is filled from a
+        # MRML volume node is knowledge the server does not have.
+        arguments = {"file": {"type": "nifti_file", "types": ["nifti_file"], "required": True}}
+
+        self.assertEqual(
+            formgen.file_input_modes(arguments, {"file": "volume_node"}), {"file": "volume_node"}
+        )
+
+    def test_none_leaves_an_optional_file_argument_out(self):
+        arguments = {
+            "input": {"type": "csv_file", "types": ["csv_file"], "required": True},
+            "attachment": {"type": "file", "types": ["file"], "required": False},
+        }
+
+        self.assertEqual(
+            formgen.file_input_modes(arguments, {"attachment": "none"}), {"input": "single_file"}
+        )
+
+    def test_rows_follow_schema_order_even_when_overridden(self):
+        arguments = {
+            "first": {"type": "csv_file", "types": ["csv_file"]},
+            "second": {"type": "zip_file", "types": ["zip_file"]},
+        }
+
+        modes = formgen.file_input_modes(arguments, {"first": "folder_zip"})
+
+        self.assertEqual(list(modes), ["first", "second"])
+
+    def test_no_schema_yields_no_inputs(self):
+        self.assertEqual(formgen.file_input_modes({}), {})
+
+
+class ResultKindTest(unittest.TestCase):
+    """RESULT_KIND is derived from the tool's output_kind, except where the
+    server genuinely cannot answer."""
+
+    def test_derived_from_output_kind(self):
+        self.assertEqual(formgen.result_kind_for("text"), "text")
+        self.assertEqual(formgen.result_kind_for("segmentation"), "segmentation")
+        self.assertEqual(formgen.result_kind_for("files"), "save_as")
+
+    def test_example_tool_needs_no_declaration(self):
+        self.assertEqual(formgen.result_kind_for(EXAMPLE_TOOL_SCHEMA["output_kind"]), "save_as")
+
+    def test_a_single_file_defaults_to_saving_it(self):
+        # "file" is the ambiguous one: the server says a file comes back, not
+        # whether it is a volume, a mesh, or something to write to disk.
+        self.assertEqual(formgen.result_kind_for("file"), "save_as")
+
+    def test_a_declaration_always_wins(self):
+        self.assertEqual(formgen.result_kind_for("file", "volume"), "volume")
+        self.assertEqual(formgen.result_kind_for("files", "text"), "text")
+
+    def test_an_unknown_or_missing_output_kind_falls_back_to_text(self):
+        # Also the no-schema case (an unreachable server).
+        self.assertEqual(formgen.result_kind_for(None), "text")
+        self.assertEqual(formgen.result_kind_for("something_new"), "text")
 
 
 class FileOrFolderInputTest(unittest.TestCase):

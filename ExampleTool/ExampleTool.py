@@ -28,15 +28,14 @@ class ExampleTool(ScriptedLoadableModule):
 
 class ExampleToolWidget(ServerToolWidgetBase):
     """Thin GUI: everything else (HTTP, async, form generation, styling, lifecycle)
-    lives in ServerToolsCoreLib. See ARCHITECTURE.md."""
+    lives in ServerToolsCoreLib. See ARCHITECTURE.md.
+
+    One line, because this tool's schema already says everything: `input` is a
+    file argument accepting ["csv_file", "folder"], so the panel takes either
+    (and zips a folder before uploading, having worked out which it was given),
+    and `output_kind: "files"` means several result files come back as one
+    archive to unpack into a chosen output folder. Declaring any of that here
+    would just be repeating the server.
+    """
 
     TOOL_NAME = "example_tool"
-    # "auto": the schema says `input` accepts ["csv_file", "folder"], so the
-    # panel takes either — one path field with a File and a Folder browse
-    # button — and works out which it was given, zipping a folder before
-    # uploading. Nothing here names a type, an extension, or a mode.
-    FILE_INPUTS = {"input": "auto"}
-    # output_kind "files": several result files arrive as one .zip, unpacked
-    # into the output folder the user picks (see _handleSaveAsResult).
-    RESULT_KIND = "save_as"
-    AUTO_UI = True

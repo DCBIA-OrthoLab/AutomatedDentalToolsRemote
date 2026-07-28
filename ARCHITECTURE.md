@@ -135,9 +135,12 @@ interpreter launch:
   instance after the first call. `get_client()` in `__init__.py` returns a
   singleton so the whole extension shares one cache — the first module opened
   pays for `GET /tools`, the rest are free.
-- `get_tool_schema(tool_name)` looks the tool up in the cache (fetching if
-  needed) and raises `ServerToolError` listing the available tool names if it
-  doesn't exist (e.g. `"Unknown tool 'x'. Available: a, b, c"`).
+- `get_tool_schema(tool_name, force_refresh=False)` looks the tool up in the
+  cache (fetching if needed) and raises `ServerToolError` listing the available
+  tool names if it doesn't exist (e.g. `"Unknown tool 'x'. Available: a, b,
+  c"`). `force_refresh` re-fetches instead of trusting the cache — used when a
+  panel retries after a failure, where the cached list may be the very reason
+  the tool wasn't found.
 - `is_file_type(type_name)` — `type_name == "file" or type_name.endswith("_file")`.
   The server does **not** stick to a generic `"file"` type: the real schema
   uses `"nifti_file"`, `"zip_file"`, and presumably more later. Every place in
@@ -260,13 +263,71 @@ also on `cleanup()` in case the module is closed mid-request).
 
 A subclass declares:
 
+**`TOOL_NAME` is the only required attribute.** Everything the tool's schema
+already states is derived from it; `FILE_INPUTS` and `RESULT_KIND` are
+**overrides**, for the few things a server cannot know. A module whose schema
+answers every question is one line:
+
+```python
+class ExampleToolWidget(ServerToolWidgetBase):
+    TOOL_NAME = "example_tool"
+```
+
+and one that needs to say more says only that much:
+
 ```python
 class SurgMovPredWidget(ServerToolWidgetBase):
-    TOOL_NAME   = "surg_mov_pred"
-    FILE_INPUTS = {"input": "folder_zip"}   # {schema_arg_name: mode}
-    RESULT_KIND = "save_as"         # "text" | "segmentation" | "volume" | "model" | "save_as"
-    AUTO_UI     = True              # False → override buildCustomUI()
+    TOOL_NAME   = "SurgMovPred"
+    FILE_INPUTS = {"input": "folder_zip"}   # schema says zip_file; we want a folder picker
+    RESULT_KIND = "save_as"                 # output_kind "file" doesn't say what to do with it
+    AUTO_UI     = True                      # False → override buildCustomUI()
 ```
+
+What is derived, and what a module still has to say:
+
+| Question | Answered by the schema? |
+|---|---|
+| which arguments are file inputs | **yes** — every argument where `is_file_type(type)` |
+| file picker, folder picker, or both, and with which extensions | **yes** — from `types` (`formgen.auto_file_mode`) |
+| `output_kind` `text` / `segmentation` / `files` → `RESULT_KIND` | **yes** — `text` / `segmentation` / `save_as` |
+| `output_kind` `file` → load as a volume? a mesh? just save it? | **no** — MRML knowledge, defaults to `save_as` |
+| fill an input from a node in the scene (`volume_node`) | **no** — the server doesn't know a scene exists |
+| offer a folder picker for an argument the server types as a plain zip | **no** — an ergonomics choice (`SurgMovPred`) |
+| leave an optional file argument out of the panel (`"none"`) | **no** — a module's decision |
+
+This is what keeps "add a field to a tool = zero client-side lines" true for
+*file* arguments too, not just scalar ones: a new file argument server-side
+appears in the panel with the right picker, unannounced.
+
+### The panel heals when the server comes back
+
+The panel is built from the schema, so a server that is down when the module
+opens leaves nothing but an error label. Nothing used to clear it: the module
+stayed broken — still showing `Could not reach the tool server:
+HTTPConnectionPool(...)` — for the rest of the Slicer session, against a server
+that was back up.
+
+The schema-driven part therefore lives in its own container widget
+(`_buildForm`), rebuilt wholesale on either of two signals:
+
+- **the health check turning green** (`_onStatusChecked`), which already runs
+  on every `enter()` — coming back to the module is enough;
+- **a "Retry" button**, shown under the error only. `enter()` alone would mean
+  a user staring at the error has to guess that leaving and coming back fixes
+  it.
+
+Both retry with `force_refresh=True`: the cached `/tools` may be exactly what
+is wrong (fetched from another server, or before this tool was registered).
+
+Two properties this must keep, both covered by a Slicer-side check:
+
+- **only a *broken* panel is rebuilt** — `_schemaError` gates it. Rebuilding a
+  healthy one on every `enter()` would wipe whatever the user had typed;
+- **nothing of the failed attempt survives** — replacing the whole container
+  rather than clearing a layout takes the error label, the Retry button and any
+  stale server-side dropdown with it. The old container is hidden and unparented
+  at once but destroyed with `deleteLater()`, since the rebuild can be running
+  inside the Retry button's own `clicked` handler.
 
 **The schema is fetched before any widget is built** (`_buildAutoUI`), not
 after: a file argument's declared `types` decide what its picker looks like —
@@ -285,22 +346,22 @@ Overridable hooks (kept deliberately few):
 | `prepareInputFiles(workspace)` | produce `{schema_arg_name: file_path}` to upload | covers all `FILE_INPUTS` modes already |
 | `handleResult(result)` | custom result display | dispatches on `RESULT_KIND` |
 
-`FILE_INPUTS` is `{schema_argument_name: mode}` — one entry per file-type
-(per `is_file_type`) argument the tool's schema declares that the client
-provides. A tool with a
-single file input declares a one-entry dict (e.g. `{"file": "volume_node"}`);
-a tool needing several independent files just adds another entry — no other
-code changes. Each
-entry builds one row in the "Inputs" section, labeled from the argument name.
+Every file-type argument (per `is_file_type`) the tool's schema declares gets
+one row in the "Inputs" section, labeled from the argument name, in schema
+order — `formgen.file_input_modes` derives that set, a module never repeats it.
+`FILE_INPUTS` is `{schema_argument_name: mode}` **merged on top**, naming only
+the arguments whose handling the schema cannot express.
 
-- `"auto"` — **the recommended default**: the picker is derived from the
-  argument's declared `types` (`formgen.auto_file_mode`), so the module names
-  no type and no extension. The general rule, in one place: an argument
-  accepting `"folder"` may be given a whole folder, and one accepting a file
-  type as well gets the choice between the two; the file picker's extensions
-  come from the other entries of `types`. It resolves to one of the three
-  concrete modes below, once, at build time — the answer is needed twice, to
-  build the widget and again at upload time to know whether to zip.
+- `"auto"` — **what every argument gets unless overridden**: the picker is
+  derived from the argument's declared `types` (`formgen.auto_file_mode`), so
+  the module names no type and no extension. The general rule, in one place: an
+  argument accepting `"folder"` may be given a whole folder, and one accepting a
+  file type as well takes either; the file picker's extensions come from the
+  other entries of `types`. It resolves to one of the concrete modes below,
+  once, at build time — the answer is needed twice, to build the widget and
+  again at upload time to know whether to zip.
+- `"none"` — leave an optional file argument out of the panel entirely. The
+  only way to *not* offer an argument the schema declares.
 - `"single_file"` — a `ctkPathLineEdit` (file mode), name-filtered to the
   argument's extensions; its `currentPath` is sent as-is.
 - `"folder_zip"` — a `ctkPathLineEdit` (directory mode); the folder is zipped
@@ -349,12 +410,16 @@ from the MRML scene) or to force one selection kind — `SurgMovPred` keeps
 folder, I'll zip it" step being a client-side convention rather than something
 the schema declares.
 
-A mismatch between `FILE_INPUTS` and what the schema actually declares as file
-arguments surfaces immediately as a visible warning in the panel
-(`_warnAboutFileInputsMismatch`) instead of a confusing 422 at Apply time.
+The derived set cannot drift, but an *override* can: it is written by hand
+against a remembered schema, so one naming an argument the server no longer
+declares as a file surfaces immediately as a visible warning in the panel
+(`_warnAboutFileInputsMismatch`) rather than being silently ignored — or
+failing later with a confusing 422.
 
-`RESULT_KIND` controls `handleResult`'s default and whether an "Output
-folder" field is shown:
+`RESULT_KIND` — declared, or else derived from the tool's `output_kind` via
+`formgen.result_kind_for` — controls `handleResult`'s default and whether an
+"Output folder" field is shown. The resolved value is read through the
+`resultKind` property, never off the class attribute:
 
 - `"text"` → `slicer.util.infoDisplay(result.text)`.
 - `"segmentation" | "volume" | "model"` → `slicer_io.load_result(result.path, kind)`.
@@ -577,10 +642,7 @@ wrapper is server-side and out of scope for this change.
 
 ```python
 class ExampleToolWidget(ServerToolWidgetBase):
-    TOOL_NAME   = "example_tool"
-    FILE_INPUTS = {"input": "auto"}
-    RESULT_KIND = "save_as"
-    AUTO_UI     = True
+    TOOL_NAME = "example_tool"
 ```
 
 The server's `example_tool` is the one tool exercising everything the client
@@ -601,7 +663,14 @@ tool-specific code**:
   detected, not declared (`"auto"` resolves to `"file_or_folder"`);
 - `output_kind: "files"` → the response is a `.zip` of several result files
   (`summary.txt`, `preview.json`, ...) named by `Content-Disposition`, unpacked
-  into the output folder the user picks (`RESULT_KIND = "save_as"`).
+  into the output folder the user picks (derives `RESULT_KIND = "save_as"`).
+
+Which is why the class body is one line: writing `FILE_INPUTS = {"input":
+"auto"}` and `RESULT_KIND = "save_as"` would only repeat what the server
+already said — `"auto"` literally means "ask the schema", and `files` can only
+be saved. Verified in Slicer: loading this module builds the whole panel, and
+`_inputModes` resolves to `{"input": "file_or_folder"}` with `resultKind` at
+`"save_as"`, from `TOOL_NAME` alone.
 
 ## How to add a new module in 5 minutes
 
@@ -639,8 +708,11 @@ the client needs:
 
    class AMASSSWidget(ServerToolWidgetBase):
        TOOL_NAME   = "amasss_segmentation"
-       FILE_INPUTS = {"file": "volume_node"}  # user picks a scene volume; exported to .nii.gz automatically
-       RESULT_KIND = "segmentation"    # result is loaded into the scene via loadSegmentation
+       # The one thing the schema can't say: this file argument is filled from
+       # a volume already in the scene (exported to .nii.gz automatically),
+       # not picked off disk. RESULT_KIND is left out — output_kind
+       # "segmentation" already means "load it into the scene".
+       FILE_INPUTS = {"file": "volume_node"}
        AUTO_UI     = True              # the "threshold" float field is generated from /tools
    ```
 
@@ -707,12 +779,15 @@ This confirms the four success criteria from the brief:
   is unusable anyway without a server, so this is a degraded display rather
   than a silent wrong behavior. A module that must keep its picker regardless
   declares the concrete mode instead of `"auto"`.
-- **`/tools` cache never auto-invalidates**: `get_client()` is a singleton
-  cached for the process lifetime; `list_tools(force_refresh=True)` exists but
-  nothing currently calls it automatically. If the server's schema changes
-  while Slicer is running, a user has to restart Slicer (or a future "Refresh
-  tools" button would need to call `force_refresh=True` and rebuild the
-  affected widgets — not implemented).
+- **`/tools` cache never auto-invalidates for a *working* panel**:
+  `get_client()` is a singleton cached for the process lifetime. A panel that
+  failed to build does refresh and rebuild itself (health check or the Retry
+  button, see "The panel heals when the server comes back"), but one that built
+  successfully keeps its schema: if the server changes a tool's arguments while
+  Slicer is running, the user has to reopen the module (Developer mode's
+  "Reload") or restart Slicer. Rebuilding a healthy panel on its own would
+  discard whatever the user had typed into it, so it is deliberately not
+  automatic.
 - **No true server-side cancel**: `BackgroundJob.cancel()` discards the
   result and releases the UI immediately, but the in-flight `requests.post`
   keeps running against the server until it finishes or times out

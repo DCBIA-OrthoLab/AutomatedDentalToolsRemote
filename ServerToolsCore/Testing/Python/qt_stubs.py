@@ -195,7 +195,11 @@ class QComboBox(QObject):
         self._items = []
         self._index = -1
 
+    @property
     def count(self):
+        # A property, not a method: PythonQt exposes a Qt property whose getter
+        # shares its name as an attribute, and it shadows the method — real
+        # Slicer raises "'int' object is not callable" on `combo.count()`.
         return len(self._items)
 
     def itemText(self, index):
