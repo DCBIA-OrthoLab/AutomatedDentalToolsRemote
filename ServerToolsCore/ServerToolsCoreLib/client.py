@@ -53,6 +53,9 @@ _FILE_TYPE_EXTENSIONS = {
     "file": (),  # deliberately unrestricted: the generic type accepts anything
     "nifti_file": (".nii", ".nii.gz"),
     "zip_file": (".zip",),
+    # A medical volume or a zip of a folder of them (AMASSS's `input`): the
+    # type name doesn't spell out an extension, so it needs an entry here.
+    "volume_or_zip_file": (".nii", ".nii.gz", ".nrrd", ".nrrd.gz", ".gipl", ".gipl.gz", ".zip"),
 }
 
 # The one non-file type that may appear alongside file types in `types`: it is
