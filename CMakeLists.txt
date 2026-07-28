@@ -60,6 +60,7 @@ add_subdirectory(Agent_CLI)
 add_subdirectory(ServerToolsCore)
 add_subdirectory(ServerToolsSettings)
 add_subdirectory(SurgMovPred)
+add_subdirectory(ExampleTool)
 ## NEXT_MODULE
 
 #-----------------------------------------------------------------------------

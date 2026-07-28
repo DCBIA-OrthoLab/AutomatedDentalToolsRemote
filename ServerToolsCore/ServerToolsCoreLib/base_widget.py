@@ -24,14 +24,19 @@ from .worker import BackgroundJob
 
 logger = logging.getLogger("ServerToolsCore.base_widget")
 
-_FILE_INPUT_MODES = ("single_file", "volume_node", "folder_zip")
+# "auto" is the schema-driven default: the argument's `types` decide whether it
+# gets a file picker, a folder picker, or the choice between both (and which
+# extensions the file picker offers). The explicit modes stay available for
+# what the schema cannot express — picking a volume from the MRML scene — or to
+# force one selection kind for an argument that accepts several.
+_FILE_INPUT_MODES = ("auto", "single_file", "folder_zip", "file_or_folder", "volume_node")
 _RESULT_KINDS = ("text", "segmentation", "volume", "model", "save_as")
 
 
 class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # -- declared by subclasses --------------------------------------
     TOOL_NAME = None
-    FILE_INPUTS = {}  # {schema_argument_name: "single_file" | "volume_node" | "folder_zip"}
+    FILE_INPUTS = {}  # {schema_argument_name: mode}, see _FILE_INPUT_MODES ("auto" recommended)
     RESULT_KIND = "text"
     AUTO_UI = True
 
@@ -56,6 +61,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._job = None
         self._workspace = None
         self._inputWidgets = {}  # {schema_argument_name: widget}
+        self._inputModes = {}  # {schema_argument_name: mode}, "auto" already resolved
         self._outputFolderWidget = None
         self._statusBadge = None
         self._statusJob = None
@@ -156,13 +162,12 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         logger.info("Building AUTO_UI for TOOL_NAME='%s' (FILE_INPUTS=%s, RESULT_KIND=%s)",
                     self.TOOL_NAME, self.FILE_INPUTS, self.RESULT_KIND)
 
-        inputsBox = ctk.ctkCollapsibleButton()
-        inputsBox.text = _("Inputs")
-        inputsLayout = qt.QFormLayout(inputsBox)
-        rootLayout.addWidget(inputsBox)
-
-        self._inputWidgets = self._buildInputWidgets(inputsLayout)
-
+        # The schema is fetched before any widget is built, not after: a file
+        # argument's declared `types` decide what its picker looks like (file,
+        # folder, or both — and with which extensions), so the widgets cannot
+        # be built without it. The failure path below still builds them, from
+        # an empty schema, so the panel is never blank.
+        schemaError = None
         try:
             self._schema = self.client.get_tool_schema(self.TOOL_NAME)
             logger.info(
@@ -171,16 +176,28 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self._schema.get("output_kind"),
                 sorted(self._schema.get("arguments", {}).keys()),
             )
-            self._applyFileArgumentTooltips()
-            self._warnAboutFileInputsMismatch(rootLayout)
         except ServerToolError as exc:
             logger.warning("Could not load schema for '%s': %s", self.TOOL_NAME, exc)
             self._schema = {"arguments": {}}
+            schemaError = exc
+
+        inputsBox = ctk.ctkCollapsibleButton()
+        inputsBox.text = _("Inputs")
+        inputsLayout = qt.QFormLayout(inputsBox)
+        rootLayout.addWidget(inputsBox)
+
+        self._inputWidgets = self._buildInputWidgets(inputsLayout)
+
+        if schemaError is not None:
             rootLayout.addWidget(
                 design.warning_label(
-                    _("Could not load '{tool}' from the server: {error}").format(tool=self.TOOL_NAME, error=exc)
+                    _("Could not load '{tool}' from the server: {error}").format(
+                        tool=self.TOOL_NAME, error=schemaError
+                    )
                 )
             )
+        else:
+            self._warnAboutFileInputsMismatch(rootLayout)
 
         self._argWidgets = formgen.build(self._schema.get("arguments", {}), inputsLayout)
         logger.info("AUTO_UI built %d scalar field(s) for '%s': %s",
@@ -202,10 +219,29 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             formgen.connect_changed(self._outputFolderWidget, self._checkCanApply)
 
     def _buildInputWidgets(self, layout) -> dict:
-        return {arg_name: self._buildFileInputWidget(layout, arg_name, mode) for arg_name, mode in self.FILE_INPUTS.items()}
+        self._inputModes = {
+            arg_name: self._resolveInputMode(arg_name, mode) for arg_name, mode in self.FILE_INPUTS.items()
+        }
+        return {
+            arg_name: self._buildFileInputWidget(layout, arg_name, mode)
+            for arg_name, mode in self._inputModes.items()
+        }
+
+    def _resolveInputMode(self, arg_name: str, mode: str) -> str:
+        """Turn the schema-driven "auto" mode into a concrete one, from the
+        argument's declared `types` (see formgen.auto_file_mode). Resolved once,
+        here, because the answer is needed both to build the widget and to know
+        whether to zip at upload time."""
+        if mode != "auto":
+            return mode
+        return formgen.auto_file_mode(self._schemaArgument(arg_name))
+
+    def _schemaArgument(self, arg_name: str) -> dict:
+        return (self._schema or {}).get("arguments", {}).get(arg_name, {})
 
     def _buildFileInputWidget(self, layout, arg_name: str, mode: str):
         label = _(arg_name.replace("_", " ").capitalize())
+        spec = self._schemaArgument(arg_name)
 
         if mode == "volume_node":
             widget = slicer.qMRMLNodeComboBox()
@@ -214,13 +250,15 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             widget.setMRMLScene(slicer.mrmlScene)
             layout.addRow(design.required_label(label), widget)
             widget.currentNodeChanged.connect(self._checkCanApply)
-            return widget
+        else:
+            widget = formgen.file_widget(spec, mode)
+            layout.addRow(design.required_label(label), formgen.row_widget(widget))
+            formgen.connect_changed(widget, self._checkCanApply)
 
-        widget = ctk.ctkPathLineEdit()
-        if mode == "folder_zip":
-            widget.filters = ctk.ctkPathLineEdit.Dirs
-        layout.addRow(design.required_label(label), widget)
-        formgen.connect_changed(widget, self._checkCanApply)
+        # The server's own wording for this input, now that the schema is known.
+        description = spec.get("description")
+        if description:
+            widget.setToolTip(description)
         return widget
 
     def _populateServerSelectables(self, rootLayout) -> None:
@@ -275,15 +313,6 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     )
                 )
 
-    def _applyFileArgumentTooltips(self) -> None:
-        """Use the server's own description for each file input, once the
-        schema is known (input widgets are built before the schema arrives)."""
-        arguments = self._schema.get("arguments", {})
-        for arg_name, widget in self._inputWidgets.items():
-            description = arguments.get(arg_name, {}).get("description")
-            if description:
-                widget.setToolTip(description)
-
     def _warnAboutFileInputsMismatch(self, rootLayout) -> None:
         """Catch schema drift early: FILE_INPUTS is written by hand against a
         remembered schema, so if the server renames/drops a file argument this
@@ -320,7 +349,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         file input modes for every entry declared in FILE_INPUTS. Returns
         {schema_argument_name: local_file_path}."""
         files = {}
-        for arg_name, mode in self.FILE_INPUTS.items():
+        for arg_name, mode in self._inputModes.items():
             path = self._prepareOneInputFile(workspace, arg_name, mode)
             if path is not None:
                 files[arg_name] = path
@@ -331,13 +360,24 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if mode == "single_file":
             return widget.currentPath
         if mode == "folder_zip":
-            return slicer_io.zip_folder(widget.currentPath, workspace.file(f"{self.TOOL_NAME}_{arg_name}.zip"))
+            return self._zipFolder(workspace, arg_name, widget.currentPath)
+        if mode == "file_or_folder":
+            # HTTP carries no folder: a folder selection goes up as a .zip,
+            # which the server extracts (stripping a lone root directory).
+            # Which one the user gave is read off the path itself — they never
+            # had to declare it, so they cannot have declared it wrong.
+            if widget.is_folder():
+                return self._zipFolder(workspace, arg_name, widget.currentPath)
+            return widget.currentPath
         if mode == "volume_node":
             node = widget.currentNode()
             if node is None:
                 return None
             return slicer_io.export_volume(node, workspace.file(f"{self.TOOL_NAME}_{arg_name}.nii.gz"))
         return None
+
+    def _zipFolder(self, workspace: slicer_io.TempWorkspace, arg_name: str, folder: str) -> str:
+        return slicer_io.zip_folder(folder, workspace.file(f"{self.TOOL_NAME}_{arg_name}.zip"))
 
     def handleResult(self, result) -> None:
         """Override for custom result display."""
@@ -376,7 +416,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.applyButton.enabled = canApply
 
     def _inputReady(self) -> bool:
-        for arg_name, mode in self.FILE_INPUTS.items():
+        for arg_name, mode in self._inputModes.items():
             widget = self._inputWidgets.get(arg_name)
             if mode == "volume_node":
                 if widget is None or widget.currentNode() is None:

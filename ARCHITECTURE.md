@@ -23,6 +23,8 @@ SlicerAutomatedDentalTools/
 │   ├── ServerToolsCore.py                  # ScriptedLoadableModule shell, parent.hidden = True
 │   │                                        # (also applies saved settings on Slicer startup)
 │   ├── Testing/Python/test_client.py       # plain unittest, requests mocked, no Slicer needed
+│   ├── Testing/Python/test_formgen.py      # plain unittest, qt/ctk/slicer stubbed, no Slicer needed
+│   ├── Testing/Python/qt_stubs.py          # the stand-ins test_formgen runs against
 │   └── ServerToolsCoreLib/                 # the importable Python package
 │       ├── __init__.py                     # get_client() + ToolServerClient/ToolResult/ServerToolError
 │       ├── config.py                       # SERVER_URL, API_TOKEN, VERIFY_TLS, TIMEOUT (compiled-in defaults)
@@ -40,6 +42,9 @@ SlicerAutomatedDentalTools/
 ├── SurgMovPred/
 │   ├── CMakeLists.txt
 │   └── SurgMovPred.py                      # ~35 lines, declarative
+├── ExampleTool/                            # reference client for the server's example_tool
+│   ├── CMakeLists.txt
+│   └── ExampleTool.py                      # ~35 lines, declarative
 └── SurgMovPred_CLI/                        # left in place but unwired (see "SurgMovPred_CLI" below)
 ```
 
@@ -71,6 +76,24 @@ inside Slicer (`base_widget.py` does `from . import get_client` lazily inside
 `__init__`, precisely so importing `base_widget` doesn't require pulling in
 `requests` at class-definition time either way — though in practice it will,
 since `client.py` has no Slicer dependency to avoid).
+
+## Tests
+
+Two plain-unittest suites, both registered as ctests and both runnable with
+`python3 -m unittest` from `ServerToolsCore/Testing/Python/` — no Slicer
+interpreter launch:
+
+- **`test_client.py`** — `requests` mocked. HTTP behavior, local schema
+  validation, the request/response shape (including the whole `example_tool`
+  round-trip: what each argument type looks like as a form field), error
+  mapping, result filenames.
+- **`test_formgen.py`** — `qt`/`ctk`/`slicer` replaced by the small stand-ins
+  in `qt_stubs.py`. Which widgets a schema produces, in which order, with which
+  initial state, and what they read back as. That is pure Python once the
+  widget classes are stubbed; it obviously does not test Qt itself, only the
+  schema-to-widget logic, which is where the tool contract actually lives.
+  It runs against `EXAMPLE_TOOL_SCHEMA`, the server's real `GET /tools` entry
+  for `example_tool` copied verbatim.
 
 ## How the pieces fit together
 
@@ -123,6 +146,25 @@ since `client.py` has no Slicer dependency to avoid).
   function instead of comparing against the literal string `"file"` — so a
   new `..._file` type the server introduces needs no client-side code change.
   Exported from `ServerToolsCoreLib/__init__.py` alongside `get_client()`.
+- **Schema-reading helpers**, next to `is_file_type` and exported the same way
+  (no Qt, no HTTP — just "how do I read a schema argument", which keeps them
+  unit-testable in plain CI):
+  - `argument_types(spec)` — every type an argument accepts. The server sends
+    both a single `type` and the full `types` list; an argument accepting
+    several (`example_tool`'s `input`: `["csv_file", "folder"]`) is only
+    described by the latter. Falls back to `[type]` for an older schema.
+  - `accepts_folder(spec)` — whether `"folder"` is among them, i.e. whether the
+    user may pick a whole directory (zipped client-side before upload; HTTP has
+    no notion of a folder). The server detects a `"folder"`-typed argument,
+    extracts the archive, and strips a lone root directory — so it makes no
+    difference whether the zip holds `cohort/a.csv` or `a.csv`.
+  - `file_extensions_for(spec)` — the extensions a file picker should offer,
+    derived from the file-ish entries of `types`: `["csv_file", "folder"]` →
+    `(".csv",)`. A table covers the types whose name doesn't spell out their
+    extension (`nifti_file` → `.nii`/`.nii.gz`, `zip_file` → `.zip`) and
+    anything else follows the `"<x>_file"` → `".<x>"` convention, so a new
+    file type needs no client change. An empty result means "don't restrict"
+    (the generic `"file"` type, or a folder-only argument).
 - `list_tool_data(tool_name)` → `{"models": [...], "testfiles": [...]}` — the
   file names hosted server-side for this tool (`GET /tools/{tool}/data`,
   Bearer-protected unlike `/tools`). Backs the server-selectable dropdowns
@@ -145,7 +187,19 @@ since `client.py` has no Slicer dependency to avoid).
      before a network round-trip (an optional file argument doesn't force an
      entry in `files`);
   2. stringifies every scalar (`bool` → `"true"`/`"false"`) since the server
-     does the coercion;
+     does the coercion. A `dict` — how a `"multichoice"` argument arrives, see
+     `formgen` below — is sent as `json.dumps(...)`, e.g.
+     `outputs={"summary": true, "preview": false, "columns": true}`. **Two
+     things there are load-bearing.** *The whole dict travels, unchecked
+     options included*: server-side, what is sent **is** the selection — an
+     option left out counts as unchecked whatever its declared default, and
+     omitting the argument entirely is what applies the defaults. So "every box
+     unchecked" and "argument absent" are different requests, and only the real
+     state of the boxes tells them apart. *And it is JSON, not the `a,b`
+     shortcut*: the server also accepts a comma-separated list of the checked
+     options, but that spelling is for `curl` — it breaks the moment an option
+     name contains a comma. A `"choice"` argument is a plain string (the
+     selected option's name) and needs none of this;
   3. opens every file in `files` in a loop, all closed in one `finally` so a
      handle is never leaked even if a later one fails to open; each is sent as
      `files_payload[arg_name] = (basename, handle)` — the filename (with
@@ -167,10 +221,26 @@ since `client.py` has no Slicer dependency to avoid).
      `slicer_io.is_extractable_archive` below, which decides whether to unpack
      a "save_as" result purely from this filename's extension.
 - `errors.error_for_status(status_code, server_message)` maps 401/404/422/400/
-  413/500 to a `ServerToolError`; for 400/422 the server's own message is
-  propagated verbatim (already explicit per the API contract) — `_server_message`
-  reads JSON `detail`/`message` first, then falls back to the raw response body
-  (truncated to 500 chars) so a plain-text error response isn't dropped.
+  413/500 to a `ServerToolError`. The server's `detail` is shown **verbatim**
+  whenever there is one; the strings in that function are fallbacks for a
+  response with no usable body. `_server_message` reads JSON `detail`/`message`
+  first, then falls back to the raw response body (truncated to 500 chars) so a
+  plain-text error response isn't dropped. This matters most for the argument
+  errors, where the server's message is the only one that can be specific:
+  - **422** — missing / wrong-typed argument, or an option outside a
+    `choice`/`multichoice` list: `Argument 'preview_format': unknown option
+    'xml'. Expected one of: csv, json`. Nothing client-side second-guesses that
+    or falls back to some other value — an out-of-list value is simply shown as
+    the server explains it.
+  - **400** — wrong extension or invalid archive: `Unsupported file extension
+    for 'input'. Allowed: ('.csv', '.zip')`.
+  - **413** — the detail names the actual limit (`File exceeds the 500 MB
+    limit.`), which the client has no other way of knowing.
+  - **401** — missing or wrong token.
+
+  500 is the one exception: a crash inside a tool is not a message meant for
+  the user, and its detail may leak server-side internals, so it keeps a
+  generic wording.
 - `configure(server_url=None, token=None, verify_tls=None, timeout=None)` /
   read-only properties `server_url`/`token`/`verify_tls`/`timeout` — updates
   the already-constructed singleton **in place** (only the fields passed) and
@@ -198,6 +268,13 @@ class SurgMovPredWidget(ServerToolWidgetBase):
     AUTO_UI     = True              # False → override buildCustomUI()
 ```
 
+**The schema is fetched before any widget is built** (`_buildAutoUI`), not
+after: a file argument's declared `types` decide what its picker looks like —
+file, folder, or the choice between both, and with which extensions — so the
+widgets cannot be built without it. Each input's tooltip comes from the same
+place, the argument's `description`. The failure path still builds the panel
+from an empty schema, with the error shown in it, so the module is never blank.
+
 Overridable hooks (kept deliberately few):
 
 | Hook | Purpose | Default behavior |
@@ -214,20 +291,66 @@ provides. A tool with a
 single file input declares a one-entry dict (e.g. `{"file": "volume_node"}`);
 a tool needing several independent files just adds another entry — no other
 code changes. Each
-entry builds one row in the "Inputs" section, labeled from the argument name,
-and `prepareInputFiles`'s default handles all three modes per entry:
+entry builds one row in the "Inputs" section, labeled from the argument name.
 
-- `"single_file"` — a `ctkPathLineEdit` (file mode); its `currentPath` is sent as-is.
+- `"auto"` — **the recommended default**: the picker is derived from the
+  argument's declared `types` (`formgen.auto_file_mode`), so the module names
+  no type and no extension. The general rule, in one place: an argument
+  accepting `"folder"` may be given a whole folder, and one accepting a file
+  type as well gets the choice between the two; the file picker's extensions
+  come from the other entries of `types`. It resolves to one of the three
+  concrete modes below, once, at build time — the answer is needed twice, to
+  build the widget and again at upload time to know whether to zip.
+- `"single_file"` — a `ctkPathLineEdit` (file mode), name-filtered to the
+  argument's extensions; its `currentPath` is sent as-is.
+- `"folder_zip"` — a `ctkPathLineEdit` (directory mode); the folder is zipped
+  to `<workspace>/<tool>_<arg_name>.zip` via `slicer_io.zip_folder`.
+- `"file_or_folder"` — a `formgen.FileOrFolderInput`: **one** path field with a
+  "File..." and a "Folder..." browse button. A folder selection is zipped
+  exactly like `"folder_zip"`; a file is sent as-is.
+
+  **The user never declares which kind they are providing** — `is_folder()`
+  answers from the path itself (`os.path.isdir`), so a mode cannot be set
+  wrong. An earlier version had an explicit File/Folder selector; besides the
+  extra step, it made wrong requests possible — a folder pasted into a field
+  left on "File" was uploaded as a file and died at `open()`.
+
+  It is a plain `QLineEdit` with two buttons rather than a `ctkPathLineEdit`,
+  and both halves of that are forced by CTK, not chosen:
+
+  - **A `ctkPathLineEdit` emits `currentPathChanged` only for input its name
+    filters accept.** Restricting a picker to `*.csv` — which the schema asks
+    for, since `types` names the accepted extensions — silently swallows the
+    change signal for *every folder* (and every non-matching file), so Apply
+    would never enable after choosing a folder. Measured against Slicer 5.13:
+    with a `*.csv` filter, a file/folder/file/xlsx sequence notifies only for
+    the `.csv` selections; filter order changes nothing. Driving both dialogs
+    ourselves keeps the file dialog filtered by the declared extensions *and*
+    every selection observable.
+  - **Its browse button opens a file dialog or a directory dialog according to
+    `filters`, and those cannot be flipped at runtime.** Re-assigning
+    `nameFilters` on a live `ctkPathLineEdit` corrupts it: Slicer dies either
+    on the next `filters` assignment or later, at teardown. (Toggling
+    `filters` alone, or assigning `nameFilters` exactly once, are both fine.)
+
+  Hence the rule enforced by `formgen.path_widget`, which still backs the
+  single-kind modes: **a ctkPathLineEdit is configured once, at construction,
+  and never touched again** — and an unrestricted picker is left with its
+  default rather than handed an empty filter list. `test_formgen.py` guards
+  both findings: it counts assignments to `filters`/`nameFilters`, and asserts
+  every selection notifies whatever its kind.
 - `"volume_node"` — a `qMRMLNodeComboBox` restricted to `vtkMRMLScalarVolumeNode`;
   the selected node is exported to `<workspace>/<tool>_<arg_name>.nii.gz` via
   `slicer_io.export_volume`.
-- `"folder_zip"` — a `ctkPathLineEdit` (directory mode); the folder is zipped
-  to `<workspace>/<tool>_<arg_name>.zip` via `slicer_io.zip_folder`.
 
-Once the schema loads, each input widget's tooltip is set from the matching
-argument's `description` (`_applyFileArgumentTooltips`), and a mismatch
-between `FILE_INPUTS` and what the schema actually declares as file arguments
-surfaces immediately as a visible warning in the panel
+The explicit modes remain for what the schema cannot express (picking a volume
+from the MRML scene) or to force one selection kind — `SurgMovPred` keeps
+`"folder_zip"` because its `input` is typed `zip_file`, with the "give me a
+folder, I'll zip it" step being a client-side convention rather than something
+the schema declares.
+
+A mismatch between `FILE_INPUTS` and what the schema actually declares as file
+arguments surfaces immediately as a visible warning in the panel
 (`_warnAboutFileInputsMismatch`) instead of a confusing 422 at Apply time.
 
 `RESULT_KIND` controls `handleResult`'s default and whether an "Output
@@ -239,7 +362,9 @@ folder" field is shown:
   `loadModel` — unrelated to a machine-learning model; those live server-side
   entirely, e.g. SurgMovPred's `.joblib` files, and never reach the client.)
 - `"save_as"` → an explicit output-folder picker is added; the result is
-  written there. Since one HTTP response can only carry a single blob, a tool
+  written there. This is also what a tool declaring `output_kind: "files"`
+  server-side needs — several result files arrive as one `.zip`, unpacked into
+  the chosen folder. Since one HTTP response can only carry a single blob, a tool
   whose CLI writes several files (SurgMovPred's CLI writes both
   `predictions_outputs.xlsx` and `predictions_outputs.csv`) needs its
   server-side wrapper to zip `outputFolder` before returning it — so
@@ -276,11 +401,45 @@ fields) into a `qt.QFormLayout`, using the type table below, and returns
 | `int` | `QSpinBox` |
 | `float` | `QDoubleSpinBox` |
 | `bool` | `QCheckBox` |
-| any type where `is_file_type()` is true (`file`, `zip_file`, `nifti_file`, ...) | `ctkPathLineEdit` (kept for the escape hatch below; `build()` itself never emits one — see `FILE_INPUTS`) |
+| `choice` | `QComboBox` filled from `choices` |
+| `multichoice` | a `MultiChoiceGroup`: one `QCheckBox` per entry of `choices` |
+| any type where `is_file_type()` is true (`file`, `zip_file`, `nifti_file`, ...) | `ctkPathLineEdit`, or a `FileOrFolderInput` when `types` also contains `"folder"` (`file_widget`; `build()` itself never emits one — see `FILE_INPUTS` and the escape hatch below) |
 | (unknown, non-file) | `QLineEdit` + a logged warning |
 
 `description` becomes the tooltip; `required: true` fields get an asterisk
 label via `design.required_label`.
+
+### `choice` and `multichoice`
+
+Both carry a `choices` dict — `{option_name: initial_state}`, `null` on every
+other type. **Its key order is the declaration order and is preserved as-is,
+never sorted**, in the widget and in what is read back.
+
+| `type` | Widget | Items | Initial state | Read back as |
+|---|---|---|---|---|
+| `choice` | `QComboBox` | the keys of `choices` | the key whose value is `true` (the server guarantees exactly one) | the selected option's name, e.g. `"json"` |
+| `multichoice` | N × `QCheckBox` | the keys of `choices` | each key's boolean | the complete `{option: checked}` dict |
+
+Neither is a single Qt widget mapping 1:1 onto an argument, so `multichoice`
+gets a small holder class, `MultiChoiceGroup` (a plain Python object, not a
+`QWidget` subclass — PythonQt makes those awkward): it owns the container to
+lay out (`row_widget(field)` returns it), the checkboxes in declaration order,
+and `value()`. `FileOrFolderInput` follows the same shape. Both expose the
+slice of the QWidget API `build()` and `base_widget` use on a field
+(`setProperty`, `setToolTip`), so nothing upstream needs to know they are
+special; `collect()`, `connect_changed()` and `all_required_filled()`
+special-case them in one branch each.
+
+A `multichoice` always reads back as *every* option, and is therefore always
+"filled" as far as the Apply button is concerned — every box unchecked is a
+meaningful selection, not a missing value. Turning that dict into a form field
+is `client.py`'s job (JSON, never the `a,b` shortcut — see `run()` above), so
+`formgen` stays free of any wire-format knowledge.
+
+There is deliberately **no client-side handling of a value outside the list**:
+the server answers 422 with an explicit `detail` (`Argument 'preview_format':
+unknown option 'xml'. Expected one of: csv, json`) and that message is what the
+user sees.
 
 **Escape hatch**, not used by `SurgMovPred`: if a tool ever needs a
 hand-written `.ui` (grouping, an MRML node selector, default values), give the
@@ -414,6 +573,36 @@ uploaded archive into `inputFolder`, inject `modelPath` from the server's own
 config, call `main()`, re-zip `outputFolder` into the HTTP response. That
 wrapper is server-side and out of scope for this change.
 
+## `ExampleTool`
+
+```python
+class ExampleToolWidget(ServerToolWidgetBase):
+    TOOL_NAME   = "example_tool"
+    FILE_INPUTS = {"input": "auto"}
+    RESULT_KIND = "save_as"
+    AUTO_UI     = True
+```
+
+The server's `example_tool` is the one tool exercising everything the client
+has to know how to do, which makes this module the reference client — and a
+quick way to check a server connection end to end without running a real
+analysis. Its schema declares, and this module renders with **zero
+tool-specific code**:
+
+- `label` (str), `threshold` (float), `iterations` (optional int) — the
+  ordinary scalar fields;
+- `preview_format`, a `choice` → a combo box of `csv`/`json`, `csv`
+  preselected, sent as `preview_format=json`;
+- `outputs`, a `multichoice` → three checkboxes (`summary`, `preview`,
+  `columns`) starting at `true, true, false`, sent as
+  `outputs={"summary": true, "preview": false, "columns": true}`;
+- `input`, typed `["csv_file", "folder"]` → one path field taking either; a
+  `.csv` goes up as-is, a folder is zipped first, and which one it got is
+  detected, not declared (`"auto"` resolves to `"file_or_folder"`);
+- `output_kind: "files"` → the response is a `.zip` of several result files
+  (`summary.txt`, `preview.json`, ...) named by `Content-Disposition`, unpacked
+  into the output folder the user picks (`RESULT_KIND = "save_as"`).
+
 ## How to add a new module in 5 minutes
 
 Worked example: migrating `AMASSS` (CBCT volume in, segmentation out).
@@ -510,6 +699,14 @@ This confirms the four success criteria from the brief:
   differently-shaped file type name (not ending in `_file`), `is_file_type`
   needs a one-line update — everything downstream (`formgen`, `base_widget`)
   picks it up automatically since they all go through this single function.
+- **`"auto"` file inputs degrade when the schema can't be fetched**: the mode
+  is resolved from the argument's `types`, so with an unreachable server
+  `formgen.auto_file_mode({})` falls back to `"single_file"` — the panel offers
+  a file picker with no extension filter instead of the file/folder choice. The
+  reason is already on screen (the schema-fetch warning label) and the module
+  is unusable anyway without a server, so this is a degraded display rather
+  than a silent wrong behavior. A module that must keep its picker regardless
+  declares the concrete mode instead of `"auto"`.
 - **`/tools` cache never auto-invalidates**: `get_client()` is a singleton
   cached for the process lifetime; `list_tools(force_refresh=True)` exists but
   nothing currently calls it automatically. If the server's schema changes

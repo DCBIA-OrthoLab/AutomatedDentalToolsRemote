@@ -10,7 +10,14 @@ Slicer, e.g. `from ServerToolsCoreLib.base_widget import ServerToolWidgetBase`.
 """
 
 from . import config
-from .client import ToolResult, ToolServerClient, is_file_type
+from .client import (
+    ToolResult,
+    ToolServerClient,
+    accepts_folder,
+    argument_types,
+    file_extensions_for,
+    is_file_type,
+)
 from .errors import ServerToolError
 
 _client = None
@@ -29,4 +36,13 @@ def get_client() -> ToolServerClient:
     return _client
 
 
-__all__ = ["get_client", "ToolServerClient", "ToolResult", "ServerToolError", "is_file_type"]
+__all__ = [
+    "get_client",
+    "ToolServerClient",
+    "ToolResult",
+    "ServerToolError",
+    "is_file_type",
+    "argument_types",
+    "accepts_folder",
+    "file_extensions_for",
+]

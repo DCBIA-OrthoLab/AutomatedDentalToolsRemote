@@ -5,6 +5,7 @@ makes it testable in plain CI with `requests` mocked out (see
 ServerToolsCore/Testing/Python/test_client.py).
 """
 
+import json
 import logging
 import mimetypes
 import os
@@ -42,6 +43,64 @@ def is_file_type(type_name: str) -> bool:
     client-side code change — the whole point of a schema-driven client.
     """
     return type_name == "file" or type_name.endswith("_file")
+
+
+# What a "<x>_file" type means for a file picker, when the extension isn't
+# simply "<x>". Anything not listed falls back to the obvious ".<x>"
+# ("csv_file" -> ".csv"), so a new file-ish type the server introduces needs an
+# entry here only when its name doesn't spell out its extension.
+_FILE_TYPE_EXTENSIONS = {
+    "file": (),  # deliberately unrestricted: the generic type accepts anything
+    "nifti_file": (".nii", ".nii.gz"),
+    "zip_file": (".zip",),
+}
+
+# The one non-file type that may appear alongside file types in `types`: it is
+# a *local* selection kind, not something HTTP can carry — a folder is zipped
+# client-side and uploaded as the .zip the server then unpacks.
+FOLDER_TYPE = "folder"
+
+
+def argument_types(spec: dict) -> list:
+    """Every type a schema argument accepts.
+
+    The server sends both a single `type` (the primary/first one) and the full
+    `types` list; an argument accepting several — e.g. example_tool's `input`:
+    `["csv_file", "folder"]` — is only fully described by the latter. Falls
+    back to `[type]` so a schema predating the `types` field still works.
+    """
+    types = spec.get("types")
+    if types:
+        return list(types)
+    type_name = spec.get("type")
+    return [type_name] if type_name else []
+
+
+def accepts_folder(spec: dict) -> bool:
+    """Whether the user may pick a whole folder for this argument (which the
+    client then zips before uploading — see slicer_io.zip_folder)."""
+    return FOLDER_TYPE in argument_types(spec)
+
+
+def file_extensions_for(spec: dict) -> tuple:
+    """The extensions a file picker should offer for this argument, derived
+    from the file-ish entries of its `types` — `["csv_file", "folder"]` gives
+    `(".csv",)`.
+
+    An empty tuple means "don't restrict": either the argument declares the
+    generic "file" type, or it accepts no file type at all (folder only).
+    """
+    extensions = []
+    for type_name in argument_types(spec):
+        if not is_file_type(type_name):
+            continue
+        known = _FILE_TYPE_EXTENSIONS.get(type_name)
+        if known is None:
+            known = (f".{type_name[: -len('_file')]}",) if type_name.endswith("_file") else ()
+        if not known:
+            return ()  # a generic "file" among the accepted types: anything goes
+        extensions.extend(extension for extension in known if extension not in extensions)
+    return tuple(extensions)
 
 
 @dataclass
@@ -326,11 +385,28 @@ class ToolServerClient:
 
     @staticmethod
     def _stringify(args: dict) -> dict:
-        """Every scalar becomes a string; the server does the type coercion."""
+        """Every scalar becomes a string; the server does the type coercion.
+
+        A "multichoice" argument arrives here as the *complete* {option:
+        checked} dict (see formgen.MultiChoiceGroup) and is sent as JSON. Two
+        things about that are load-bearing:
+
+        - The whole dict travels, unchecked options included. Server-side, what
+          is sent *is* the selection: an option left out counts as unchecked
+          whatever its declared default, and omitting the argument entirely is
+          what applies the defaults. So "everything unchecked" and "argument
+          absent" are different requests, and only the real state of the boxes
+          can tell them apart.
+        - JSON, not the `a,b` shortcut. The server also accepts a
+          comma-separated list of the checked options, but that spelling is for
+          curl: it breaks the moment an option name contains a comma.
+        """
         stringified = {}
         for key, value in args.items():
             if isinstance(value, bool):
                 stringified[key] = "true" if value else "false"
+            elif isinstance(value, dict):
+                stringified[key] = json.dumps(value)
             else:
                 stringified[key] = str(value)
         return stringified

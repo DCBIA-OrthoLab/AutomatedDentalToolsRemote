@@ -4,6 +4,7 @@ Usage:
     python3 -m unittest ServerToolsCore/Testing/Python/test_client.py
 """
 
+import json
 import os
 import sys
 import unittest
@@ -18,6 +19,9 @@ from ServerToolsCoreLib.client import (
     ToolServerClient,
     _HEALTH_CHECK_TIMEOUT,
     _TOOLS_FETCH_TIMEOUT,
+    accepts_folder,
+    argument_types,
+    file_extensions_for,
     is_file_type,
 )
 from ServerToolsCoreLib.errors import ServerToolError
@@ -558,6 +562,47 @@ class IsFileTypeTest(unittest.TestCase):
         self.assertFalse(is_file_type(""))
 
 
+class ArgumentTypesTest(unittest.TestCase):
+    """An argument may accept several types (`types`), e.g. example_tool's
+    `input`: a .csv file *or* a whole folder."""
+
+    _INPUT = {"type": "csv_file", "types": ["csv_file", "folder"]}
+
+    def test_types_wins_over_the_single_type(self):
+        self.assertEqual(argument_types(self._INPUT), ["csv_file", "folder"])
+
+    def test_falls_back_to_the_single_type(self):
+        # A schema predating the `types` field must still work.
+        self.assertEqual(argument_types({"type": "zip_file"}), ["zip_file"])
+        self.assertEqual(argument_types({}), [])
+
+    def test_accepts_folder(self):
+        self.assertTrue(accepts_folder(self._INPUT))
+        self.assertFalse(accepts_folder({"type": "zip_file", "types": ["zip_file"]}))
+        self.assertFalse(accepts_folder({"type": "str", "types": ["str"]}))
+
+    def test_extensions_come_from_the_non_folder_types(self):
+        self.assertEqual(file_extensions_for(self._INPUT), (".csv",))
+
+    def test_extensions_of_a_multi_extension_type(self):
+        self.assertEqual(file_extensions_for({"types": ["nifti_file"]}), (".nii", ".nii.gz"))
+
+    def test_extensions_of_several_file_types(self):
+        self.assertEqual(file_extensions_for({"types": ["csv_file", "zip_file"]}), (".csv", ".zip"))
+
+    def test_generic_file_type_is_unrestricted(self):
+        self.assertEqual(file_extensions_for({"types": ["file"]}), ())
+        self.assertEqual(file_extensions_for({"types": ["csv_file", "file"]}), ())
+
+    def test_folder_only_argument_has_no_extensions(self):
+        self.assertEqual(file_extensions_for({"types": ["folder"]}), ())
+
+    def test_unknown_file_type_derives_its_extension_from_its_name(self):
+        # Same convention as is_file_type: a new "<x>_file" the server adds
+        # needs no client-side change.
+        self.assertEqual(file_extensions_for({"types": ["vtk_file"]}), (".vtk",))
+
+
 class RealServerSchemaTest(unittest.TestCase):
     """Regression coverage for the actual /tools payload returned by the dev
     server: file arguments are typed "nifti_file"/"zip_file", never the
@@ -650,6 +695,213 @@ class RealServerSchemaTest(unittest.TestCase):
                 {},
                 {"model": __file__, "input": __file__},
             )
+
+
+class ExampleToolRequestTest(unittest.TestCase):
+    """The full request/response round-trip for `example_tool` — the tool that
+    exercises everything the client has to do: a choice, a multichoice, an
+    input accepting a file or a folder, and a multi-file (.zip) result.
+
+    The schema is the server's real GET /tools entry, verbatim.
+    """
+
+    EXAMPLE_TOOL = {
+        "name": "example_tool",
+        "output_kind": "files",
+        "arguments": {
+            "label": {
+                "type": "str", "types": ["str"], "required": True,
+                "description": "Free-text label for this run",
+                "server_selectable": None, "choices": None,
+            },
+            "input": {
+                "type": "csv_file", "types": ["csv_file", "folder"], "required": True,
+                "description": "A single .csv file, or a folder of .csv/.xlsx/.ods files sent as a .zip archive",
+                "server_selectable": None, "choices": None,
+            },
+            "threshold": {
+                "type": "float", "types": ["float"], "required": True,
+                "description": "Numeric threshold parameter",
+                "server_selectable": None, "choices": None,
+            },
+            "iterations": {
+                "type": "int", "types": ["int"], "required": False,
+                "description": "Optional number of iterations",
+                "server_selectable": None, "choices": None,
+            },
+            "outputs": {
+                "type": "multichoice", "types": ["multichoice"], "required": False,
+                "description": "Which result files to produce",
+                "server_selectable": None,
+                "choices": {"summary": True, "preview": True, "columns": False},
+            },
+            "preview_format": {
+                "type": "choice", "types": ["choice"], "required": False,
+                "description": "Format of the preview file",
+                "server_selectable": None,
+                "choices": {"csv": True, "json": False},
+            },
+        },
+    }
+
+    def setUp(self):
+        self.client = ToolServerClient("http://localhost:8000", "dev-token")
+
+    def _args(self, **overrides):
+        args = {
+            "label": "test",
+            "threshold": 1.0,
+            "preview_format": "json",
+            "outputs": {"summary": True, "preview": True, "columns": False},
+        }
+        args.update(overrides)
+        return args
+
+    @mock.patch("ServerToolsCoreLib.client.requests.post")
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_form_fields_match_the_contract(self, mock_get, mock_post):
+        mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
+        mock_post.return_value = _response(
+            content=b"zip", headers={"Content-Type": "application/zip"}
+        )
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            self.client.run("example_tool", args=self._args(), files={"input": __file__}, output_dir=out_dir)
+
+        _, kwargs = mock_post.call_args
+        data = kwargs["data"]
+        # A "choice" travels as the option name, in clear.
+        self.assertEqual(data["preview_format"], "json")
+        # A "multichoice" travels as the complete dict, as JSON.
+        self.assertEqual(json.loads(data["outputs"]), {"summary": True, "preview": True, "columns": False})
+        self.assertEqual(data["label"], "test")
+        # Only the file argument is uploaded.
+        self.assertEqual(set(kwargs["files"]), {"input"})
+
+    @mock.patch("ServerToolsCoreLib.client.requests.post")
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_a_zipped_folder_is_uploaded_under_the_same_argument_name(self, mock_get, mock_post):
+        # The client zips a folder selection before sending; the server sees an
+        # ordinary .zip under "input" and unpacks it.
+        import tempfile
+
+        mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
+        mock_post.return_value = _response(content=b"zip", headers={"Content-Type": "application/zip"})
+
+        with tempfile.TemporaryDirectory() as work_dir:
+            archive = os.path.join(work_dir, "example_tool_input.zip")
+            with open(archive, "wb") as fh:
+                fh.write(b"PK\x03\x04")
+            self.client.run("example_tool", args=self._args(), files={"input": archive}, output_dir=work_dir)
+
+        _, kwargs = mock_post.call_args
+        filename, _handle = kwargs["files"]["input"]
+        self.assertEqual(filename, "example_tool_input.zip")
+
+    @mock.patch("ServerToolsCoreLib.client.requests.post")
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_files_output_kind_is_saved_under_its_real_name(self, mock_get, mock_post):
+        import tempfile
+
+        mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
+        mock_post.return_value = _response(
+            content=b"PK\x03\x04zip-bytes",
+            headers={
+                "Content-Type": "application/zip",
+                "Content-Disposition": 'attachment; filename="example_tool_results.zip"',
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            result = self.client.run(
+                "example_tool", args=self._args(), files={"input": __file__}, output_dir=out_dir
+            )
+
+        self.assertEqual(result.kind, "file")
+        # A .zip of several results: base_widget's "save_as" handling unpacks
+        # it into the output folder (see slicer_io.is_extractable_archive).
+        self.assertEqual(os.path.basename(result.path), "example_tool_results.zip")
+
+    @mock.patch("ServerToolsCoreLib.client.requests.post")
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_unknown_option_422_is_shown_verbatim(self, mock_get, mock_post):
+        # No client-side fallback for an out-of-list value: the server's own
+        # message names the offending option and lists the valid ones.
+        mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
+        detail = "Argument 'preview_format': unknown option 'xml'. Expected one of: csv, json"
+        mock_post.return_value = _response(status_code=422, json_data={"detail": detail})
+
+        with self.assertRaises(ServerToolError) as ctx:
+            self.client.run(
+                "example_tool",
+                args=self._args(preview_format="xml"),
+                files={"input": __file__},
+                output_dir="/tmp",
+            )
+
+        self.assertEqual(str(ctx.exception), detail)
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    @mock.patch("ServerToolsCoreLib.client.requests.post")
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_413_reports_the_server_s_actual_limit(self, mock_get, mock_post):
+        mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
+        mock_post.return_value = _response(
+            status_code=413, json_data={"detail": "File exceeds the 500 MB limit."}
+        )
+
+        with self.assertRaises(ServerToolError) as ctx:
+            self.client.run("example_tool", args=self._args(), files={"input": __file__}, output_dir="/tmp")
+
+        self.assertEqual(str(ctx.exception), "File exceeds the 500 MB limit.")
+        self.assertEqual(ctx.exception.status_code, 413)
+
+    @mock.patch("ServerToolsCoreLib.client.requests.post")
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_400_reports_the_allowed_extensions(self, mock_get, mock_post):
+        mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
+        detail = "Unsupported file extension for 'input'. Allowed: ('.csv', '.zip')"
+        mock_post.return_value = _response(status_code=400, json_data={"detail": detail})
+
+        with self.assertRaises(ServerToolError) as ctx:
+            self.client.run("example_tool", args=self._args(), files={"input": __file__}, output_dir="/tmp")
+
+        self.assertEqual(str(ctx.exception), detail)
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    @mock.patch("ServerToolsCoreLib.client.requests.post")
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_401_reports_the_server_message(self, mock_get, mock_post):
+        mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
+        mock_post.return_value = _response(status_code=401, json_data={"detail": "Invalid token."})
+
+        with self.assertRaises(ServerToolError) as ctx:
+            self.client.run("example_tool", args=self._args(), files={"input": __file__}, output_dir="/tmp")
+
+        self.assertEqual(str(ctx.exception), "Invalid token.")
+
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_missing_input_file_fails_locally(self, mock_get):
+        mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
+
+        with self.assertRaises(ServerToolError) as ctx:
+            self.client.run("example_tool", args=self._args(), files={}, output_dir="/tmp")
+
+        self.assertIn("input", str(ctx.exception))
+
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_optional_choice_arguments_may_be_omitted(self, mock_get):
+        # Omitting a multichoice entirely is what applies the server's declared
+        # defaults — it must not be forced into the payload.
+        mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
+
+        self.client._validate_against_schema(
+            self.client.get_tool_schema("example_tool"),
+            {"label": "test", "threshold": 1.0},
+            {"input": __file__},
+        )
 
 
 if __name__ == "__main__":

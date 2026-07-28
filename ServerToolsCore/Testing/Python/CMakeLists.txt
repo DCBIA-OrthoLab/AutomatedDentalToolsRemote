@@ -10,3 +10,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE} -m unittest test_client
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
+
+# test_formgen.py does need qt/ctk/slicer, but only as the small stand-ins in
+# qt_stubs.py: it checks which widgets a schema produces and what they read
+# back as, which is pure Python once the widget classes are stubbed. Same
+# rationale as above — no Slicer interpreter launch needed.
+add_test(
+  NAME ServerToolsCore_test_formgen
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_formgen
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )
