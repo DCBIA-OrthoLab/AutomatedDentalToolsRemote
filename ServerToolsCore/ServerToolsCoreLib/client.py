@@ -179,8 +179,11 @@ class ToolServerClient:
             self._tools_cache = self._fetch_tools()
         return self._tools_cache
 
-    def get_tool_schema(self, tool_name: str) -> dict:
-        tools = self.list_tools()
+    def get_tool_schema(self, tool_name: str, force_refresh: bool = False) -> dict:
+        """`force_refresh` re-fetches /tools instead of trusting the cache —
+        used when retrying after a failure, where the cached list may be the
+        very reason the tool wasn't found."""
+        tools = self.list_tools(force_refresh=force_refresh)
         if tool_name not in tools:
             available = ", ".join(sorted(tools)) or "none"
             raise ServerToolError(f"Unknown tool '{tool_name}'. Available: {available}")
