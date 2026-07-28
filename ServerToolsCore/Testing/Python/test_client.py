@@ -153,11 +153,11 @@ class ToolServerClientTest(unittest.TestCase):
             json_data={"models": ["stacking_v1.zip", "stacking_v2.zip"], "testfiles": ["demo.zip"]}
         )
 
-        data = self.client.list_tool_data("surg_mov_pred")
+        data = self.client.list_tool_data("SurgMovPred")
 
         self.assertEqual(data, {"models": ["stacking_v1.zip", "stacking_v2.zip"], "testfiles": ["demo.zip"]})
         args, kwargs = mock_get.call_args
-        self.assertEqual(args[0], "https://example.org/tools/surg_mov_pred/data")
+        self.assertEqual(args[0], "https://example.org/tools/SurgMovPred/data")
         # The endpoint is Bearer-protected, unlike /tools.
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer secret-token")
         # Called synchronously from a module's setup(), like the schema fetch:
@@ -168,19 +168,19 @@ class ToolServerClientTest(unittest.TestCase):
     def test_list_tool_data_tolerates_missing_keys(self, mock_get):
         mock_get.return_value = _response(json_data={})
 
-        self.assertEqual(self.client.list_tool_data("surg_mov_pred"), {"models": [], "testfiles": []})
+        self.assertEqual(self.client.list_tool_data("SurgMovPred"), {"models": [], "testfiles": []})
 
     @mock.patch("ServerToolsCoreLib.client.requests.get")
     def test_list_tool_data_network_error_wrapped(self, mock_get):
         mock_get.side_effect = requests.RequestException("boom")
         with self.assertRaises(ServerToolError):
-            self.client.list_tool_data("surg_mov_pred")
+            self.client.list_tool_data("SurgMovPred")
 
     @mock.patch("ServerToolsCoreLib.client.requests.get")
     def test_list_tool_data_maps_error_status(self, mock_get):
         mock_get.return_value = _response(status_code=401, json_data={})
         with self.assertRaises(ServerToolError) as ctx:
-            self.client.list_tool_data("surg_mov_pred")
+            self.client.list_tool_data("SurgMovPred")
         self.assertEqual(ctx.exception.status_code, 401)
 
     # -- local validation ----------------------------------------------
@@ -245,14 +245,14 @@ class ToolServerClientTest(unittest.TestCase):
         with self.assertRaises(ServerToolError):
             self.client.run("example_tool", args={}, files={"label": __file__}, output_dir="/tmp")
 
-    # -- multi-file tools (e.g. real surg_mov_pred: "model" + "input") ------
+    # -- multi-file tools (e.g. real SurgMovPred: "model" + "input") ------
 
     @mock.patch("ServerToolsCoreLib.client.requests.get")
     def test_run_rejects_when_only_one_of_two_required_files_given(self, mock_get):
         mock_get.return_value = _response(
             json_data=[
                 {
-                    "name": "surg_mov_pred",
+                    "name": "SurgMovPred",
                     "arguments": {
                         "model": {"type": "zip_file", "required": True},
                         "input": {"type": "zip_file", "required": True},
@@ -263,7 +263,7 @@ class ToolServerClientTest(unittest.TestCase):
         )
 
         with self.assertRaises(ServerToolError) as ctx:
-            self.client.run("surg_mov_pred", args={}, files={"input": __file__}, output_dir="/tmp")
+            self.client.run("SurgMovPred", args={}, files={"input": __file__}, output_dir="/tmp")
 
         self.assertIn("model", str(ctx.exception))
 
@@ -273,7 +273,7 @@ class ToolServerClientTest(unittest.TestCase):
         mock_get.return_value = _response(
             json_data=[
                 {
-                    "name": "surg_mov_pred",
+                    "name": "SurgMovPred",
                     "arguments": {
                         "model": {"type": "zip_file", "required": True},
                         "input": {"type": "zip_file", "required": True},
@@ -290,7 +290,7 @@ class ToolServerClientTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as out_dir:
             self.client.run(
-                "surg_mov_pred", args={}, files={"model": __file__, "input": __file__}, output_dir=out_dir
+                "SurgMovPred", args={}, files={"model": __file__, "input": __file__}, output_dir=out_dir
             )
 
         _, kwargs = mock_post.call_args
@@ -449,7 +449,7 @@ class ToolServerClientTest(unittest.TestCase):
         # extension (see slicer_io.is_extractable_archive) would wrongly
         # extract a spreadsheet into raw XML parts instead of keeping it.
         mock_get.return_value = _response(
-            json_data=[{"name": "surg_mov_pred", "arguments": {}, "output_kind": "file"}]
+            json_data=[{"name": "SurgMovPred", "arguments": {}, "output_kind": "file"}]
         )
         mock_post.return_value = _response(
             content=b"PK\x03\x04fake-xlsx-bytes",
@@ -462,7 +462,7 @@ class ToolServerClientTest(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as out_dir:
-            result = self.client.run("surg_mov_pred", args={}, output_dir=out_dir)
+            result = self.client.run("SurgMovPred", args={}, output_dir=out_dir)
 
         self.assertEqual(os.path.basename(result.path), "predictions_outputs.xlsx")
         self.assertFalse(result.path.lower().endswith(".zip"))
@@ -474,7 +474,7 @@ class ToolServerClientTest(unittest.TestCase):
         # a real MIME lookup (mirroring the server's own mimetypes.guess_type),
         # not the generic .bin/.gz guess.
         mock_get.return_value = _response(
-            json_data=[{"name": "surg_mov_pred", "arguments": {}, "output_kind": "file"}]
+            json_data=[{"name": "SurgMovPred", "arguments": {}, "output_kind": "file"}]
         )
         mock_post.return_value = _response(
             content=b"csv,data",
@@ -484,7 +484,7 @@ class ToolServerClientTest(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as out_dir:
-            result = self.client.run("surg_mov_pred", args={}, output_dir=out_dir)
+            result = self.client.run("SurgMovPred", args={}, output_dir=out_dir)
 
         self.assertTrue(result.path.endswith(".csv"), result.path)
 
@@ -596,7 +596,7 @@ class RealServerSchemaTest(unittest.TestCase):
     # from GET /tools/{tool}/data), only "input" is still uploaded.
     _SURG_MOV_PRED_SCHEMA = [
         {
-            "name": "surg_mov_pred",
+            "name": "SurgMovPred",
             "arguments": {
                 "model": {"type": "str", "required": True, "server_selectable": "model"},
                 "input": {"type": "zip_file", "required": True, "server_selectable": "testfile"},
@@ -615,7 +615,7 @@ class RealServerSchemaTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as out_dir:
             self.client.run(
-                "surg_mov_pred",
+                "SurgMovPred",
                 args={"model": "stacking_v2.zip"},
                 files={"input": __file__},
                 output_dir=out_dir,
@@ -633,7 +633,7 @@ class RealServerSchemaTest(unittest.TestCase):
 
         with self.assertRaises(ServerToolError) as ctx:
             self.client._validate_against_schema(
-                self.client.get_tool_schema("surg_mov_pred"), {}, {"input": __file__}
+                self.client.get_tool_schema("SurgMovPred"), {}, {"input": __file__}
             )
         self.assertIn("model", str(ctx.exception))
 
@@ -646,7 +646,7 @@ class RealServerSchemaTest(unittest.TestCase):
 
         with self.assertRaises(ServerToolError):
             self.client._validate_against_schema(
-                self.client.get_tool_schema("surg_mov_pred"),
+                self.client.get_tool_schema("SurgMovPred"),
                 {},
                 {"model": __file__, "input": __file__},
             )

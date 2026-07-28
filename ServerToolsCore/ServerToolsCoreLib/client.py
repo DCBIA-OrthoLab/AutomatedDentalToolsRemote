@@ -128,7 +128,7 @@ class ToolServerClient:
         """Return {"models": [...], "testfiles": [...]} — the file names hosted
         on the server for this tool (GET /tools/{tool}/data, Bearer-protected).
 
-        This is what lets a server_selectable argument (e.g. surg_mov_pred's
+        This is what lets a server_selectable argument (e.g. SurgMovPred's
         "model") be offered as a dropdown of server-side choices instead of a
         local file picker. Not cached: called once per module setup(), and the
         server-side list can change independently of the /tools schema.
