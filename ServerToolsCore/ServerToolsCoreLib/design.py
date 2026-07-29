@@ -172,6 +172,17 @@ def required_label(text: str) -> qt.QLabel:
     return section_title(f"{text} *")
 
 
+def hint_label(text: str) -> qt.QLabel:
+    """A wrapped, muted, smaller label for explanatory text shown next to a
+    field — the server's own `description` when a tooltip is not enough (see
+    formgen.MultiChoiceGroup)."""
+    t = tokens()
+    label = qt.QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet(f"color: {t['TEXT_MUTED']}; font-size: 8pt; padding-bottom: {SPACING_XS}px;")
+    return label
+
+
 def warning_label(text: str) -> qt.QLabel:
     """A visible, wrapped, danger-colored label — used when part of a module's
     UI could not be built, so a failure is never just a silent blank panel."""

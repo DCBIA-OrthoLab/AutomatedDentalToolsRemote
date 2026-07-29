@@ -583,9 +583,58 @@ class IsFileTypeTest(unittest.TestCase):
         self.assertFalse(is_file_type(""))
 
 
+class PublishedExtensionsTest(unittest.TestCase):
+    """The server publishes each file type's extensions next to `types`, so
+    the client keeps no copy of its FILE_TYPES table."""
+
+    def test_extensions_come_from_the_schema(self):
+        spec = {
+            "type": "csv_file",
+            "types": ["csv_file", "folder"],
+            "extensions": {"csv_file": [".csv"], "folder": [".zip"]},
+        }
+
+        # "folder"'s .zip is what a zipped folder uploads as, not something a
+        # file picker should offer.
+        self.assertEqual(file_extensions_for(spec), (".csv",))
+
+    def test_a_multi_format_type_needs_no_client_side_table(self):
+        # AMASSS's input. Nothing in the name says .nii/.nrrd/.gipl.
+        spec = {
+            "type": "volume_or_zip_file",
+            "types": ["volume_or_zip_file"],
+            "extensions": {"volume_or_zip_file": [".nii", ".nii.gz", ".nrrd", ".zip"]},
+        }
+
+        self.assertEqual(file_extensions_for(spec), (".nii", ".nii.gz", ".nrrd", ".zip"))
+
+    def test_a_type_the_server_declines_to_restrict_is_unrestricted(self):
+        spec = {"type": "file", "types": ["file"], "extensions": {"file": None}}
+
+        self.assertEqual(file_extensions_for(spec), ())
+
+    def test_the_schema_wins_over_the_fallback_table(self):
+        # A server that changes an extension must not be second-guessed.
+        spec = {
+            "type": "nifti_file",
+            "types": ["nifti_file"],
+            "extensions": {"nifti_file": [".nii", ".nii.gz", ".nrrd"]},
+        }
+
+        self.assertEqual(file_extensions_for(spec), (".nii", ".nii.gz", ".nrrd"))
+
+    def test_a_server_predating_the_field_still_works(self):
+        # No "extensions" key at all: fall back to the local table.
+        self.assertEqual(file_extensions_for({"types": ["nifti_file"]}), (".nii", ".nii.gz"))
+
+
 class ArgumentTypesTest(unittest.TestCase):
     """An argument may accept several types (`types`), e.g. example_tool's
-    `input`: a .csv file *or* a whole folder."""
+    `input`: a .csv file *or* a whole folder.
+
+    These exercise the fallback path — a server that does not publish
+    `extensions` (see PublishedExtensionsTest for the normal one).
+    """
 
     _INPUT = {"type": "csv_file", "types": ["csv_file", "folder"]}
 
@@ -622,6 +671,21 @@ class ArgumentTypesTest(unittest.TestCase):
         # Same convention as is_file_type: a new "<x>_file" the server adds
         # needs no client-side change.
         self.assertEqual(file_extensions_for({"types": ["vtk_file"]}), (".vtk",))
+
+    def test_a_multi_format_type_lists_every_extension(self):
+        # The server's "volume_or_zip_file" (used by its AMASSS tool): a name
+        # that spells out no extension at all. Its entry has to mirror the
+        # server's FILE_TYPES table, which /tools does not publish.
+        self.assertEqual(
+            file_extensions_for({"types": ["volume_or_zip_file"]}),
+            (".nii", ".nii.gz", ".nrrd", ".nrrd.gz", ".gipl", ".gipl.gz", ".zip"),
+        )
+
+    def test_an_unknown_compound_type_name_is_not_turned_into_a_filter(self):
+        # Guessing ".scan_or_mesh" from "scan_or_mesh_file" would give a file
+        # dialog matching nothing — strictly worse than not filtering. A
+        # compound name we don't know degrades to an unrestricted picker.
+        self.assertEqual(file_extensions_for({"types": ["scan_or_mesh_file"]}), ())
 
 
 class RealServerSchemaTest(unittest.TestCase):

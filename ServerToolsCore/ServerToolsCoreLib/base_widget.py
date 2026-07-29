@@ -292,6 +292,23 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             outputsLayout.addRow(design.required_label(_("Output folder")), self._outputFolderWidget)
             formgen.connect_changed(self._outputFolderWidget, self._checkCanApply)
 
+        self.configureFields()
+
+    def configureFields(self) -> None:
+        """Override to touch up the generated widgets once they all exist —
+        a placeholder, an initial value, a connection between two fields.
+
+        Called at the end of every auto-generated panel build, `addExtraWidgets`
+        only at the first: the panel is rebuilt from scratch when a server that
+        was down at setup() time comes back (see _buildForm), and anything
+        applied outside this hook would be lost on that rebuild, leaving a
+        subtly different panel from the one the module describes.
+
+        `self._argWidgets` and `self._inputWidgets` are populated by now; both
+        are empty when the schema could not be fetched, so read them with
+        `.get()`.
+        """
+
     @property
     def resultKind(self) -> str:
         """RESULT_KIND if the module declares one, otherwise derived from the
@@ -346,13 +363,15 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         visible warning instead of leaving a silently empty dropdown.
         """
         arguments = self._schema.get("arguments", {})
-        # File-typed server_selectable arguments (e.g. an uploadable-or-server
-        # testfile) are handled by FILE_INPUTS, never emitted by formgen.build
-        # — so restricting to _argWidgets naturally keeps only the scalar ones.
+        # Two widget kinds, one mechanism: a SCALAR server_selectable argument
+        # (a model, which must never leave the server) is a plain combo box in
+        # _argWidgets; a FILE-typed one is an input row that also offers the
+        # hosted names, in _inputWidgets. Both are filled from the same call.
         selectable = {
             name: spec["server_selectable"]
             for name, spec in arguments.items()
-            if spec.get("server_selectable") and name in self._argWidgets
+            if spec.get("server_selectable")
+            and (name in self._argWidgets or name in self._inputWidgets)
         }
         if not selectable:
             return
@@ -372,12 +391,20 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         for arg_name, kind in selectable.items():
             choices = data.get("models" if kind == "model" else "testfiles", [])
-            widget = self._argWidgets[arg_name]
-            widget.clear()
-            widget.addItems(choices)
+            fileInput = self._inputWidgets.get(arg_name)
+            if fileInput is not None:
+                fileInput.setChoices(choices)
+            else:
+                widget = self._argWidgets[arg_name]
+                widget.clear()
+                widget.addItems(choices)
             logger.info("Populated '%s.%s' with %d server-side %s(s)",
                         self.TOOL_NAME, arg_name, len(choices), kind)
-            if not choices:
+            # An empty list only blocks the user when there is no other way to
+            # provide the argument. A file-typed one can always be uploaded
+            # instead, so warning about it would be noise on every server that
+            # simply hosts no test data.
+            if not choices and fileInput is None:
                 rootLayout.addWidget(
                     design.warning_label(
                         _("No {kind} available on the server for '{tool}' — ask the server maintainer to add one.").format(
@@ -416,8 +443,44 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # ------------------------------------------------------------------
 
     def collectArgs(self) -> dict:
-        """Override to transform values before sending."""
-        return formgen.collect(self._argWidgets)
+        """Override to transform values before sending.
+
+        An OPTIONAL text field left empty is dropped rather than sent as "".
+        The server applies an omitted optional argument's default; it takes a
+        present one literally, so sending "" is asking for an empty value, not
+        for the default. That is never what an untouched field means — for
+        ALI's `prediction_ID` it produced `scan_lm_.mrk.json` instead of
+        `scan_lm_Pred.mrk.json`.
+
+        Only `""` qualifies: a multichoice reads back as a dict (every box
+        unchecked is a meaningful selection, see MultiChoiceGroup), and 0 /
+        False are values a user deliberately set.
+        """
+        values = formgen.collect(self._argWidgets)
+        arguments = (self._schema or {}).get("arguments", {})
+        collected = {
+            name: value
+            for name, value in values.items()
+            if not (value == "" and not arguments.get(name, {}).get("required"))
+        }
+
+        # A file argument satisfied from the server's own data store travels as
+        # a plain form value — its NAME — not as an upload, so it belongs here
+        # rather than in prepareInputFiles. The file itself never moves in
+        # either direction, which is the point for a hosted test cohort.
+        collected.update(self._serverSideSelections())
+        return collected
+
+    def _serverSideSelections(self) -> dict:
+        """{argument name: server-side file name} for every input row where the
+        user picked a hosted file instead of one of their own."""
+        chosen = {}
+        for arg_name, widget in self._inputWidgets.items():
+            reader = getattr(widget, "server_name", None)
+            name = reader() if reader else ""
+            if name:
+                chosen[arg_name] = name
+        return chosen
 
     def prepareInputFiles(self, workspace: slicer_io.TempWorkspace) -> dict:
         """Override for exotic input cases. Default behavior covers every file
@@ -432,6 +495,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def _prepareOneInputFile(self, workspace: slicer_io.TempWorkspace, arg_name: str, mode: str):
         widget = self._inputWidgets.get(arg_name)
+        # Already satisfied by a file hosted on the server: nothing to upload.
+        # collectArgs sends its name instead (see _serverSideSelections).
+        reader = getattr(widget, "server_name", None)
+        if reader and reader():
+            return None
         if mode == "single_file":
             return widget.currentPath
         if mode == "folder_zip":
@@ -499,7 +567,15 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if mode == "volume_node":
                 if widget is None or widget.currentNode() is None:
                     return False
-            elif not (widget and widget.currentPath):
+                continue
+            if widget is None:
+                return False
+            # A hosted file satisfies the argument just as well as a local one,
+            # and leaves currentPath empty on purpose (see ServerFileInput).
+            reader = getattr(widget, "server_name", None)
+            if reader and reader():
+                continue
+            if not widget.currentPath:
                 return False
         return True
 

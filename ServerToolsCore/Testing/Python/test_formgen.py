@@ -130,8 +130,15 @@ class MultiChoiceWidgetTest(unittest.TestCase):
             self.assertIsInstance(box, qt.QCheckBox)
 
     def test_checkboxes_are_laid_out_in_declaration_order(self):
-        laid_out = self.group.container.layout.widgets
+        # The group also lays out the argument's description as a hint label
+        # above the boxes, so filter to the boxes themselves.
+        laid_out = [w for w in self.group.container.layout.widgets if isinstance(w, qt.QCheckBox)]
         self.assertEqual([box.text for box in laid_out], ["summary", "preview", "columns"])
+
+    def test_the_description_is_laid_out_above_the_boxes(self):
+        laid_out = self.group.container.layout.widgets
+        self.assertIsInstance(laid_out[0], qt.QLabel)
+        self.assertEqual(laid_out[0].text, "Which result files to produce")
 
     def test_initial_state_matches_the_declared_booleans(self):
         self.assertEqual(

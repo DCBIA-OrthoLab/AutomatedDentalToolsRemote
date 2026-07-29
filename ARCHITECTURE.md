@@ -45,7 +45,13 @@ SlicerAutomatedDentalTools/
 ├── ExampleTool/                            # reference client for the server's example_tool
 │   ├── CMakeLists.txt
 │   └── ExampleTool.py                      # ~35 lines, declarative
-└── SurgMovPred_CLI/                        # left in place but unwired (see "SurgMovPred_CLI" below)
+├── ALI/                                    # automatic landmark identification
+│   ├── CMakeLists.txt
+│   ├── ALI.py                              # declarative, plus a run-report summary
+│   ├── Testing/Python/test_ali_client.py   # ALI's schema as a fixture, qt/ctk/slicer stubbed
+│   └── ALI_Method/                         # former local module, left in place but unwired
+├── SurgMovPred_CLI/                        # left in place but unwired (see "SurgMovPred_CLI" below)
+└── ALI_CBCT/, ALI_IOS/                     # the CLIs ALI used to drive, likewise unwired
 ```
 
 ### Deviation from a literal reading of the brief
@@ -161,13 +167,24 @@ interpreter launch:
     no notion of a folder). The server detects a `"folder"`-typed argument,
     extracts the archive, and strips a lone root directory — so it makes no
     difference whether the zip holds `cohort/a.csv` or `a.csv`.
-  - `file_extensions_for(spec)` — the extensions a file picker should offer,
-    derived from the file-ish entries of `types`: `["csv_file", "folder"]` →
-    `(".csv",)`. A table covers the types whose name doesn't spell out their
-    extension (`nifti_file` → `.nii`/`.nii.gz`, `zip_file` → `.zip`) and
-    anything else follows the `"<x>_file"` → `".<x>"` convention, so a new
-    file type needs no client change. An empty result means "don't restrict"
-    (the generic `"file"` type, or a folder-only argument).
+  - `file_extensions_for(spec)` — the extensions a file picker should offer:
+    `["csv_file", "folder"]` → `(".csv",)`. **Read from the schema**, which
+    publishes `extensions` (`{type name: [extension, ...]}`, the server's own
+    `FILE_TYPES` table) alongside `types`; only the *file* types count, since
+    `"folder"`'s `.zip` says what a zipped folder may be uploaded as, not what
+    a picker should show. An empty result means "don't restrict" (the generic
+    `"file"` type, or a folder-only argument).
+
+    A type name does not reliably spell out its extensions — `nifti_file` is
+    `.nii`/`.nii.gz`, `volume_or_zip_file` is seven of them — so the client
+    used to keep a copy of that table, and it drifted: `volume_or_zip_file`
+    (the server's AMASSS input) was missing from it and derived as
+    `.volume_or_zip`, a file dialog matching nothing. The table survives only
+    as a fallback for a server predating the `extensions` field, together with
+    the `"<x>_file"` → `".<x>"` convention; **a new file type is added
+    server-side, never here**. A compound name that fallback cannot read
+    (underscores left once `_file` is stripped) yields no filter rather than a
+    nonsensical one.
 - `list_tool_data(tool_name)` → `{"models": [...], "testfiles": [...]}` — the
   file names hosted server-side for this tool (`GET /tools/{tool}/data`,
   Bearer-protected unlike `/tools`). Backs the server-selectable dropdowns
@@ -342,9 +359,24 @@ Overridable hooks (kept deliberately few):
 |---|---|---|
 | `buildCustomUI(layout)` | used when `AUTO_UI = False` | raises `NotImplementedError` |
 | `addExtraWidgets(layout)` | add a custom button/field without touching `setup()` | no-op |
-| `collectArgs()` | transform values before sending | `formgen.collect(self._argWidgets)` |
+| `configureFields()` | touch up the generated widgets (placeholder, initial value, one field driving another) | no-op |
+| `collectArgs()` | transform values before sending | `formgen.collect(self._argWidgets)`, minus optional text fields left empty |
 | `prepareInputFiles(workspace)` | produce `{schema_arg_name: file_path}` to upload | covers all `FILE_INPUTS` modes already |
 | `handleResult(result)` | custom result display | dispatches on `RESULT_KIND` |
+
+`configureFields()` runs at the end of **every** auto-generated build,
+`addExtraWidgets()` only at the first. The panel is rebuilt from scratch when a
+server that was unreachable at `setup()` time comes back, so anything applied
+to a generated widget outside `configureFields()` is silently lost on that
+rebuild.
+
+`collectArgs()` dropping an **optional** field left empty is not cosmetic: the
+server applies an omitted optional argument's declared default and takes a
+present one literally, so `""` asks for an empty value rather than for the
+default. That is what turned ALI's untouched `prediction_ID` into
+`scan_lm_.mrk.json`. A module wanting to show the default advertises it as a
+placeholder (see `ALI.configureFields`), which keeps it written down once,
+server-side.
 
 Every file-type argument (per `is_file_type`) the tool's schema declares gets
 one row in the "Inputs" section, labeled from the argument name, in schema
@@ -462,6 +494,7 @@ fields) into a `qt.QFormLayout`, using the type table below, and returns
 | Schema `type` | Qt widget |
 |---|---|
 | any non-file type with `server_selectable` set | `QComboBox` (populated by `base_widget._populateServerSelectables` from `GET /tools/{tool}/data` — `formgen` itself never talks HTTP) |
+| any **file** type with `server_selectable` set | `ServerFileInput`: the same dropdown of hosted names, wrapped around the normal local picker — the argument accepts either shape |
 | `str` | `QLineEdit` |
 | `int` | `QSpinBox` |
 | `float` | `QDoubleSpinBox` |
@@ -621,7 +654,22 @@ visible warning label in the panel, and the Apply button stays disabled while
 the dropdown is empty (an empty `currentText` fails
 `formgen.all_required_filled`). Uploading a local model package is not just
 unsupported client-side, the server actively rejects a file upload for a
-scalar argument with a 400. (Historical note: an earlier iteration had
+scalar argument with a 400.
+
+**The same flag on a *file* argument means something different**, and both
+halves are offered. ALI's and AMASSS's `input` are
+`server_selectable: "testfile"` on a file type: the caller may upload its own
+data **or** name a cohort the server already hosts, and that file then never
+travels in either direction — which is the point when it is confidential.
+`formgen.ServerFileInput` renders the hosted names above the normal picker and
+keeps the two mutually exclusive by clearing the other, rather than letting one
+silently win. A hosted selection leaves `currentPath` empty on purpose, so
+`prepareInputFiles` uploads nothing and `collectArgs` sends the name as a plain
+form value instead; `client._validate_against_schema` accepts either as
+satisfying a required file argument. An empty hosted list is not warned about
+here — unlike a model, a file argument can always be uploaded instead.
+
+(Historical note: an earlier iteration had
 `"model"` as a second `zip_file` upload — `FILE_INPUTS = {"input":
 "folder_zip", "model": "folder_zip"}` — because the server of the time
 required it. The multi-file upload machinery it forced into `client.run()` /

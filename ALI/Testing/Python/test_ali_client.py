@@ -1,0 +1,349 @@
+"""Unit tests for the ALI module's client behaviour — run outside Slicer, with
+`qt`/`ctk`/`slicer` stubbed (ServerToolsCore/Testing/Python/qt_stubs.py).
+
+What is tested here is everything ALI's panel and request building do that the
+generic tests in ServerToolsCore cannot cover, because it depends on ALI's own
+schema: the union of two file types' extensions, the folder picker that only a
+FILE_INPUTS override produces, and the claim that `input` + `model` alone form
+a complete request.
+
+`ALI.py` itself is deliberately NOT imported: it subclasses
+ScriptedLoadableModule and ServerToolWidgetBase, which need a real Slicer
+(slicer.util.VTKObservationMixin, slicer.i18n). Testing it would mean stubbing
+Slicer's module framework, at which point the test would be measuring the stub.
+The module's declarations are asserted instead, against the same functions it
+delegates to.
+
+Usage:
+    python3 -m unittest ALI/Testing/Python/test_ali_client.py
+"""
+
+import json
+import os
+import shutil
+import sys
+import tempfile
+import unittest
+
+_HERE = os.path.abspath(os.path.dirname(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
+_CORE = os.path.join(_REPO_ROOT, "ServerToolsCore")
+# `ServerToolsCoreLib` is a package inside ServerToolsCore/, and qt_stubs lives
+# with that module's own tests: it is the extension's single set of Qt
+# stand-ins, and forking a second copy here would drift.
+sys.path.insert(0, os.path.join(_CORE, "Testing", "Python"))
+sys.path.insert(0, _CORE)
+
+import qt_stubs
+
+qt, ctk = qt_stubs.install()
+
+from ServerToolsCoreLib import formgen, slicer_io
+from ServerToolsCoreLib.client import ToolServerClient
+from ServerToolsCoreLib.errors import error_for_status
+
+# The server's actual GET /tools payload for ALI, verbatim. Kept here as a
+# fixture so the panel can be tested without a running server; if the server's
+# schema changes, these tests are what notices.
+ALI_SCHEMA = {
+    "name": "ALI",
+    "output_kind": "files",
+    "arguments": {
+        "input": {
+            "type": "volume_or_zip_file",
+            "types": ["volume_or_zip_file", "surface_or_zip_file"],
+            "required": True,
+            "server_selectable": "testfile",
+            "choices": None,
+            "extensions": {
+                "volume_or_zip_file": [".nii", ".nii.gz", ".nrrd", ".nrrd.gz", ".gipl", ".gipl.gz", ".zip"],
+                "surface_or_zip_file": [".vtk", ".stl", ".zip"],
+            },
+            "description": (
+                "A CBCT scan (.nii/.nii.gz/.nrrd/.nrrd.gz/.gipl/.gipl.gz), an IOS surface "
+                "(.vtk/.stl), or a .zip archive of a folder of either -- DICOM series are "
+                "recognised inside the archive and converted automatically"
+            ),
+        },
+        "model": {
+            "type": "str", "types": ["str"], "required": True,
+            "server_selectable": "model", "choices": None, "extensions": None,
+            "description": "Name of a model bundle hosted on the server (see GET /tools/ALI/data)",
+        },
+        "cbct_regions": {
+            "type": "multichoice", "types": ["multichoice"], "required": False,
+            "server_selectable": None, "extensions": None,
+            "choices": {"Cranial base": True, "Upper": True, "Lower": True, "Impacted canine": True},
+            "description": "CBCT only: anatomical regions to predict",
+        },
+        "ios_networks": {
+            "type": "multichoice", "types": ["multichoice"], "required": False,
+            "server_selectable": None, "extensions": None,
+            "choices": {"Occlusal": True, "Cervical": True},
+            "description": "IOS only: landmark families to predict",
+        },
+        "prediction_ID": {
+            "type": "str", "types": ["str"], "required": False,
+            "server_selectable": None, "choices": None, "extensions": None,
+            "description": "Suffix used in output file names, e.g. scan_lm_Pred.mrk.json",
+        },
+    },
+}
+
+# What ALI/ALI.py declares. Asserted rather than imported — see the module
+# docstring.
+ALI_FILE_INPUTS = {"input": "file_or_folder"}
+
+
+def _argument(name: str) -> dict:
+    return ALI_SCHEMA["arguments"][name]
+
+
+class TestInputPicker(unittest.TestCase):
+    """The `input` row: which extensions it offers, and that it offers a
+    folder at all."""
+
+    def test_extensions_are_the_union_of_both_file_types(self):
+        # Both declared types are file types, so the picker offers everything
+        # either of them accepts — the client must not have to know which
+        # engine will end up running.
+        extensions = formgen.file_extensions_for(_argument("input"))
+        self.assertEqual(
+            set(extensions),
+            {".nii", ".nii.gz", ".nrrd", ".nrrd.gz", ".gipl", ".gipl.gz", ".vtk", ".stl", ".zip"},
+        )
+        # ".zip" is declared by both types and must appear once, not twice, or
+        # the dialog's filter string repeats it.
+        self.assertEqual(len(extensions), len(set(extensions)))
+
+    def test_schema_alone_would_not_offer_a_folder_picker(self):
+        # ALI's `input` declares no "folder" type, so the schema-driven rule
+        # gives a file picker only. This is exactly why ALI.py overrides it,
+        # and this test is what fails if someone removes the override believing
+        # the schema covers it.
+        self.assertEqual(formgen.auto_file_mode(_argument("input")), "single_file")
+
+    def test_override_produces_a_file_and_folder_row(self):
+        modes = formgen.file_input_modes(ALI_SCHEMA["arguments"], ALI_FILE_INPUTS)
+        self.assertEqual(modes, {"input": "file_or_folder"})
+
+        widget = formgen.file_widget(_argument("input"), modes["input"])
+        # `input` is also server_selectable, so the row is the dropdown of
+        # hosted files wrapped around the local picker (see TestServerSideInput).
+        self.assertIsInstance(widget, formgen.ServerFileInput)
+        self.assertIsInstance(widget.local, formgen.FileOrFolderInput)
+        # Both browse buttons exist: a DICOM series is a directory and has no
+        # extension a file dialog could match.
+        self.assertTrue(hasattr(widget.local, "fileButton"))
+        self.assertTrue(hasattr(widget.local, "folderButton"))
+
+    def test_file_dialog_filter_lists_every_accepted_extension(self):
+        widget = formgen.file_widget(_argument("input"), "file_or_folder")
+        qt.QFileDialog.next_file = "/tmp/scan.nii.gz"
+        widget.local._onBrowseFile()
+
+        filters = qt.QFileDialog.last_open_file_args[-1]
+        for extension in (".nii.gz", ".nrrd", ".gipl.gz", ".vtk", ".stl", ".zip"):
+            self.assertIn(f"*{extension}", filters)
+        self.assertEqual(widget.currentPath, "/tmp/scan.nii.gz")
+
+    def test_a_folder_selection_is_recognised_as_one(self):
+        directory = tempfile.mkdtemp(prefix="ali_pick_")
+        self.addCleanup(shutil.rmtree, directory, True)
+
+        widget = formgen.file_widget(_argument("input"), "file_or_folder")
+        qt.QFileDialog.next_directory = directory
+        widget.local._onBrowseFolder()
+
+        self.assertEqual(widget.currentPath, directory)
+        # The upload path branches on this, never on something the user had to
+        # set correctly beforehand.
+        self.assertTrue(widget.is_folder())
+
+
+class TestServerSideInput(unittest.TestCase):
+    """`input` is `server_selectable: "testfile"`: the user may name a scan the
+    server already hosts instead of uploading one."""
+
+    def setUp(self):
+        self.widget = formgen.file_widget(_argument("input"), "file_or_folder")
+        self.widget.setChoices(["MG_test_scan.nii.gz", "cohort_10_patients.zip"])
+
+    def test_upload_stays_the_first_and_default_option(self):
+        self.assertEqual(self.widget.combo.itemText(0), formgen.ServerFileInput.UPLOAD_OPTION)
+        self.assertEqual(self.widget.combo.count, 3)
+        self.assertEqual(self.widget.server_name(), "")
+
+    def test_choosing_a_hosted_file_uploads_nothing(self):
+        self.widget.combo.setCurrentText("MG_test_scan.nii.gz")
+        self.assertEqual(self.widget.server_name(), "MG_test_scan.nii.gz")
+        # Empty on purpose: prepareInputFiles has nothing to send, the name
+        # travels as a plain form value instead.
+        self.assertEqual(self.widget.currentPath, "")
+
+    def test_the_two_halves_are_mutually_exclusive_and_visibly_so(self):
+        self.widget.combo.setCurrentText("MG_test_scan.nii.gz")
+        self.widget.local.pathEdit.setText("/data/my_own_scan.nii.gz")
+        # Picking a local file resets the dropdown rather than losing to it:
+        # a precedence rule the user cannot see is how you end up sending the
+        # file you thought you had replaced.
+        self.assertEqual(self.widget.server_name(), "")
+        self.assertEqual(self.widget.currentPath, "/data/my_own_scan.nii.gz")
+
+        self.widget.combo.setCurrentText("cohort_10_patients.zip")
+        self.assertEqual(self.widget.currentPath, "")
+        self.assertEqual(self.widget.local.currentPath, "")
+
+    def test_a_hosted_name_satisfies_the_required_file_argument(self):
+        # Client-side validation runs before the round trip; requiring an
+        # upload here would reject the shape the server explicitly supports.
+        ToolServerClient._validate_against_schema(
+            ALI_SCHEMA, {"model": "ALI_CBCT_v2", "input": "MG_test_scan.nii.gz"}, {}
+        )
+
+    def test_the_model_argument_gets_no_local_picker(self):
+        # `model` is server_selectable on a SCALAR type: the weights must never
+        # leave the server, so there is no "upload my own" for it.
+        self.assertFalse(formgen.is_file_type(_argument("model")["type"]))
+
+
+class TestFolderUpload(unittest.TestCase):
+    """A picked directory becomes the .zip that actually goes up."""
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp(prefix="ali_zip_")
+        self.addCleanup(shutil.rmtree, self.workdir, True)
+        self.cohort = os.path.join(self.workdir, "cohort")
+        os.makedirs(os.path.join(self.cohort, "patient1"))
+        os.makedirs(os.path.join(self.cohort, "patient2"))
+
+    def _zip(self) -> str:
+        return slicer_io.zip_folder(self.cohort, os.path.join(self.workdir, "ALI_input.zip"))
+
+    def test_zips_a_folder_of_scans(self):
+        open(os.path.join(self.cohort, "patient1", "scan.nii.gz"), "wb").close()
+        open(os.path.join(self.cohort, "patient2", "scan.nii.gz"), "wb").close()
+
+        import zipfile
+
+        with zipfile.ZipFile(self._zip()) as archive:
+            names = set(archive.namelist())
+        # Paths are relative to the picked folder, so the server sees the tree
+        # it mirrors in the output, with no "cohort/" wrapper to strip.
+        self.assertEqual(names, {"patient1/scan.nii.gz", "patient2/scan.nii.gz"})
+
+    def test_zips_extensionless_dicom_slices(self):
+        # The reason the folder picker cannot be replaced by a filtered file
+        # picker: DICOM slices carry no extension at all.
+        for name in ("IM000001", "1.2.840.10008.1.2.3"):
+            open(os.path.join(self.cohort, "patient1", name), "wb").close()
+
+        import zipfile
+
+        with zipfile.ZipFile(self._zip()) as archive:
+            names = set(archive.namelist())
+        self.assertEqual(names, {"patient1/IM000001", "patient1/1.2.840.10008.1.2.3"})
+
+
+class TestTaskOneRequest(unittest.TestCase):
+    """`input` + `model` alone is a complete, valid request."""
+
+    def test_input_and_model_alone_satisfy_the_schema(self):
+        # Every other argument is optional, so the server applies its declared
+        # defaults and predicts everything the bundle can. Nothing else is
+        # needed for a first end-to-end run.
+        ToolServerClient._validate_against_schema(
+            ALI_SCHEMA, {"model": "ALI_CBCT_v2"}, {"input": "/tmp/cohort.zip"}
+        )
+
+    def test_the_model_travels_as_a_name_not_a_file(self):
+        self.assertEqual(
+            ToolServerClient._stringify({"model": "ALI_CBCT_v2"}), {"model": "ALI_CBCT_v2"}
+        )
+
+    def test_a_missing_model_is_caught_before_the_round_trip(self):
+        from ServerToolsCoreLib.errors import ServerToolError
+
+        with self.assertRaises(ServerToolError):
+            ToolServerClient._validate_against_schema(ALI_SCHEMA, {}, {"input": "/tmp/cohort.zip"})
+
+    def test_the_result_is_saved_not_loaded_as_one_node(self):
+        # output_kind "files" is a zip of several files: it can only be saved.
+        self.assertEqual(formgen.result_kind_for(ALI_SCHEMA["output_kind"]), "save_as")
+
+
+class TestSelectionGroups(unittest.TestCase):
+    """The two multichoice groups, both always rendered."""
+
+    def test_both_groups_are_built_with_their_declared_defaults(self):
+        layout = qt.QFormLayout()
+        widgets = formgen.build(ALI_SCHEMA["arguments"], layout)
+
+        # The file argument gets its own input row, not a form field.
+        self.assertEqual(
+            sorted(widgets), ["cbct_regions", "ios_networks", "model", "prediction_ID"]
+        )
+        for name in ("cbct_regions", "ios_networks"):
+            group = widgets[name]
+            self.assertIsInstance(group, formgen.MultiChoiceGroup)
+            self.assertEqual(list(group.boxes), list(_argument(name)["choices"]))
+            self.assertTrue(all(box.isChecked() for box in group.boxes.values()))
+
+    def test_the_server_wording_is_visible_not_just_a_tooltip(self):
+        # Which group applies depends on data the client has not looked at, so
+        # "CBCT only" has to be on screen next to the boxes.
+        group = formgen.MultiChoiceGroup(
+            _argument("cbct_regions")["choices"], _argument("cbct_regions")["description"]
+        )
+        hints = [w for w in group.container.layout.widgets if isinstance(w, qt.QLabel)]
+        self.assertEqual(len(hints), 1)
+        self.assertIn("CBCT only", hints[0].text)
+
+    def test_an_unchecked_option_is_sent_as_false_not_omitted(self):
+        group = formgen.MultiChoiceGroup(_argument("cbct_regions")["choices"])
+        group.boxes["Upper"].setChecked(False)
+
+        payload = json.loads(ToolServerClient._stringify({"cbct_regions": group.value()})["cbct_regions"])
+        # Server-side, what is sent IS the selection: an option left out counts
+        # as unchecked whatever its default, so the complete state must travel.
+        self.assertEqual(
+            payload,
+            {"Cranial base": True, "Upper": False, "Lower": True, "Impacted canine": True},
+        )
+
+    def test_every_box_unchecked_is_still_a_selection(self):
+        group = formgen.MultiChoiceGroup(_argument("ios_networks")["choices"])
+        for box in group.boxes.values():
+            box.setChecked(False)
+        # It must reach the server, which answers 422 naming the argument to
+        # fill in — that 422 is how a mode mismatch explains itself.
+        self.assertEqual(group.value(), {"Occlusal": False, "Cervical": False})
+        self.assertTrue(formgen.all_required_filled(
+            {"ios_networks": group}, {"ios_networks": _argument("ios_networks")}
+        ))
+
+
+class TestErrorMessages(unittest.TestCase):
+    """The server's `detail` is what the user reads."""
+
+    def test_a_tool_that_failed_to_load_says_so(self):
+        detail = "Tool 'ALI' failed to load at server startup and is unavailable. See the server logs."
+        self.assertEqual(error_for_status(404, detail).message, detail)
+
+    def test_a_404_without_a_body_still_reads_as_a_name_problem(self):
+        self.assertIn("Unknown tool", error_for_status(404, None).message)
+
+    def test_the_empty_selection_422_is_shown_verbatim(self):
+        detail = (
+            "This input is a CBCT batch: select at least one region under 'cbct_regions' "
+            "(Cranial base, Upper, Lower, Impacted canine)."
+        )
+        self.assertEqual(error_for_status(422, detail).message, detail)
+
+    def test_a_500_is_not_shown_verbatim(self):
+        # A crash inside a tool can name server-side paths and modules.
+        self.assertNotIn("Traceback", error_for_status(500, "Traceback (most recent call last)...").message)
+
+
+if __name__ == "__main__":
+    unittest.main()
