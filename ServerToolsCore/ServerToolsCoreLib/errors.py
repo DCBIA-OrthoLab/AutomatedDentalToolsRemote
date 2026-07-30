@@ -30,7 +30,16 @@ def error_for_status(status_code, server_message=None):
     if status_code == 401:
         return ServerToolError(server_message or "Authentication failed.", status_code)
     if status_code == 404:
-        return ServerToolError("Unknown tool. Refresh the tool list and check the name.", status_code)
+        # The server distinguishes two very different 404s: a name that does
+        # not exist, and a tool whose module failed to import at startup and
+        # was therefore skipped by the registry ("Tool 'ALI' failed to load at
+        # server startup and is unavailable."). Only its detail can tell them
+        # apart, and swallowing it sends the user hunting for a typo when the
+        # real cause is a missing server-side dependency.
+        return ServerToolError(
+            server_message or "Unknown tool. Refresh the tool list and check the name.",
+            status_code,
+        )
     if status_code == 422:
         return ServerToolError(server_message or "Invalid arguments.", status_code)
     if status_code == 400:

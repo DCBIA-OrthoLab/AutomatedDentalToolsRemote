@@ -45,10 +45,16 @@ def is_file_type(type_name: str) -> bool:
     return type_name == "file" or type_name.endswith("_file")
 
 
-# What a "<x>_file" type means for a file picker, when the extension isn't
-# simply "<x>". Anything not listed falls back to the obvious ".<x>"
-# ("csv_file" -> ".csv"), so a new file-ish type the server introduces needs an
-# entry here only when its name doesn't spell out its extension.
+# Fallback only. The server publishes each file type's extensions in its
+# `types`' company (see file_extensions_for), which is the single source of
+# truth; this table is what a *pre-`extensions`* server leaves us guessing
+# with, and it is a copy of that server's own FILE_TYPES — the kind of
+# duplication that drifts. It once did: "volume_or_zip_file" was missing here
+# and derived as ".volume_or_zip", a file dialog matching nothing.
+#
+# Do not grow it for a new type. Publish the type's extensions server-side
+# instead; anything not listed still falls back to the obvious ".<x>"
+# ("csv_file" -> ".csv") when the name spells one out.
 _FILE_TYPE_EXTENSIONS = {
     "file": (),  # deliberately unrestricted: the generic type accepts anything
     "nifti_file": (".nii", ".nii.gz"),
@@ -62,6 +68,23 @@ _FILE_TYPE_EXTENSIONS = {
 # a *local* selection kind, not something HTTP can carry — a folder is zipped
 # client-side and uploaded as the .zip the server then unpacks.
 FOLDER_TYPE = "folder"
+
+
+def _guessed_extension(type_name: str) -> tuple:
+    """The extension a "<x>_file" type name spells out, when it spells one.
+
+    `"csv_file"` -> `(".csv",)`. But a compound name like
+    `"volume_or_zip_file"` names a *set* of formats, not an extension: guessing
+    `".volume_or_zip"` there produces a file dialog that matches nothing, which
+    is worse than not filtering at all. Such a name (recognisable by the
+    underscores left once "_file" is stripped) that has no entry in
+    _FILE_TYPE_EXTENSIONS falls back to no restriction, so a new one the server
+    introduces degrades to an unfiltered picker instead of an empty one.
+    """
+    if not type_name.endswith("_file"):
+        return ()
+    stem = type_name[: -len("_file")]
+    return () if "_" in stem else (f".{stem}",)
 
 
 def argument_types(spec: dict) -> list:
@@ -86,22 +109,33 @@ def accepts_folder(spec: dict) -> bool:
 
 
 def file_extensions_for(spec: dict) -> tuple:
-    """The extensions a file picker should offer for this argument, derived
-    from the file-ish entries of its `types` — `["csv_file", "folder"]` gives
-    `(".csv",)`.
+    """The extensions a file picker should offer for this argument —
+    `["csv_file", "folder"]` gives `(".csv",)`.
+
+    Read from the schema's own `extensions` (`{type name: [extension, ...]}`,
+    the server's FILE_TYPES table published alongside `types`), so the client
+    holds no copy of it. Only the *file* types count: `"folder"`'s extensions
+    say what a zipped folder may be uploaded as, not what a file picker should
+    show.
+
+    A server that predates the field leaves it out, and each type then falls
+    back to _FILE_TYPE_EXTENSIONS or to what its name spells out.
 
     An empty tuple means "don't restrict": either the argument declares the
     generic "file" type, or it accepts no file type at all (folder only).
     """
+    published = spec.get("extensions") or {}
     extensions = []
     for type_name in argument_types(spec):
         if not is_file_type(type_name):
             continue
-        known = _FILE_TYPE_EXTENSIONS.get(type_name)
+        known = published.get(type_name, _FILE_TYPE_EXTENSIONS.get(type_name))
         if known is None:
-            known = (f".{type_name[: -len('_file')]}",) if type_name.endswith("_file") else ()
+            known = _guessed_extension(type_name)
         if not known:
-            return ()  # a generic "file" among the accepted types: anything goes
+            # Either the generic "file", or a type the server declines to
+            # restrict: anything goes, so no filter at all.
+            return ()
         extensions.extend(extension for extension in known if extension not in extensions)
     return tuple(extensions)
 
@@ -439,7 +473,13 @@ class ToolServerClient:
 
         for name, spec in arguments.items():
             if is_file_type(spec.get("type", "")):
-                if spec.get("required") and name not in files:
+                # A `server_selectable` file argument has two valid shapes: an
+                # upload, or the NAME of a file the server hosts, sent as a
+                # plain form value under the same field name. Requiring an
+                # upload here would reject the second — the very shape that
+                # keeps a hosted test cohort from travelling.
+                satisfied = name in files or (spec.get("server_selectable") and name in args)
+                if spec.get("required") and not satisfied:
                     raise ServerToolError(f"Missing required file argument '{name}' for tool '{tool_name}'.")
             elif spec.get("required") and name not in args:
                 raise ServerToolError(f"Missing required argument '{name}' for tool '{tool_name}'.")

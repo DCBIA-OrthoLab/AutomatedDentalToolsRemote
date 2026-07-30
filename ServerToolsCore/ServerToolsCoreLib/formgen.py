@@ -53,13 +53,23 @@ class MultiChoiceGroup:
     {option: checked} state. Sending the full state is required, not a
     convenience: see ToolServerClient._stringify for why a missing option is
     not the same as an unchecked one.
+
+    The argument's `description` is rendered as a visible wrapped hint above
+    the boxes, not only as a tooltip. A group of check boxes is the one widget
+    whose meaning routinely does not fit in its label — ALI's `cbct_regions`
+    and `ios_networks` are both always shown and only one applies to any given
+    input, and the server says which in its description ("CBCT only: ...").
+    A tooltip nobody hovers is not where that belongs.
     """
 
-    def __init__(self, choices: dict):
+    def __init__(self, choices: dict, description: str = ""):
         self.container = qt.QWidget()
         box_layout = qt.QVBoxLayout(self.container)
         box_layout.setContentsMargins(0, 0, 0, 0)
         box_layout.setSpacing(design.SPACING_XS)
+
+        if description:
+            box_layout.addWidget(design.hint_label(description))
 
         self.boxes = {}
         for option, checked in choices.items():
@@ -161,6 +171,114 @@ class FileOrFolderInput:
         self.container.setToolTip(text)
 
 
+class ServerFileInput:
+    """One input row for a file argument the SERVER can also provide by name —
+    `server_selectable` on a file type, e.g. ALI's and AMASSS's `input`.
+
+    Such an argument accepts either shape: the caller uploads its own file, or
+    it sends the *name* of one the server already hosts (`GET
+    /tools/<tool>/data`), which the server resolves against its read-only data
+    store. The named file never travels, in either direction — which is the
+    whole point for a test cohort of confidential scans.
+
+    On the wire the two are genuinely different: an upload is a multipart file
+    part, a server-side selection is a plain form value under the argument's
+    own name. So this holder keeps the local picker it wraps, and answers which
+    of the two the user actually chose (`server_name`).
+
+    The two are kept mutually exclusive by clearing the other one, not by
+    letting one silently win: picking a server file empties the path field, and
+    typing/browsing a path resets the dropdown. A precedence rule the user
+    cannot see is how you end up uploading a file you thought you had replaced.
+    """
+
+    # First entry, and the one that means "no server-side file": a combo box
+    # cannot express "nothing selected" in a way a user reads as deliberate.
+    UPLOAD_OPTION = "Upload my own file..."
+
+    def __init__(self, local):
+        self.local = local
+        self._syncing = False
+
+        self.container = qt.QWidget()
+        column = qt.QVBoxLayout(self.container)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(design.SPACING_XS)
+
+        self.combo = qt.QComboBox()
+        self.combo.addItems([self.UPLOAD_OPTION])
+        column.addWidget(self.combo)
+        column.addWidget(row_widget(local))
+
+        self.combo.currentTextChanged.connect(self._onServerChoice)
+        connect_changed(local, self._onLocalChoice)
+
+    def setChoices(self, names) -> None:
+        """Fill the dropdown with the server-side names, keeping the upload
+        entry first. Called once the schema is known — formgen never talks
+        HTTP (see ARCHITECTURE.md dependency rule)."""
+        self.combo.clear()
+        self.combo.addItems([self.UPLOAD_OPTION] + list(names))
+
+    def server_name(self) -> str:
+        """The chosen server-side file name, or "" when uploading."""
+        text = self.combo.currentText
+        return "" if text in ("", self.UPLOAD_OPTION) else text
+
+    @property
+    def currentPath(self) -> str:
+        """The LOCAL path to upload — empty while a server-side file is chosen,
+        so nothing is uploaded for an argument that is already satisfied."""
+        return "" if self.server_name() else _local_path(self.local)
+
+    def is_folder(self) -> bool:
+        checker = getattr(self.local, "is_folder", None)
+        return bool(checker()) if checker else False
+
+    def _onServerChoice(self, _text=None) -> None:
+        if self._syncing or not self.server_name():
+            return
+        self._syncing = True
+        try:
+            _set_local_path(self.local, "")
+        finally:
+            self._syncing = False
+
+    def _onLocalChoice(self, *_args) -> None:
+        if self._syncing or not _local_path(self.local):
+            return
+        self._syncing = True
+        try:
+            self.combo.setCurrentIndex(0)
+        finally:
+            self._syncing = False
+
+    # -- the slice of the QWidget API build()/base_widget use on a field ----
+
+    def setProperty(self, name, value) -> None:
+        self.container.setProperty(name, value)
+
+    def setToolTip(self, text) -> None:
+        self.container.setToolTip(text)
+
+
+def _local_path(widget) -> str:
+    return (getattr(widget, "currentPath", "") or "").strip()
+
+
+def _set_local_path(widget, value: str) -> None:
+    """Write a path into whichever picker kind `widget` is.
+
+    A FileOrFolderInput drives a plain QLineEdit (see that class for why it is
+    not a ctkPathLineEdit); everything else exposes ctkPathLineEdit's writable
+    `currentPath`.
+    """
+    if isinstance(widget, FileOrFolderInput):
+        widget.pathEdit.setText(value)
+    else:
+        widget.currentPath = value
+
+
 def row_widget(field):
     """The QWidget to put in a form row for `field` — composite fields lay
     several widgets out inside a container."""
@@ -233,7 +351,7 @@ def _make_widget(name: str, spec: dict):
     if arg_type == "choice":
         return _make_choice_widget(name, spec)
     if arg_type == "multichoice":
-        return MultiChoiceGroup(_choices(name, spec))
+        return MultiChoiceGroup(_choices(name, spec), spec.get("description", ""))
     if is_file_type(arg_type):
         return file_widget(spec)
 
@@ -372,8 +490,17 @@ def file_widget(spec: dict, mode: str = "auto"):
 
     extensions = file_extensions_for(spec)
     if mode == "file_or_folder":
-        return FileOrFolderInput(extensions)
-    return path_widget(extensions, mode)
+        local = FileOrFolderInput(extensions)
+    else:
+        local = path_widget(extensions, mode)
+
+    # A file argument the server can also provide by name gets the dropdown
+    # too. Only file-typed ones reach here: a SCALAR server_selectable argument
+    # (a model, which must never leave the server) is a plain combo box built
+    # by _make_widget, with no local picker at all.
+    if spec.get("server_selectable"):
+        return ServerFileInput(local)
+    return local
 
 
 def _choices(name: str, spec: dict) -> dict:
@@ -440,6 +567,11 @@ def connect_changed(widget, callback) -> None:
     if isinstance(widget, MultiChoiceGroup):
         for box in widget.boxes.values():
             box.toggled.connect(callback)
+    elif isinstance(widget, ServerFileInput):
+        # Either half can satisfy the argument, so either half changing must
+        # re-evaluate whether Apply can be enabled.
+        widget.combo.currentTextChanged.connect(callback)
+        connect_changed(widget.local, callback)
     elif isinstance(widget, FileOrFolderInput):
         # Both buttons write into the same field, so one connection covers
         # browsing either kind as well as typing or pasting a path.

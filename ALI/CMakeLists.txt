@@ -2,20 +2,17 @@
 set(MODULE_NAME ALI)
 
 #-----------------------------------------------------------------------------
+# ALI_Method/ and Resources/UI/ALI.ui belonged to the former local module: they
+# drove the ALI_CBCT / ALI_IOS CLIs from inside Slicer. The module is now a thin
+# client of the server's "ALI" tool and builds its panel from GET /tools, so
+# neither is shipped any more. The files are left in the tree rather than
+# deleted, the same way SurgMovPred_CLI was — see ARCHITECTURE.md.
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
-  ALI_Method/__init__.py
-  ALI_Method/CBCT.py
-  ALI_Method/install_pytorch.py
-  ALI_Method/IOS.py
-  ALI_Method/Method.py
-  ALI_Method/Progress.py
-  ALI_Method/install_pytorch.py
 )
 
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
-  Resources/UI/${MODULE_NAME}.ui
 )
 
 #-----------------------------------------------------------------------------
