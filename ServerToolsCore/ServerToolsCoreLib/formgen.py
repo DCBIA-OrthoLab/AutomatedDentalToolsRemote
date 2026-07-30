@@ -200,19 +200,36 @@ def _make_widget(name: str, spec: dict):
     if spec.get("server_selectable"):
         return qt.QComboBox()
 
+    # `initial` is the scalar counterpart of a choice argument's `choices`: the
+    # value the SERVER wants the widget to start at. It matters because collect()
+    # always sends every widget, so a field the user never touched still travels
+    # — a spin box left at Qt's own 0 sent 0, never letting the tool's own
+    # default apply. None means the tool declared none; leave Qt's default then.
+    initial = spec.get("initial")
+
     if arg_type == "str":
-        return qt.QLineEdit()
+        widget = qt.QLineEdit()
+        if initial is not None:
+            widget.setText(str(initial))
+        return widget
     if arg_type == "int":
         widget = qt.QSpinBox()
         widget.setRange(-2147483648, 2147483647)
+        if initial is not None:
+            widget.setValue(int(initial))
         return widget
     if arg_type == "float":
         widget = qt.QDoubleSpinBox()
         widget.setRange(-1e12, 1e12)
         widget.setDecimals(6)
+        if initial is not None:
+            widget.setValue(float(initial))
         return widget
     if arg_type == "bool":
-        return qt.QCheckBox()
+        widget = qt.QCheckBox()
+        if initial is not None:
+            widget.setChecked(bool(initial))
+        return widget
     if arg_type == "choice":
         return _make_choice_widget(name, spec)
     if arg_type == "multichoice":

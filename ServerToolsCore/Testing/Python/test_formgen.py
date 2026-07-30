@@ -35,33 +35,36 @@ EXAMPLE_TOOL_SCHEMA = {
         "label": {
             "type": "str", "types": ["str"], "required": True,
             "description": "Free-text label for this run",
-            "server_selectable": None, "choices": None,
+            "server_selectable": None, "choices": None, "initial": None,
         },
         "input": {
             "type": "csv_file", "types": ["csv_file", "folder"], "required": True,
             "description": "A single .csv file, or a folder of .csv/.xlsx/.ods files sent as a .zip archive",
-            "server_selectable": None, "choices": None,
+            "server_selectable": None, "choices": None, "initial": None,
         },
         "threshold": {
             "type": "float", "types": ["float"], "required": True,
             "description": "Numeric threshold parameter",
-            "server_selectable": None, "choices": None,
+            "server_selectable": None, "choices": None, "initial": None,
         },
+        # `initial` is null here on purpose: run()'s own default is None
+        # ("not specified"), so there is no value to pre-fill. Contrast with
+        # PREFILLED_SCHEMA below.
         "iterations": {
             "type": "int", "types": ["int"], "required": False,
             "description": "Optional number of iterations",
-            "server_selectable": None, "choices": None,
+            "server_selectable": None, "choices": None, "initial": None,
         },
         "outputs": {
             "type": "multichoice", "types": ["multichoice"], "required": False,
             "description": "Which result files to produce",
-            "server_selectable": None,
+            "server_selectable": None, "initial": None,
             "choices": {"summary": True, "preview": True, "columns": False},
         },
         "preview_format": {
             "type": "choice", "types": ["choice"], "required": False,
             "description": "Format of the preview file",
-            "server_selectable": None,
+            "server_selectable": None, "initial": None,
             "choices": {"csv": True, "json": False},
         },
     },
@@ -71,6 +74,73 @@ EXAMPLE_TOOL_SCHEMA = {
 def _build():
     layout = qt.QFormLayout()
     return formgen.build(EXAMPLE_TOOL_SCHEMA["arguments"], layout), layout
+
+
+# Scalar arguments whose tool declares an `initial`, the way AMASSS declares
+# surface_smoothing=5. Shaped like a real GET /tools payload.
+PREFILLED_SCHEMA = {
+    "smoothing": {
+        "type": "int", "types": ["int"], "required": False,
+        "description": "Smoothing iterations", "server_selectable": None,
+        "choices": None, "initial": 5,
+    },
+    "ratio": {
+        "type": "float", "types": ["float"], "required": False,
+        "description": "A ratio", "server_selectable": None,
+        "choices": None, "initial": 0.25,
+    },
+    "enabled": {
+        "type": "bool", "types": ["bool"], "required": False,
+        "description": "A flag on by default", "server_selectable": None,
+        "choices": None, "initial": True,
+    },
+    "suffix": {
+        "type": "str", "types": ["str"], "required": False,
+        "description": "A name suffix", "server_selectable": None,
+        "choices": None, "initial": "Pred",
+    },
+}
+
+
+class ScalarInitialValueTest(unittest.TestCase):
+    """A scalar argument's `initial` reaches its widget.
+
+    This is not cosmetic. collect() sends EVERY widget, so a field the user
+    never touched still travels: a spin box left at Qt's own 0 sent 0, and the
+    tool's Python default never applied. That is what shipped AMASSS surfaces
+    with 0 smoothing iterations while its run() signature read 5.
+    """
+
+    def setUp(self):
+        self.layout = qt.QFormLayout()
+        self.widgets = formgen.build(PREFILLED_SCHEMA, self.layout)
+
+    def test_int_starts_at_the_declared_value(self):
+        self.assertEqual(self.widgets["smoothing"].value, 5)
+
+    def test_float_starts_at_the_declared_value(self):
+        self.assertAlmostEqual(self.widgets["ratio"].value, 0.25)
+
+    def test_bool_starts_checked_when_declared_true(self):
+        self.assertTrue(self.widgets["enabled"].isChecked())
+
+    def test_str_starts_at_the_declared_value(self):
+        self.assertEqual(self.widgets["suffix"].text, "Pred")
+
+    def test_collect_returns_the_declared_values_untouched(self):
+        """The whole point: an untouched form sends the tool's own defaults."""
+        self.assertEqual(
+            formgen.collect(self.widgets),
+            {"smoothing": 5, "ratio": 0.25, "enabled": True, "suffix": "Pred"},
+        )
+
+    def test_absent_initial_leaves_the_qt_default(self):
+        """`initial: None` must not be coerced -- iterations means "unset"."""
+        layout = qt.QFormLayout()
+        widgets = formgen.build(
+            {"iterations": EXAMPLE_TOOL_SCHEMA["arguments"]["iterations"]}, layout
+        )
+        self.assertEqual(widgets["iterations"].value, 0)
 
 
 class ChoiceWidgetTest(unittest.TestCase):
