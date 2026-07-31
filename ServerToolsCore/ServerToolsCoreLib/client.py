@@ -10,6 +10,7 @@ import logging
 import mimetypes
 import os
 import re
+import zipfile
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -30,6 +31,22 @@ _TOOLS_FETCH_TIMEOUT = 15
 
 _CONTENT_DISPOSITION_FILENAME_RE = re.compile(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?')
 _SERVER_MESSAGE_MAX_LEN = 500
+
+# A result archive can weigh hundreds of MB (AMASSS: one .nii.gz + .vtk per
+# structure and per scan). It is streamed to disk in chunks of this size, so
+# the whole body is never held in Slicer's RAM.
+_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+def _download_message(received: int, expected: Optional[int]) -> str:
+    """"Downloading results... 8.2 / 14.1 MB (58%)", or without the total when
+    the server sent no usable Content-Length."""
+    received_mb = received / (1024 * 1024)
+    if not expected:
+        return f"Downloading results... {received_mb:.1f} MB"
+    expected_mb = expected / (1024 * 1024)
+    percent = min(100, round(100 * received / expected))
+    return f"Downloading results... {received_mb:.1f} / {expected_mb:.1f} MB ({percent}%)"
 
 
 def is_file_type(type_name: str) -> bool:
@@ -328,6 +345,14 @@ class ToolServerClient:
                 files_payload[arg_name] = (os.path.basename(path), file_handle)
 
             try:
+                # stream=True: the body is NOT downloaded here but inside
+                # _build_result, chunk by chunk straight to disk. Without it,
+                # requests buffers the entire result archive in RAM before a
+                # single byte can be written -- the larger a run's output, the
+                # closer that gets to taking Slicer down with it. The read
+                # timeout then applies between chunks, not to the whole
+                # download, so a big-but-flowing response can never time out
+                # merely for being big.
                 response = requests.post(
                     f"{self._server_url}/run/{tool_name}",
                     headers=headers,
@@ -335,6 +360,7 @@ class ToolServerClient:
                     files=files_payload or None,
                     timeout=self._timeout,
                     verify=self._verify_tls,
+                    stream=True,
                 )
             except requests.RequestException as exc:
                 raise ServerToolError(f"Network error while calling '{tool_name}': {exc}") from exc
@@ -352,28 +378,121 @@ class ToolServerClient:
         if progress_cb:
             progress_cb("Processing response...")
 
-        return self._build_result(tool_name, response, schema, output_dir)
+        return self._build_result(tool_name, response, schema, output_dir, progress_cb)
 
-    def _build_result(self, tool_name: str, response, schema: dict, output_dir: Optional[str]) -> ToolResult:
-        if not response.ok:
-            raise error_for_status(response.status_code, self._server_message(response))
+    def _build_result(
+        self,
+        tool_name: str,
+        response,
+        schema: dict,
+        output_dir: Optional[str],
+        progress_cb: Optional[Callable[[str], None]] = None,
+    ) -> ToolResult:
+        # run() sends the request with stream=True, so the body has not been
+        # read yet: .json()/.text below consume it for the small responses,
+        # the iter_content loop consumes it for file results, and close() in
+        # the finally releases the connection on every path.
+        try:
+            if not response.ok:
+                raise error_for_status(response.status_code, self._server_message(response))
 
-        content_type = response.headers.get("Content-Type", "")
-        if "application/json" in content_type:
+            content_type = response.headers.get("Content-Type", "")
+            if "application/json" in content_type:
+                try:
+                    payload = response.json()
+                except ValueError as exc:
+                    raise ServerToolError(f"Malformed response from the tool server: {exc}") from exc
+                return ToolResult(kind="text", text=payload.get("result"))
+
+            if not output_dir:
+                raise ServerToolError("An output directory is required to save the returned file.")
+
+            os.makedirs(output_dir, exist_ok=True)
+            dest_path = os.path.join(
+                output_dir, self._result_filename(tool_name, response, schema, content_type)
+            )
+            expected_bytes = self._expected_length(response)
+            received = 0
+            with open(dest_path, "wb") as fh:
+                for chunk in response.iter_content(_DOWNLOAD_CHUNK_BYTES):
+                    fh.write(chunk)
+                    received += len(chunk)
+                    if progress_cb:
+                        progress_cb(_download_message(received, expected_bytes))
+            self._verify_download(tool_name, response, dest_path, received)
+
+            # INFO on purpose (the request-shape logs above are DEBUG): this
+            # is the one line that decides, after the fact, whether a
+            # missing-results report is a transfer problem or a server one.
+            # Only sizes and headers -- never the file's contents.
+            logger.info(
+                "POST %s/run/%s -> %d byte(s) saved to %s (Content-Type: %s, Content-Disposition: %s)",
+                self._server_url,
+                tool_name,
+                received,
+                dest_path,
+                content_type or "<none>",
+                response.headers.get("Content-Disposition") or "<none>",
+            )
+            return ToolResult(kind="file", path=dest_path)
+        finally:
+            response.close()
+
+    @staticmethod
+    def _expected_length(response) -> Optional[int]:
+        """The download's total size, when it can be trusted.
+
+        None whenever the body is transfer-compressed: Content-Length then
+        counts wire bytes while what lands on disk is the decompressed stream,
+        so using it would report a progress percentage running past 100.
+        """
+        if response.headers.get("Content-Encoding"):
+            return None
+        raw = response.headers.get("Content-Length")
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
+    @classmethod
+    def _verify_download(cls, tool_name: str, response, dest_path: str, received: int) -> None:
+        """A file result must arrive complete or fail loudly, whatever its size.
+
+        Without this, a connection dropped mid-body leaves a truncated file on
+        disk; for a .zip the base widget then unpacks whatever central
+        directory survives, silently delivering a SUBSET of the results -- the
+        worst possible failure for medical data. The partial file is removed
+        before raising, so no later step can pick it up by accident.
+        """
+        expected_bytes = cls._expected_length(response)
+        if expected_bytes is not None and received != expected_bytes:
+            os.remove(dest_path)
+            raise ServerToolError(
+                f"Truncated result from '{tool_name}': received {received} of "
+                f"{expected_bytes} bytes. Nothing was kept; run the tool again."
+            )
+        if dest_path.lower().endswith(".zip"):
+            # CRC-check every member: catches corruption that a matching byte
+            # count cannot (and truncation too, when the server never sent a
+            # Content-Length). Reads the archive once from local disk --
+            # seconds, next to an inference measured in minutes.
             try:
-                payload = response.json()
-            except ValueError as exc:
-                raise ServerToolError(f"Malformed response from the tool server: {exc}") from exc
-            return ToolResult(kind="text", text=payload.get("result"))
-
-        if not output_dir:
-            raise ServerToolError("An output directory is required to save the returned file.")
-
-        os.makedirs(output_dir, exist_ok=True)
-        dest_path = os.path.join(output_dir, self._result_filename(tool_name, response, schema, content_type))
-        with open(dest_path, "wb") as fh:
-            fh.write(response.content)
-        return ToolResult(kind="file", path=dest_path)
+                with zipfile.ZipFile(dest_path) as archive:
+                    corrupt = archive.testzip()
+            except zipfile.BadZipFile as exc:
+                os.remove(dest_path)
+                raise ServerToolError(
+                    f"The result archive from '{tool_name}' is unreadable "
+                    f"(incomplete transfer?): {exc}. Nothing was kept; run the tool again."
+                ) from exc
+            if corrupt is not None:
+                os.remove(dest_path)
+                raise ServerToolError(
+                    f"The result archive from '{tool_name}' failed its integrity check "
+                    f"at '{corrupt}'. Nothing was kept; run the tool again."
+                )
 
     # ------------------------------------------------------------------
     # Helpers

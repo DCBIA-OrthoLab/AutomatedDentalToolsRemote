@@ -206,3 +206,20 @@ def update_status_badge(label: qt.QLabel, ok: bool) -> None:
     color = t["SUCCESS"] if ok else t["DANGER"]
     label.setText("Server: online" if ok else "Server: offline")
     label.setStyleSheet(f"color: {color}; font-weight: 600; padding: {SPACING_XS}px;")
+
+
+def progress_label() -> qt.QLabel:
+    """Where a running job reports what it is doing, next to the Cancel button.
+
+    The status bar alone is not enough: a tool run is minutes of server-side
+    inference during which the client has nothing to say, and a panel that
+    shows nothing at all reads as frozen. An AMASSS run was cancelled at three
+    minutes for exactly that reason -- it was working, and finished 40 seconds
+    later.
+    """
+    label = qt.QLabel("")
+    label.setWordWrap(True)
+    label.setVisible(False)
+    t = tokens()
+    label.setStyleSheet(f"color: {t['TEXT_MUTED']}; padding: {SPACING_XS}px;")
+    return label

@@ -4,10 +4,12 @@ Usage:
     python3 -m unittest ServerToolsCore/Testing/Python/test_client.py
 """
 
+import io
 import json
 import os
 import sys
 import unittest
+import zipfile
 from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -45,11 +47,25 @@ def _response(status_code=200, json_data=None, content=b"", headers=None, text="
     response.headers = headers or {"Content-Type": "application/json"}
     response.content = content
     response.text = text
+    # The client downloads file results via iter_content (stream=True), never
+    # via .content; a mock without it would hand the writer a Mock object.
+    response.iter_content = lambda chunk_size: iter([content] if content else [])
     if json_data is not None:
         response.json.return_value = json_data
     else:
         response.json.side_effect = ValueError("no json body")
     return response
+
+
+def _zip_bytes(members=None) -> bytes:
+    """A genuinely valid zip archive, for tests whose result filename ends in
+    .zip: the client CRC-checks those before accepting them, so `b"zip-bytes"`
+    placeholders no longer pass."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, data in (members or {"result.txt": "ok"}).items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
 
 
 class ToolServerClientTest(unittest.TestCase):
@@ -308,7 +324,7 @@ class ToolServerClientTest(unittest.TestCase):
             ]
         )
         mock_post.return_value = _response(
-            content=b"zip-bytes", headers={"Content-Type": "application/zip"}
+            content=_zip_bytes(), headers={"Content-Type": "application/zip"}
         )
 
         import tempfile
@@ -533,6 +549,178 @@ class ToolServerClientTest(unittest.TestCase):
             with open(result.path, "rb") as fh:
                 self.assertEqual(fh.read(), b"binary-bytes")
 
+    # -- download integrity ------------------------------------------------
+
+    @mock.patch("ServerToolsCoreLib.client.requests.post")
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_run_streams_the_response(self, mock_get, mock_post):
+        # stream=True is what keeps a multi-hundred-MB result archive out of
+        # Slicer's RAM: the body must be consumed by iter_content, not
+        # pre-buffered inside requests.post.
+        mock_get.return_value = _response(json_data=TOOLS_RESPONSE)
+        mock_post.return_value = _response(json_data={"result": "ok"})
+
+        self.client.run("example_tool", args={"label": "x"}, files={"file": __file__}, output_dir="/tmp")
+
+        _, kwargs = mock_post.call_args
+        self.assertIs(kwargs["stream"], True)
+
+    @mock.patch("ServerToolsCoreLib.client.requests.post")
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_truncated_download_is_rejected_and_removed(self, mock_get, mock_post):
+        import tempfile
+
+        mock_get.return_value = _response(
+            json_data=[{"name": "no_args_tool", "arguments": {}, "output_kind": "file"}]
+        )
+        mock_post.return_value = _response(
+            content=b"only-half-the-bytes",
+            headers={"Content-Type": "application/gzip", "Content-Length": "999999"},
+        )
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            with self.assertRaises(ServerToolError) as ctx:
+                self.client.run("no_args_tool", args={}, output_dir=out_dir)
+            self.assertIn("Truncated", str(ctx.exception))
+            # The partial file must not survive: a later step (or the user)
+            # finding it would mistake it for a real result.
+            self.assertEqual(os.listdir(out_dir), [])
+
+    @mock.patch("ServerToolsCoreLib.client.requests.post")
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_corrupt_zip_result_is_rejected_and_removed(self, mock_get, mock_post):
+        import tempfile
+
+        mock_get.return_value = _response(
+            json_data=[{"name": "no_args_tool", "arguments": {}, "output_kind": "files"}]
+        )
+        # Looks like a zip (magic bytes, .zip filename) but has no readable
+        # central directory -- exactly what a connection cut mid-body leaves.
+        mock_post.return_value = _response(
+            content=b"PK\x03\x04this-is-not-a-whole-archive",
+            headers={
+                "Content-Type": "application/zip",
+                "Content-Disposition": 'attachment; filename="AMASSS_Pred.zip"',
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            with self.assertRaises(ServerToolError) as ctx:
+                self.client.run("no_args_tool", args={}, output_dir=out_dir)
+            self.assertIn("unreadable", str(ctx.exception))
+            self.assertEqual(os.listdir(out_dir), [])
+
+    @mock.patch("ServerToolsCoreLib.client.requests.post")
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_intact_zip_result_passes_verification(self, mock_get, mock_post):
+        import tempfile
+
+        content = _zip_bytes({"scan_Pred_MAND.nii.gz": "seg", "scan_Pred_MAND.vtk": "surf"})
+        mock_get.return_value = _response(
+            json_data=[{"name": "no_args_tool", "arguments": {}, "output_kind": "files"}]
+        )
+        mock_post.return_value = _response(
+            content=content,
+            headers={
+                "Content-Type": "application/zip",
+                "Content-Length": str(len(content)),
+                "Content-Disposition": 'attachment; filename="AMASSS_Pred.zip"',
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            result = self.client.run("no_args_tool", args={}, output_dir=out_dir)
+
+            self.assertEqual(result.kind, "file")
+            with open(result.path, "rb") as fh:
+                self.assertEqual(fh.read(), content)
+
+    @mock.patch("ServerToolsCoreLib.client.requests.post")
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_length_check_skipped_when_body_travels_compressed(self, mock_get, mock_post):
+        import tempfile
+
+        # With Content-Encoding, Content-Length counts wire bytes while
+        # iter_content yields the decompressed stream: a mismatch there is
+        # normal and must not be reported as truncation.
+        mock_get.return_value = _response(
+            json_data=[{"name": "no_args_tool", "arguments": {}, "output_kind": "file"}]
+        )
+        mock_post.return_value = _response(
+            content=b"decompressed-and-longer-than-the-wire-count",
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Length": "10",
+                "Content-Encoding": "gzip",
+                "Content-Disposition": 'attachment; filename="result.bin"',
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            result = self.client.run("no_args_tool", args={}, output_dir=out_dir)
+            self.assertEqual(result.kind, "file")
+
+    @mock.patch("ServerToolsCoreLib.client.requests.post")
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_download_reports_progress_with_a_total(self, mock_get, mock_post):
+        # A silent multi-minute run is what made a user cancel a job that was
+        # working; the download phase must report bytes as they land.
+        import tempfile
+
+        content = _zip_bytes({"a.nii.gz": "x" * 5_000_000})
+        mock_get.return_value = _response(
+            json_data=[{"name": "no_args_tool", "arguments": {}, "output_kind": "files"}]
+        )
+        mock_post.return_value = _response(
+            content=content,
+            headers={
+                "Content-Type": "application/zip",
+                "Content-Length": str(len(content)),
+                "Content-Disposition": 'attachment; filename="out.zip"',
+            },
+        )
+
+        messages = []
+        with tempfile.TemporaryDirectory() as out_dir:
+            self.client.run(
+                "no_args_tool", args={}, output_dir=out_dir, progress_cb=messages.append
+            )
+
+        downloads = [m for m in messages if m.startswith("Downloading results")]
+        self.assertTrue(downloads, messages)
+        self.assertIn("MB", downloads[-1])
+        self.assertIn("100%", downloads[-1])
+
+    @mock.patch("ServerToolsCoreLib.client.requests.post")
+    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    def test_download_progress_omits_the_total_when_unusable(self, mock_get, mock_post):
+        # Content-Encoding makes Content-Length count wire bytes, so a
+        # percentage computed from it would run past 100.
+        import tempfile
+
+        mock_get.return_value = _response(
+            json_data=[{"name": "no_args_tool", "arguments": {}, "output_kind": "file"}]
+        )
+        mock_post.return_value = _response(
+            content=b"z" * 2_000_000,
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Length": "10",
+                "Content-Encoding": "gzip",
+                "Content-Disposition": 'attachment; filename="out.bin"',
+            },
+        )
+
+        messages = []
+        with tempfile.TemporaryDirectory() as out_dir:
+            self.client.run(
+                "no_args_tool", args={}, output_dir=out_dir, progress_cb=messages.append
+            )
+
+        downloads = [m for m in messages if m.startswith("Downloading results")]
+        self.assertTrue(downloads, messages)
+        self.assertNotIn("%", downloads[-1])
+
     # -- health --------------------------------------------------------
 
     @mock.patch("ServerToolsCoreLib.client.requests.get")
@@ -739,7 +927,7 @@ class RealServerSchemaTest(unittest.TestCase):
     @mock.patch("ServerToolsCoreLib.client.requests.get")
     def test_surg_mov_pred_sends_model_name_as_form_value(self, mock_get, mock_post):
         mock_get.return_value = _response(json_data=self._SURG_MOV_PRED_SCHEMA)
-        mock_post.return_value = _response(content=b"zip", headers={"Content-Type": "application/zip"})
+        mock_post.return_value = _response(content=_zip_bytes(), headers={"Content-Type": "application/zip"})
 
         import tempfile
 
@@ -847,7 +1035,7 @@ class ExampleToolRequestTest(unittest.TestCase):
     def test_form_fields_match_the_contract(self, mock_get, mock_post):
         mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
         mock_post.return_value = _response(
-            content=b"zip", headers={"Content-Type": "application/zip"}
+            content=_zip_bytes(), headers={"Content-Type": "application/zip"}
         )
 
         import tempfile
@@ -873,7 +1061,7 @@ class ExampleToolRequestTest(unittest.TestCase):
         import tempfile
 
         mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
-        mock_post.return_value = _response(content=b"zip", headers={"Content-Type": "application/zip"})
+        mock_post.return_value = _response(content=_zip_bytes(), headers={"Content-Type": "application/zip"})
 
         with tempfile.TemporaryDirectory() as work_dir:
             archive = os.path.join(work_dir, "example_tool_input.zip")
@@ -892,7 +1080,7 @@ class ExampleToolRequestTest(unittest.TestCase):
 
         mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
         mock_post.return_value = _response(
-            content=b"PK\x03\x04zip-bytes",
+            content=_zip_bytes(),
             headers={
                 "Content-Type": "application/zip",
                 "Content-Disposition": 'attachment; filename="example_tool_results.zip"',

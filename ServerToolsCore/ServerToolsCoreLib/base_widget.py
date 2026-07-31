@@ -10,6 +10,7 @@ See ARCHITECTURE.md, "How to add a new module in 5 minutes".
 
 import logging
 import os
+import time
 
 import ctk
 import qt
@@ -83,6 +84,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.applyButton = None
         self.cancelButton = None
         self.uiWidget = None
+        self._progressLabel = None
+        self._elapsedTimer = None  # ticks once a second while a job runs
+        self._jobStartedAt = None
+        self._jobPhase = ""
 
     # ------------------------------------------------------------------
     # Slicer lifecycle
@@ -112,6 +117,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.cancelButton.setVisible(False)
         rootLayout.addWidget(self.applyButton)
         rootLayout.addWidget(self.cancelButton)
+
+        self._progressLabel = design.progress_label()
+        rootLayout.addWidget(self._progressLabel)
 
         self.applyButton.clicked.connect(self.onApplyButton)
         self.cancelButton.clicked.connect(self.onCancelButton)
@@ -542,7 +550,17 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         parts instead of keeping it as the file it is."""
         if slicer_io.is_extractable_archive(result.path):
             resultDir = os.path.dirname(result.path)
-            slicer_io.unzip_folder(result.path, resultDir)
+            # Unpacking runs on the main thread and a result archive can expand
+            # far beyond its own size (label volumes compress ~100x), so say so
+            # before starting rather than letting the panel look frozen again.
+            # processEvents is what actually paints it: without it the label is
+            # only repainted once the (blocking) extraction is already done.
+            self._showPhase(_("Extracting results..."))
+            slicer.app.processEvents()
+            try:
+                slicer_io.unzip_folder(result.path, resultDir)
+            finally:
+                self._hideProgress()
             os.remove(result.path)
             slicer.util.infoDisplay(_("Results saved to {path}").format(path=resultDir))
         else:
@@ -609,6 +627,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._job = BackgroundJob(
             task, on_success=self._onJobSuccess, on_error=self._onJobError, on_progress=self._onJobProgress
         )
+        self._jobPhase = _("Sending request...")
+        self._startElapsedTimer()
         self._job.start()
 
     def onCancelButton(self) -> None:
@@ -627,9 +647,73 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         slicer.util.errorDisplay(str(exc))
 
     def _onJobProgress(self, message) -> None:
+        # Kept as the phase, not printed once and forgotten: the elapsed-time
+        # tick below re-renders it every second, so the panel keeps saying what
+        # it is doing rather than showing a message frozen minutes ago.
+        self._jobPhase = message
+        self._renderProgress()
+
+    # ------------------------------------------------------------------
+    # "Still working" feedback
+    # ------------------------------------------------------------------
+
+    def _startElapsedTimer(self) -> None:
+        """Tick once a second for as long as the job runs.
+
+        The worker thread cannot report progress while it is blocked inside a
+        single HTTP request, and that request IS the run -- minutes of remote
+        inference with no bytes flowing either way. Only a main-thread timer
+        can show the panel is alive during it, and without one the run looks
+        hung: an AMASSS run was cancelled at three minutes because of this,
+        having done nothing wrong and with 40 seconds left to go.
+        """
+        self._jobStartedAt = time.monotonic()
+        self._elapsedTimer = qt.QTimer()
+        self._elapsedTimer.setInterval(1000)
+        self._elapsedTimer.timeout.connect(self._renderProgress)
+        self._elapsedTimer.start()
+        self._renderProgress()
+
+    def _stopElapsedTimer(self) -> None:
+        if self._elapsedTimer:
+            self._elapsedTimer.stop()
+            self._elapsedTimer = None
+        self._jobStartedAt = None
+        self._jobPhase = ""
+        self._hideProgress()
+
+    def _showPhase(self, message: str) -> None:
+        """Put a message on the panel immediately, timer running or not.
+
+        Deliberately independent of the elapsed-time state: _onJobSuccess tears
+        the job down BEFORE handleResult, so the work that happens after it
+        (unpacking an archive, loading nodes) has no timer left to render with
+        and would otherwise report nothing at all.
+        """
+        if self._progressLabel is None:
+            return
+        self._progressLabel.setText(message)
+        self._progressLabel.setVisible(True)
         slicer.util.showStatusMessage(message)
 
+    def _hideProgress(self) -> None:
+        if self._progressLabel:
+            self._progressLabel.setVisible(False)
+            self._progressLabel.setText("")
+
+    def _renderProgress(self) -> None:
+        if self._jobStartedAt is None:
+            return
+        elapsed = int(time.monotonic() - self._jobStartedAt)
+        phase = self._jobPhase or _("Working...")
+        self._showPhase(
+            _("{phase}  —  {minutes}:{seconds:02d} elapsed").format(
+                phase=phase, minutes=elapsed // 60, seconds=elapsed % 60
+            )
+        )
+
     def _teardownJob(self) -> None:
+        self._stopElapsedTimer()
         self.applyButton.setVisible(True)
         self.cancelButton.setVisible(False)
         self._job = None
