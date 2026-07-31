@@ -240,6 +240,32 @@ interpreter launch:
      lookup fails. Getting a real extension here matters beyond cosmetics: see
      `slicer_io.is_extractable_archive` below, which decides whether to unpack
      a "save_as" result purely from this filename's extension.
+
+  **The POST is sent with `stream=True` and the body is written to disk in 1 MB
+  chunks** (`_DOWNLOAD_CHUNK_BYTES`), never through `response.content`. A result
+  archive is routinely hundreds of MB — one segmentation plus one surface per
+  structure per scan — and buffering that whole body in Slicer's RAM before the
+  first byte reaches disk scales exactly as badly as it sounds. Streaming also
+  changes what `timeout` means for the download: it becomes the gap allowed
+  *between* chunks rather than a budget for the whole transfer, so a large but
+  flowing response can no longer time out merely for being large.
+
+  **A file result is then verified before it is accepted** (`_verify_download`):
+  the bytes written are compared against `Content-Length`, and a `.zip` has
+  every member CRC-checked with `zipfile.testzip()`. On either failure the
+  partial file is **deleted** and a `ServerToolError` raised. This is not
+  belt-and-braces: a connection dropped mid-body leaves a truncated archive
+  whose surviving central directory still unpacks, so `_handleSaveAsResult`
+  would silently deliver a *subset* of a patient's segmentations — a wrong
+  result that looks like a right one, the worst failure mode there is. The
+  length check is skipped when `Content-Encoding` is set (see
+  `_expected_length`): `Content-Length` then counts wire bytes while
+  `iter_content` yields the decompressed stream, so the two differ legitimately.
+
+  **`progress_cb` is called during the download**, not only around it —
+  `"Downloading results... 8.2 / 14.1 MB (58%)"`, the total omitted whenever
+  `_expected_length` returns `None`. See "Telling the user something is
+  happening" below for why silence here is a bug and not merely unpolished.
 - `errors.error_for_status(status_code, server_message)` maps 401/404/422/400/
   413/500 to a `ServerToolError`. The server's `detail` is shown **verbatim**
   whenever there is one; the strings in that function are fallbacks for a
@@ -575,6 +601,40 @@ main thread. `cancel()` stops the timer and marks the job so any
 already-queued outcome is discarded; the underlying `requests.post` is not
 actually interrupted (see limitations).
 
+### Telling the user something is happening
+
+`progress_cb` alone is not enough, and the gap is not cosmetic. The worker
+thread spends a tool run blocked inside **one** `requests.post`, and that call
+*is* the run: minutes of remote inference with no bytes moving in either
+direction and nothing for the thread to report. A panel that shows a message
+from before the request and nothing after it reads as frozen — an AMASSS run
+was cancelled at three minutes for exactly that reason, having done nothing
+wrong, forty seconds from finishing.
+
+Three pieces close it, and only the first can cover the inference phase:
+
+- **`_startElapsedTimer` / `_renderProgress`** (`base_widget`) — a main-thread
+  `qt.QTimer` ticking once a second, re-rendering the current phase with the
+  elapsed time (`Sending request... — 2:14 elapsed`) into `_progressLabel`, a
+  `design.progress_label()` under the Cancel button. It has to be a main-thread
+  timer precisely *because* the worker cannot speak while blocked. Started in
+  `onApplyButton`, stopped by `_teardownJob` — which every exit path (success,
+  error, cancel) already goes through.
+- **`progress_cb` during the download** — see `client.run` above. `_onJobProgress`
+  stores the message as the current *phase* rather than printing it once, so the
+  tick keeps re-rendering it instead of leaving a message frozen minutes ago.
+- **`_showPhase(...)` around the extraction** in `_handleSaveAsResult`, followed
+  by `slicer.app.processEvents()`. Deliberately independent of the timer:
+  `_onJobSuccess` calls `_teardownJob` **before** `handleResult`, so the work
+  after it has no timer left to render with. The `processEvents()` is what
+  actually paints the label — without it Qt repaints only once the blocking
+  extraction has already finished, which is precisely too late to be useful.
+
+What this still does **not** give you is real progress during the inference
+itself: the elapsed time proves the panel is alive, but the server exposes no
+job/progress endpoint, so no client can know how far along nnUNet is. That
+needs a server-side change, not a client one (see limitations).
+
 ## `slicer_io.py`
 
 `TempWorkspace` is a context manager: `mkdtemp` on `__enter__`, `rmtree` on
@@ -840,7 +900,17 @@ This confirms the four success criteria from the brief:
   result and releases the UI immediately, but the in-flight `requests.post`
   keeps running against the server until it finishes or times out
   (`timeout=600`). A real cancel would need the server to expose a
-  cancellation endpoint keyed by a request id.
+  cancellation endpoint keyed by a request id. Note the consequence when a user
+  cancels late: the download completes anyway and the result file is left in the
+  output folder, but `handleResult` never runs, so a `save_as` archive stays
+  zipped instead of being unpacked. The file is intact — it just looks like
+  nothing arrived.
+- **No real progress during the inference phase**: the elapsed-time tick shows
+  the panel is alive, never how far along the run is, because a tool run is a
+  single request whose response arrives only at the end. Reporting genuine
+  progress means the server growing a job API (submit → poll → fetch), which is
+  the same change a real cancel needs; both are worth doing together or not at
+  all. Until then, the honest signal available to a client is elapsed time.
 - **Schema fetch is synchronous**: `get_tool_schema()` inside `_buildAutoUI`
   runs on the main thread during `setup()` (i.e. opening the module). This is
   a deliberate choice — `GET /tools` is cheap and cached, and building the

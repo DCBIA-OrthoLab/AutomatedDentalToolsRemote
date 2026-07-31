@@ -44,6 +44,26 @@ what testing against the real dev server surfaced. Each is explained in
   zip containers internally, a returned `predictions_outputs.xlsx` was being
   wrongly "extracted" into raw XML parts. Fixed to decide from the resolved
   filename's extension only (`slicer_io.is_extractable_archive`).
+- **Result downloads are streamed, verified, and reported on.** The brief's
+  `response.content` write assumed small results; a real AMASSS run returns an
+  archive of one segmentation plus one surface per structure per scan, which is
+  not something to buffer whole in Slicer's RAM. `run()` now POSTs with
+  `stream=True` and writes 1 MB chunks straight to disk. A file result is then
+  checked against `Content-Length` and, for a `.zip`, CRC-checked member by
+  member before being accepted — a truncated archive still unpacks, so without
+  this a dropped connection would have silently delivered a *subset* of a
+  patient's segmentations. On failure the partial file is deleted and the error
+  raised.
+- **Added beyond the original brief: "the panel is alive" feedback.** A tool run
+  is one HTTP request lasting minutes, during which the worker thread is blocked
+  and has nothing to report — so the panel showed nothing at all and read as
+  frozen. A real AMASSS run was cancelled at three minutes for that reason,
+  forty seconds from finishing. A main-thread `QTimer` now ticks the current
+  phase plus elapsed time into a label under the Cancel button, `progress_cb`
+  reports MB/percent during the download, and the extraction announces itself.
+  What it still can't show is progress *within* the inference: that needs a
+  server-side job API. See ARCHITECTURE.md, "Telling the user something is
+  happening".
 - **Added beyond the original brief: a runtime settings module.** The brief's
   "constants at the top of a config file" decision (below) covered defaults,
   but not how a user changes server URL/API key/TLS/timeout without editing
