@@ -38,6 +38,25 @@ logger = logging.getLogger("ServerToolsCore.formgen")
 
 ARG_NAME_PROPERTY = "serverArgName"
 
+# The collapsible box an argument declaring no `section` goes into — i.e. the
+# single box every tool's panel is today.
+DEFAULT_SECTION = "Inputs"
+
+# Options per row inside a "tabs" tab. Fixed rather than computed from the
+# panel width: the module panel is resizable and a reflow on every drag would
+# move check boxes under the user's cursor mid-click.
+_TAB_COLUMNS = 4
+
+# Where the leftovers go when `groups` doesn't mention every option. The server
+# rejects a group naming an option that doesn't exist, but not the reverse —
+# and silently dropping an option would mean the user cannot select something
+# the tool offers.
+_UNGROUPED_LABEL = "Other"
+
+SELECT_ALL_LABEL = "All"
+SELECT_NONE_LABEL = "None"
+SELECT_DEFAULT_LABEL = "Default"
+
 # The two browse buttons of an argument accepting a file or a folder. Which of
 # the two the user ends up giving is read back from the path, not from these.
 BROWSE_FILE_LABEL = "File..."
@@ -46,7 +65,7 @@ PATH_PLACEHOLDER = "Select a file or a folder"
 
 
 class MultiChoiceGroup:
-    """The stack of checkboxes rendered for a `"multichoice"` argument.
+    """The checkboxes rendered for a `"multichoice"` argument.
 
     Holds one QCheckBox per option, in the schema's declaration order (the
     order `choices` arrives in — never sorted), and reads back the *complete*
@@ -60,23 +79,71 @@ class MultiChoiceGroup:
     and `ios_networks` are both always shown and only one applies to any given
     input, and the server says which in its description ("CBCT only: ...").
     A tooltip nobody hovers is not where that belongs.
+
+    **`layout` and `groups` change only where the boxes are put.** `self.boxes`
+    is keyed and ordered by `choices` whatever the layout, so `value()`,
+    `collect()`, `connect_changed()` and `all_required_filled()` cannot tell
+    the four apart — which is what makes the layouts safe to add: a wrong one
+    is ugly, never wrong on the wire. See `LAYOUTS` for what each does and the
+    server's `ArgSpec.ui` for why they exist at all.
     """
 
-    def __init__(self, choices: dict, description: str = ""):
+    def __init__(self, choices: dict, description: str = "", layout=None, groups=None):
         self.container = qt.QWidget()
-        box_layout = qt.QVBoxLayout(self.container)
-        box_layout.setContentsMargins(0, 0, 0, 0)
-        box_layout.setSpacing(design.SPACING_XS)
+        column = qt.QVBoxLayout(self.container)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(design.SPACING_XS)
 
         if description:
-            box_layout.addWidget(design.hint_label(description))
+            column.addWidget(design.hint_label(description))
 
-        self.boxes = {}
-        for option, checked in choices.items():
-            box = qt.QCheckBox(option)
-            box.setChecked(bool(checked))
-            box_layout.addWidget(box)
-            self.boxes[option] = box
+        # The state the server declared, kept for the "Default" button — which
+        # is the old ASO module's per-mode `Suggest()` button, now on every
+        # multichoice of every tool and with the suggestion living server-side.
+        self._defaults = dict(choices)
+
+        builder = _LAYOUT_BUILDERS.get(layout)
+        if builder is None:
+            if layout is not None:
+                logger.warning(
+                    "Unknown multichoice layout '%s', falling back to a single column", layout
+                )
+            builder = _build_flat_boxes
+        made = builder(column, choices, groups)
+
+        # Declaration order, whatever order the layout visited the options in.
+        self.boxes = {option: made[option] for option in choices}
+
+        if len(choices) > 1:
+            column.addWidget(self._selectionToolbar())
+
+    def _selectionToolbar(self):
+        """All / None / Default. Cheap here, and the difference between usable
+        and not once an argument publishes 130 options: without it, restoring
+        the server's suggested selection means remembering and re-ticking it by
+        hand."""
+        bar = qt.QWidget()
+        row = qt.QHBoxLayout(bar)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(design.SPACING_XS)
+        row.addStretch(1)
+        for label, action in (
+            (SELECT_ALL_LABEL, lambda: self.setAll(True)),
+            (SELECT_NONE_LABEL, lambda: self.setAll(False)),
+            (SELECT_DEFAULT_LABEL, self.restoreDefaults),
+        ):
+            button = design.link_button(label)
+            button.clicked.connect(action)
+            row.addWidget(button)
+        return bar
+
+    def setAll(self, checked: bool) -> None:
+        for box in self.boxes.values():
+            box.setChecked(checked)
+
+    def restoreDefaults(self) -> None:
+        for option, box in self.boxes.items():
+            box.setChecked(bool(self._defaults.get(option)))
 
     def value(self) -> dict:
         return {option: box.isChecked() for option, box in self.boxes.items()}
@@ -88,6 +155,145 @@ class MultiChoiceGroup:
 
     def setToolTip(self, text) -> None:
         self.container.setToolTip(text)
+
+
+def _make_box(option: str, checked) -> qt.QCheckBox:
+    box = qt.QCheckBox(option)
+    box.setChecked(bool(checked))
+    return box
+
+
+def _grouped(choices: dict, groups) -> list:
+    """[(group name, [option, ...])] — the declared groups, then whatever they
+    left out. Options keep `choices` order within each group, so a group
+    listing them in a different order does not reorder the display."""
+    if not groups:
+        return [("", list(choices))]
+
+    claimed = {option for options in groups.values() for option in options}
+    grouped = [
+        (name, [option for option in choices if option in set(options)])
+        for name, options in groups.items()
+    ]
+    leftovers = [option for option in choices if option not in claimed]
+    if leftovers:
+        grouped.append((_UNGROUPED_LABEL, leftovers))
+    return [(name, options) for name, options in grouped if options]
+
+
+def _build_flat_boxes(column, choices: dict, _groups=None) -> dict:
+    """One box per line. The default, and what every tool declaring no `ui`
+    gets — unchanged from before layouts existed."""
+    boxes = {}
+    for option, checked in choices.items():
+        boxes[option] = _make_box(option, checked)
+        column.addWidget(boxes[option])
+    return boxes
+
+
+def _build_inline_boxes(column, choices: dict, _groups=None) -> dict:
+    """One horizontal row. For a handful of short options (ASO's two jaws, its
+    eight landmark types) that waste a line each stacked vertically."""
+    row_container = qt.QWidget()
+    row = qt.QHBoxLayout(row_container)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(design.SPACING_MD)
+
+    boxes = {}
+    for option, checked in choices.items():
+        boxes[option] = _make_box(option, checked)
+        row.addWidget(boxes[option])
+    row.addStretch(1)
+
+    column.addWidget(row_container)
+    return boxes
+
+
+def _build_grid_boxes(column, choices: dict, groups=None) -> dict:
+    """One row per group, options as columns — the chart layout.
+
+    For options whose *position* carries meaning: ASO asks for teeth "spread
+    across the arch", and a column of 32 check boxes is the one layout that
+    cannot show whether a selection is spread or clustered.
+
+    Sixteen teeth do not fit in a Slicer module panel, so the grid scrolls
+    horizontally rather than being squeezed or wrapped — wrapping an arch onto
+    two lines would destroy the very adjacency the layout exists to show. The
+    old module did the same (`ASO.ui`'s scrollArea around LayoutSemiIOS_tooth).
+    """
+    grid_container = qt.QWidget()
+    grid = qt.QGridLayout(grid_container)
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setSpacing(design.SPACING_XS)
+
+    boxes = {}
+    for row_index, (group_name, options) in enumerate(_grouped(choices, groups)):
+        if group_name:
+            grid.addWidget(design.hint_label(group_name), row_index, 0)
+        for offset, option in enumerate(options):
+            boxes[option] = _make_box(option, choices[option])
+            grid.addWidget(boxes[option], row_index, offset + 1)
+
+    column.addWidget(_horizontal_scroll(grid_container))
+    return boxes
+
+
+def _build_tabs_boxes(column, choices: dict, groups=None) -> dict:
+    """One tab per group, options in a scrollable multi-column grid.
+
+    For a catalog too long to scroll through in one piece: ASO publishes 130
+    CBCT landmarks, and the grouping (cranial base / upper / lower) is how the
+    people who use them already think about them — the server sends it, so the
+    tabs are the server's own grouping rather than a client-side guess.
+    """
+    tabs = qt.QTabWidget()
+    boxes = {}
+    for group_name, options in _grouped(choices, groups):
+        page = qt.QWidget()
+        grid = qt.QGridLayout(page)
+        grid.setContentsMargins(design.SPACING_SM, design.SPACING_SM, design.SPACING_SM, design.SPACING_SM)
+        grid.setSpacing(design.SPACING_XS)
+        for index, option in enumerate(options):
+            boxes[option] = _make_box(option, choices[option])
+            grid.addWidget(boxes[option], index // _TAB_COLUMNS, index % _TAB_COLUMNS)
+        tabs.addTab(_vertical_scroll(page), group_name or _UNGROUPED_LABEL)
+
+    column.addWidget(tabs)
+    return boxes
+
+
+def _horizontal_scroll(widget):
+    area = qt.QScrollArea()
+    area.setWidget(widget)
+    area.setWidgetResizable(True)
+    area.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+    # Without this the area collapses to a couple of pixels: a QScrollArea's
+    # size hint ignores its child, so it has to be told how tall one row of
+    # check boxes is.
+    area.setMinimumHeight(design.CHART_MIN_HEIGHT)
+    return area
+
+
+def _vertical_scroll(widget):
+    area = qt.QScrollArea()
+    area.setWidget(widget)
+    area.setWidgetResizable(True)
+    area.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+    area.setMinimumHeight(design.TABS_MIN_HEIGHT)
+    return area
+
+
+# The server's ArgSpec.ui values. A layout it does not know about falls back to
+# the flat column with a warning rather than failing the panel: a presentation
+# hint from a newer server must never be able to break an older client.
+_LAYOUT_BUILDERS = {
+    None: _build_flat_boxes,
+    "inline": _build_inline_boxes,
+    "grid": _build_grid_boxes,
+    "tabs": _build_tabs_boxes,
+}
+
+LAYOUTS = tuple(name for name in _LAYOUT_BUILDERS if name)
 
 
 class FileOrFolderInput:
@@ -285,9 +491,83 @@ def row_widget(field):
     return getattr(field, "container", field)
 
 
-def build(arguments_schema: dict, layout) -> dict:
-    """Add one row per non-file argument to `layout` (a qt.QFormLayout). Returns
-    {arg_name: widget}."""
+def section_of(spec: dict) -> str:
+    """The collapsible box this argument belongs in. An argument declaring no
+    `section` — every argument of every tool but ASO today — lands in the one
+    box a panel has always had, so the grouping is opt-in per tool and no
+    existing panel moves."""
+    return spec.get("section") or DEFAULT_SECTION
+
+
+def sections_of(arguments_schema: dict, extra=()) -> list:
+    """Every distinct section a tool's arguments name, in the order they are
+    first mentioned — the schema's declaration order, which is the tool
+    author's intended reading order. `extra` names boxes the client adds on its
+    own (the output folder), appended unless an argument already claimed them.
+    """
+    ordered = []
+    for spec in arguments_schema.values():
+        name = section_of(spec)
+        if name not in ordered:
+            ordered.append(name)
+    for name in extra:
+        if name not in ordered:
+            ordered.append(name)
+    return ordered
+
+
+def is_visible(spec: dict, values: dict) -> bool:
+    """Whether `visible_when` is satisfied by the panel's current values.
+
+    `{"modality": "CBCT", "automation": "Fully-Automated"}` — every entry must
+    match, and a tuple/list of values means "any of these". An argument
+    declaring nothing is always visible.
+
+    A controlling argument absent from `values` counts as NOT matching. That
+    only happens when the schema could not be fetched (so the panel holds an
+    error, not a form) or when a server declares a `visible_when` naming an
+    argument it doesn't publish — which its own check_schema rejects at boot.
+    Hiding is the safe answer either way: a field whose precondition cannot be
+    evaluated is a field the user cannot fill in meaningfully.
+    """
+    conditions = spec.get("visible_when")
+    if not conditions:
+        return True
+    for other_name, expected in conditions.items():
+        if other_name not in values:
+            return False
+        wanted = expected if isinstance(expected, (list, tuple)) else (expected,)
+        if values[other_name] not in wanted:
+            return False
+    return True
+
+
+def controlling_arguments(arguments_schema: dict) -> set:
+    """Every argument some other argument's visibility depends on — the ones
+    whose change has to re-evaluate the panel."""
+    return {
+        other_name
+        for spec in arguments_schema.values()
+        for other_name in (spec.get("visible_when") or {})
+    }
+
+
+def build(arguments_schema: dict, layout, sections=None, rows=None) -> dict:
+    """Add one row per non-file argument. Returns {arg_name: widget}.
+
+    `layout` is a qt.QFormLayout — the single-box behavior, kept as the default
+    so a caller that knows nothing about sections is unaffected. `sections` is
+    {section name: QFormLayout}; when given, each argument goes to the layout
+    its `section` names and `layout` is only the fallback for a section the
+    caller didn't create.
+
+    `rows`, if given, is filled with `{arg_name: (label, field)}` — the two
+    widgets a caller has to show or hide together to make a row appear or
+    disappear. An out-parameter rather than a second return value so the
+    signature stays what every existing caller and test expects; the labels are
+    created in here, and a caller cannot recover a QFormLayout's label for a
+    field reliably across PythonQt versions.
+    """
     widgets = {}
     for name, spec in arguments_schema.items():
         if is_file_type(spec.get("type", "")):
@@ -300,8 +580,12 @@ def build(arguments_schema: dict, layout) -> dict:
             widget.setToolTip(description)
 
         label = design.required_label(name) if spec.get("required") else design.section_title(name)
-        layout.addRow(label, row_widget(widget))
+        target = (sections or {}).get(section_of(spec), layout)
+        field = row_widget(widget)
+        target.addRow(label, field)
         widgets[name] = widget
+        if rows is not None:
+            rows[name] = (label, field)
     return widgets
 
 
@@ -351,7 +635,12 @@ def _make_widget(name: str, spec: dict):
     if arg_type == "choice":
         return _make_choice_widget(name, spec)
     if arg_type == "multichoice":
-        return MultiChoiceGroup(_choices(name, spec), spec.get("description", ""))
+        return MultiChoiceGroup(
+            _choices(name, spec),
+            spec.get("description", ""),
+            layout=spec.get("ui"),
+            groups=spec.get("groups"),
+        )
     if is_file_type(arg_type):
         return file_widget(spec)
 
@@ -548,9 +837,17 @@ def _read_widget(widget):
     raise TypeError(f"Don't know how to read value from widget {widget!r}")
 
 
-def all_required_filled(arg_widgets: dict, arguments_schema: dict) -> bool:
+def all_required_filled(arg_widgets: dict, arguments_schema: dict, hidden=()) -> bool:
+    """Whether every required scalar argument holds a value.
+
+    A `hidden` argument is skipped: it is not sent (see base_widget.collectArgs),
+    so the server applies its default and an empty widget behind a hidden row
+    must not be able to disable Apply forever with nothing on screen to explain
+    why. No tool declares a required argument under a `visible_when` today, and
+    this is what keeps that from becoming a dead-locked panel if one does.
+    """
     for name, spec in arguments_schema.items():
-        if is_file_type(spec.get("type", "")) or not spec.get("required"):
+        if is_file_type(spec.get("type", "")) or not spec.get("required") or name in hidden:
             continue
         widget = arg_widgets.get(name)
         if widget is None:

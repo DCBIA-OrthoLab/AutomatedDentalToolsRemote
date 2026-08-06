@@ -54,6 +54,12 @@ class QObject:
     def setStyleSheet(self, sheet):
         self._stylesheet = sheet
 
+    def setCursor(self, _cursor):
+        pass
+
+    def setMinimumHeight(self, height):
+        self._minimum_height = height
+
 
 class QWidget(QObject):
     def __init__(self, parent=None):
@@ -84,7 +90,65 @@ class QVBoxLayout(QLayout):
 
 
 class QHBoxLayout(QLayout):
-    pass
+    def addStretch(self, _stretch=0):
+        pass
+
+
+class QGridLayout(QLayout):
+    """Records the (row, column) each widget was placed at — which is the whole
+    point of the "grid" multichoice layout: a chart is only a chart if the
+    positions are right (see formgen._build_grid_boxes)."""
+
+    def __init__(self, parent=None):
+        QLayout.__init__(self, parent)
+        self.cells = {}  # {(row, column): widget}
+
+    def addWidget(self, widget, row=0, column=0, *_args):
+        self.widgets.append(widget)
+        self.cells[(row, column)] = widget
+
+
+class QScrollArea(QWidget):
+    def __init__(self, parent=None):
+        QWidget.__init__(self, parent)
+        self.widget = None
+        self.widgetResizable = False
+        self.verticalScrollBarPolicy = None
+        self.horizontalScrollBarPolicy = None
+
+    def setWidget(self, widget):
+        self.widget = widget
+
+    def setWidgetResizable(self, resizable):
+        self.widgetResizable = resizable
+
+    def setVerticalScrollBarPolicy(self, policy):
+        self.verticalScrollBarPolicy = policy
+
+    def setHorizontalScrollBarPolicy(self, policy):
+        self.horizontalScrollBarPolicy = policy
+
+
+class QTabWidget(QWidget):
+    def __init__(self, parent=None):
+        QWidget.__init__(self, parent)
+        self.tabs = []  # [(title, widget)]
+
+    def addTab(self, widget, title):
+        self.tabs.append((title, widget))
+
+
+class QCursor:
+    def __init__(self, shape=0):
+        self.shape = shape
+
+
+class Qt:
+    """The Qt namespace enum values design/formgen reach for."""
+
+    ScrollBarAlwaysOff = 1
+    ScrollBarAsNeeded = 0
+    PointingHandCursor = 13
 
 
 class QFileDialog:

@@ -183,6 +183,36 @@ def hint_label(text: str) -> qt.QLabel:
     return label
 
 
+def link_button(text: str) -> qt.QPushButton:
+    """A small, flat, text-only button for a secondary action next to a field —
+    the All / None / Default row above a group of check boxes.
+
+    Deliberately NOT primary_button: three filled blue buttons above a check
+    box grid read as the panel's main actions and compete with Apply, which is
+    the one button that starts a run.
+    """
+    t = tokens()
+    button = qt.QPushButton(text)
+    button.setStyleSheet(
+        f"QPushButton {{ background: transparent; border: none; color: {t['PRIMARY']};"
+        f" font-size: 8pt; font-weight: 600; padding: 0px {SPACING_SM}px; margin: 0px;"
+        f" text-decoration: underline; }}"
+        f"QPushButton:hover {{ color: {t['PRIMARY_HOVER']}; }}"
+    )
+    # A QCursor, not the bare Qt::CursorShape enum: PyQt converts one to the
+    # other implicitly, PythonQt does not reliably, and this runs under
+    # PythonQt.
+    button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+    return button
+
+
+# A QScrollArea's size hint ignores its child, so a chart or a tab page laid
+# out inside one collapses to a few pixels unless it is told how tall it is.
+# Both are floors, not fixed heights: the layouts still grow with the panel.
+CHART_MIN_HEIGHT = 90   # two rows of check boxes plus their group labels
+TABS_MIN_HEIGHT = 220   # a tab bar plus roughly six rows of options
+
+
 def warning_label(text: str) -> qt.QLabel:
     """A visible, wrapped, danger-colored label — used when part of a module's
     UI could not be built, so a failure is never just a silent blank panel."""

@@ -33,6 +33,12 @@ logger = logging.getLogger("ServerToolsCore.base_widget")
 _FILE_INPUT_MODES = ("auto", "single_file", "folder_zip", "file_or_folder", "volume_node", "none")
 _RESULT_KINDS = ("text", "segmentation", "volume", "model", "save_as")
 
+# The box holding the output folder picker, which no schema argument owns. A
+# tool may still put arguments of its own in it by declaring section="Outputs"
+# (ASO's output_suffix does), which is why it is a plain name rather than a
+# separate widget.
+_OUTPUTS_SECTION = "Outputs"
+
 
 class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     """Only TOOL_NAME is required. Everything the tool's own schema already
@@ -76,6 +82,13 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._inputWidgets = {}  # {schema_argument_name: widget}
         self._inputModes = {}  # {schema_argument_name: mode}, "auto" already resolved
         self._outputFolderWidget = None
+        # Schema-driven panel layout, all rebuilt wholesale by _buildForm.
+        self._sectionBoxes = {}  # {section name: ctkCollapsibleButton}
+        self._sectionLayouts = {}  # {section name: QFormLayout}
+        self._rows = {}  # {schema_argument_name: (label, field)} — hidden together
+        self._rowSections = {}  # {schema_argument_name: section name}
+        self._sectionsWithOwnRows = set()  # sections holding a row no argument owns
+        self._hiddenArgs = set()  # arguments whose `visible_when` is not satisfied
         self._statusBadge = None
         self._statusJob = None
         self._schemaError = None  # set while the panel could not be built from a schema
@@ -257,10 +270,30 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._schema = {"arguments": {}}
             self._schemaError = exc
 
-        inputsBox = ctk.ctkCollapsibleButton()
-        inputsBox.text = _("Inputs")
-        inputsLayout = qt.QFormLayout(inputsBox)
-        rootLayout.addWidget(inputsBox)
+        # One collapsible box per section the schema names, in declaration
+        # order. A tool naming none gets exactly one box called "Inputs" — the
+        # panel every module has today, unchanged.
+        arguments = self._schema.get("arguments", {})
+        # DEFAULT_SECTION is always created, even when every argument claims
+        # another one: it is where anything without a section of its own goes,
+        # including the error path's empty schema. An unused one holds no rows
+        # and _applyVisibility hides it, so it costs nothing on screen.
+        extraSections = [formgen.DEFAULT_SECTION]
+        if self.resultKind == "save_as":
+            extraSections.append(_OUTPUTS_SECTION)
+        self._sectionBoxes = {}
+        self._sectionLayouts = {}
+        self._rows = {}
+        self._rowSections = {}
+        self._sectionsWithOwnRows = set()
+        for sectionName in formgen.sections_of(arguments, extraSections):
+            box = ctk.ctkCollapsibleButton()
+            box.text = _(sectionName)
+            self._sectionLayouts[sectionName] = qt.QFormLayout(box)
+            self._sectionBoxes[sectionName] = box
+            rootLayout.addWidget(box)
+
+        inputsLayout = self._sectionLayouts[formgen.DEFAULT_SECTION]
 
         self._inputWidgets = self._buildInputWidgets(inputsLayout)
 
@@ -281,7 +314,12 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         else:
             self._warnAboutFileInputsMismatch(rootLayout)
 
-        self._argWidgets = formgen.build(self._schema.get("arguments", {}), inputsLayout)
+        self._argWidgets = formgen.build(
+            arguments, inputsLayout, sections=self._sectionLayouts, rows=self._rows
+        )
+        self._rowSections.update(
+            {name: formgen.section_of(arguments.get(name, {})) for name in self._rows}
+        )
         logger.info("AUTO_UI built %d scalar field(s) for '%s': %s",
                     len(self._argWidgets), self.TOOL_NAME, sorted(self._argWidgets.keys()))
         for widget in self._argWidgets.values():
@@ -290,17 +328,72 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._populateServerSelectables(rootLayout)
 
         if self.resultKind == "save_as":
-            outputsBox = ctk.ctkCollapsibleButton()
-            outputsBox.text = _("Outputs")
-            outputsLayout = qt.QFormLayout(outputsBox)
-            rootLayout.addWidget(outputsBox)
-
+            outputsLayout = self._sectionLayouts[_OUTPUTS_SECTION]
             self._outputFolderWidget = ctk.ctkPathLineEdit()
             self._outputFolderWidget.filters = ctk.ctkPathLineEdit.Dirs
             outputsLayout.addRow(design.required_label(_("Output folder")), self._outputFolderWidget)
             formgen.connect_changed(self._outputFolderWidget, self._checkCanApply)
+            # This row belongs to no schema argument, so it must keep its
+            # section on screen even when every argument in it is hidden.
+            self._sectionsWithOwnRows.add(_OUTPUTS_SECTION)
+
+        self._wireVisibility(arguments)
 
         self.configureFields()
+
+    # ------------------------------------------------------------------
+    # Conditional fields (`visible_when`)
+    # ------------------------------------------------------------------
+
+    def _wireVisibility(self, arguments: dict) -> None:
+        """Re-evaluate every `visible_when` whenever a controlling field
+        changes, and once now so the panel opens in the right state.
+
+        Called from _buildAutoUI rather than from setup(), because the panel is
+        rebuilt from scratch when a server that was down comes back — the same
+        reason configureFields() exists (see ARCHITECTURE.md). Wiring this once
+        at setup() would leave the rebuilt panel showing every field of every
+        mode again.
+        """
+        for name in formgen.controlling_arguments(arguments):
+            widget = self._argWidgets.get(name)
+            if widget is None:
+                # check_schema rejects a visible_when naming an argument the
+                # tool doesn't declare, so this means the schema fetch failed
+                # and there is no form to drive. is_visible() hides what it
+                # cannot evaluate, which is already the right answer.
+                continue
+            formgen.connect_changed(widget, self._applyVisibility)
+        self._applyVisibility()
+
+    def _applyVisibility(self, *_args) -> None:
+        arguments = (self._schema or {}).get("arguments", {})
+        controlling = formgen.controlling_arguments(arguments)
+        values = formgen.collect(
+            {name: self._argWidgets[name] for name in controlling if name in self._argWidgets}
+        )
+
+        hidden = set()
+        for name, spec in arguments.items():
+            visible = formgen.is_visible(spec, values)
+            if not visible:
+                hidden.add(name)
+            for widget in self._rows.get(name, ()):
+                widget.setVisible(visible)
+        self._hiddenArgs = hidden
+
+        # A section whose every row is hidden is an empty titled box; hide it
+        # too. This is what turns two mutually exclusive sets of arguments into
+        # the old module's two stacked pages, with no client-side notion of a
+        # "page" anywhere.
+        for sectionName, box in self._sectionBoxes.items():
+            owned = [name for name, owner in self._rowSections.items() if owner == sectionName]
+            box.setVisible(
+                sectionName in self._sectionsWithOwnRows
+                or any(name not in hidden for name in owned)
+            )
+
+        self._checkCanApply()
 
     def configureFields(self) -> None:
         """Override to touch up the generated widgets once they all exist —
@@ -340,18 +433,31 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _buildFileInputWidget(self, layout, arg_name: str, mode: str):
         label = _(arg_name.replace("_", " ").capitalize())
         spec = self._schemaArgument(arg_name)
+        # A file argument goes in the section its own spec names, like every
+        # other argument; `layout` is the fallback for one that names none.
+        section = formgen.section_of(spec)
+        target = self._sectionLayouts.get(section, layout)
+        labelWidget = design.required_label(label)
 
         if mode == "volume_node":
             widget = slicer.qMRMLNodeComboBox()
             widget.nodeTypes = ["vtkMRMLScalarVolumeNode"]
             widget.noneEnabled = True
             widget.setMRMLScene(slicer.mrmlScene)
-            layout.addRow(design.required_label(label), widget)
+            target.addRow(labelWidget, widget)
+            field = widget
             widget.currentNodeChanged.connect(self._checkCanApply)
         else:
             widget = formgen.file_widget(spec, mode)
-            layout.addRow(design.required_label(label), formgen.row_widget(widget))
+            field = formgen.row_widget(widget)
+            target.addRow(labelWidget, field)
             formgen.connect_changed(widget, self._checkCanApply)
+
+        # Recorded like a scalar row so `visible_when` can hide a file input
+        # too, and so a section holding only file inputs is not mistaken for an
+        # empty one.
+        self._rows[arg_name] = (labelWidget, field)
+        self._rowSections[arg_name] = section
 
         # The server's own wording for this input, now that the schema is known.
         description = spec.get("description")
@@ -463,13 +569,22 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         Only `""` qualifies: a multichoice reads back as a dict (every box
         unchecked is a meaningful selection, see MultiChoiceGroup), and 0 /
         False are values a user deliberately set.
+
+        An argument HIDDEN by its `visible_when` is dropped for the same
+        reason, one step further: it is not "left empty", it does not apply at
+        all. Sending ASO's 32 `ios_teeth` boxes along with a CBCT run would
+        state a selection the user was never shown and never made — and, since
+        the server reads what it receives as the selection itself, an argument
+        whose default someone changes server-side would still arrive frozen at
+        whatever the invisible widget happened to hold.
         """
         values = formgen.collect(self._argWidgets)
         arguments = (self._schema or {}).get("arguments", {})
         collected = {
             name: value
             for name, value in values.items()
-            if not (value == "" and not arguments.get(name, {}).get("required"))
+            if name not in self._hiddenArgs
+            and not (value == "" and not arguments.get(name, {}).get("required"))
         }
 
         # A file argument satisfied from the server's own data store travels as
@@ -484,6 +599,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         user picked a hosted file instead of one of their own."""
         chosen = {}
         for arg_name, widget in self._inputWidgets.items():
+            if arg_name in self._hiddenArgs:
+                continue
             reader = getattr(widget, "server_name", None)
             name = reader() if reader else ""
             if name:
@@ -502,6 +619,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return files
 
     def _prepareOneInputFile(self, workspace: slicer_io.TempWorkspace, arg_name: str, mode: str):
+        # Hidden by its `visible_when`: the argument does not apply to this
+        # run, so nothing is uploaded for it — same rule as collectArgs.
+        if arg_name in self._hiddenArgs:
+            return None
         widget = self._inputWidgets.get(arg_name)
         # Already satisfied by a file hosted on the server: nothing to upload.
         # collectArgs sends its name instead (see _serverSideSelections).
@@ -574,13 +695,19 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not self.applyButton:
             return  # a widget signal fired while the panel is still being built
         arguments = (self._schema or {}).get("arguments", {})
-        canApply = self._inputReady() and formgen.all_required_filled(self._argWidgets, arguments)
+        canApply = self._inputReady() and formgen.all_required_filled(
+            self._argWidgets, arguments, hidden=self._hiddenArgs
+        )
         if self.resultKind == "save_as":
             canApply = canApply and bool(self._outputFolderWidget and self._outputFolderWidget.currentPath)
         self.applyButton.enabled = canApply
 
     def _inputReady(self) -> bool:
         for arg_name, mode in self._inputModes.items():
+            # A file input hidden by its `visible_when` is not uploaded either
+            # (see _prepareOneInputFile), so it cannot be what Apply waits for.
+            if arg_name in self._hiddenArgs:
+                continue
             widget = self._inputWidgets.get(arg_name)
             if mode == "volume_node":
                 if widget is None or widget.currentNode() is None:

@@ -68,6 +68,14 @@ class ASOWidget(ServerToolWidgetBase):
     formgen — so a landmark added server-side appears in this panel with no
     client release.
 
+    Nor does the *layout*, which is the part that used to force a hand-written
+    panel. The four collapsible boxes, the landmark tabs, the tooth chart and
+    the fact that a CBCT run is never asked about teeth all come from the
+    schema's presentation hints (`section`, `visible_when`, `ui`, `groups` —
+    see ARCHITECTURE.md). The old local module spent a four-page
+    QStackedWidget and ~700 lines of checkbox plumbing on the same result, with
+    the tooth numbering written out twice inside the widget.
+
     In particular the mode is *asked for*, never guessed: a `.zip` can hold CBCT
     volumes or intraoral meshes, so no extension could tell this module which
     pipeline the user wanted.
