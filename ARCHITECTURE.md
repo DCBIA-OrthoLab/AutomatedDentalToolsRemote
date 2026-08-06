@@ -50,8 +50,13 @@ SlicerAutomatedDentalTools/
 │   ├── ALI.py                              # declarative, plus a run-report summary
 │   ├── Testing/Python/test_ali_client.py   # ALI's schema as a fixture, qt/ctk/slicer stubbed
 │   └── ALI_Method/                         # former local module, left in place but unwired
+├── ASO/                                    # automated standardized orientation
+│   ├── CMakeLists.txt
+│   ├── ASO.py                              # declarative, plus optional result loading
+│   ├── Testing/Python/test_aso_client.py   # ASO's schema as a fixture, same stubs
+│   └── ASO_Method/                         # former local module, left in place but unwired
 ├── SurgMovPred_CLI/                        # left in place but unwired (see "SurgMovPred_CLI" below)
-└── ALI_CBCT/, ALI_IOS/                     # the CLIs ALI used to drive, likewise unwired
+└── ALI_CBCT/, ALI_IOS/, ASO_CBCT/, ASO_IOS/  # the CLIs they used to drive, likewise unwired
 ```
 
 ### Deviation from a literal reading of the brief
