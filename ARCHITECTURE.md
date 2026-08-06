@@ -342,6 +342,53 @@ This is what keeps "add a field to a tool = zero client-side lines" true for
 *file* arguments too, not just scalar ones: a new file argument server-side
 appears in the panel with the right picker, unannounced.
 
+### Sections and conditional fields
+
+`_buildAutoUI` creates one `ctkCollapsibleButton` per `section` the schema
+names, in first-mention order, and routes every row — scalar fields *and* file
+inputs — to the box its own spec names. `DEFAULT_SECTION` ("Inputs") is always
+created even when every argument claims another one, since it is where anything
+sectionless goes, including the error path's empty schema; an unused box holds
+no rows and is hidden, so it costs nothing on screen. `"Outputs"` is created
+whenever `resultKind == "save_as"` for the output-folder picker, and a tool may
+also put arguments of its own in it (ASO's `output_suffix` does).
+
+`_wireVisibility` then connects `_applyVisibility` to every argument some other
+argument's `visible_when` names, and runs it once so the panel *opens* filtered
+rather than showing everything until a combo box is touched. It is called from
+`_buildAutoUI` and not from `setup()`, for the same reason `configureFields()`
+exists: the panel is rebuilt from scratch when a server that was down comes
+back, and anything wired outside the build is silently lost on that rebuild.
+
+`_applyVisibility` hides each failing row's label and field together, records
+the set in `_hiddenArgs`, and **hides a whole section once every row it owns is
+hidden**. That last rule is what turns two mutually exclusive sets of arguments
+into the old module's two stacked pages, with no client-side notion of a "page"
+anywhere. A section holding a row no argument owns (the output folder) is
+listed in `_sectionsWithOwnRows` and never hidden.
+
+Four call sites then read `_hiddenArgs`, and each one is load-bearing:
+
+- **`collectArgs`** drops hidden arguments entirely. Not cosmetic: a
+  `multichoice` reads back as the *complete* `{option: checked}` dict and the
+  server reads what it receives **as** the selection, so sending ASO's
+  `ios_teeth` along with a CBCT run states a selection the user was never shown
+   — and freezes it at whatever the invisible widget was built with, even after
+  someone changes the default server-side. Dropping it is what lets the
+  server's own default apply.
+- **`_prepareOneInputFile`** uploads nothing for a hidden file argument, and
+  **`_serverSideSelections`** sends no hosted name for one.
+- **`all_required_filled` / `_inputReady`** skip them, so a hidden required
+  field cannot disable Apply forever with nothing on screen to explain why. No
+  tool declares one today; this is what keeps that from becoming a dead-locked
+  panel if one does.
+
+`formgen.is_visible` **hides what it cannot evaluate** — a controlling argument
+missing from the collected values. That only happens when the schema could not
+be fetched (so the panel holds an error, not a form), since the server's
+`check_schema` rejects a `visible_when` naming an argument the tool does not
+declare. Hiding is the answer that cannot produce a wrong request.
+
 ### The panel heals when the server comes back
 
 The panel is built from the schema, so a server that is down when the module
@@ -532,6 +579,89 @@ fields) into a `qt.QFormLayout`, using the type table below, and returns
 
 `description` becomes the tooltip; `required: true` fields get an asterisk
 label via `design.required_label`.
+
+### Presentation hints — `section`, `visible_when`, `ui`, `groups`
+
+Everything above answers *what* an argument is. Past a certain size that stops
+being enough: ASO declares 130 CBCT landmarks, 32 teeth, 8 landmark types and
+2 jaws in one schema, which the rules above render as a single column of ~180
+check boxes with the CBCT and IOS options interleaved — while any given run
+uses one half or the other. The old local module solved that with a
+hand-written four-page `QStackedWidget`, which is exactly the
+anatomy-in-the-widget this architecture exists to remove.
+
+So the schema grew four **presentation** fields (server-side `ArgSpec`,
+published verbatim by `GET /tools`, ignored by the server's own `validate()`).
+They are all optional and all `null` on every tool declaring none — which is
+the compatibility guarantee: **a tool declaring no hint renders exactly as it
+did before they existed**, asserted for `example_tool` in `test_formgen.py`.
+
+| Field | Read by | Effect |
+|---|---|---|
+| `label` | `formgen.label_for` | the text next to the widget. Absent → the argument name prettified (`output_suffix` → "Output suffix") |
+| `section` | `formgen.section_of` / `sections_of` | which `ctkCollapsibleButton` the row goes in. Absent → `formgen.DEFAULT_SECTION` (`"Inputs"`), the one box a panel has always had. Boxes are created in the order the schema first mentions them |
+| `visible_when` | `formgen.is_visible` | `{other_argument: value}` (a list means "any of these"); every entry must match. A row whose condition fails is hidden, label included |
+| `ui` | `formgen.MultiChoiceGroup` | how a `multichoice`'s boxes are laid out: `"tabs"`, `"grid"`, `"inline"` |
+| `groups` | same | `{group name: [option, ...]}` for the two grouped layouts |
+
+**The layouts change where the boxes are put and nothing else.**
+`MultiChoiceGroup.boxes` is keyed and ordered by `choices` whatever the layout,
+so `collect()`, `connect_changed()`, `all_required_filled()` and the JSON
+`client.py` builds cannot tell them apart. That is what makes a layout safe to
+add — a wrong one is ugly, never wrong on the wire — and it is asserted
+directly (`MultiChoiceLayoutTest.test_every_layout_reads_back_identically`).
+
+- `"tabs"` — a `QTabWidget`, one scrollable multi-column tab per group, for a
+  catalog too long to scroll through in one piece. The grouping is the
+  *server's* (ASO's cranial base / upper / lower), not a client-side guess.
+- `"grid"` — one row per group, options as columns, in a horizontally
+  scrolling area. For options whose **position** carries meaning: ASO asks for
+  teeth "spread across the arch", and a column of 32 check boxes is the one
+  layout that cannot show whether a selection is spread or clustered. It
+  scrolls rather than wrapping, because wrapping an arch onto two lines
+  destroys the very adjacency the layout exists to show — the old `ASO.ui` did
+  the same, with a scroll area around `LayoutSemiIOS_tooth`.
+- `"inline"` — one horizontal row, for a handful of short options.
+- An **unknown** layout falls back to the flat column with a logged warning: a
+  hint from a newer server must never be able to break an older client.
+- An option no group mentions is rendered in a trailing `"Other"` group rather
+  than dropped. The server rejects a group naming an option that does not
+  exist, but not the reverse, and dropping one would hide a selection the tool
+  genuinely offers.
+
+Every `multichoice` with more than one option also gets an **All / None /
+Default** row (`design.link_button`). "Default" restores the state the schema
+declared — the old ASO module's per-mode `Suggest()` button, now on every tool,
+with the suggestion living server-side where it belongs.
+
+**Where the words come from, and the line between the two.** Everything
+describing a *tool* is the server's: the field label (`label`), the section
+title (`section`), the tab and chart-row names (`groups`), the option names
+(`choices`), the tooltip (`description`). The client owns only its own chrome —
+Apply, Cancel, Retry, "Output folder", All / None / Default, the `"Other"`
+group for options no `groups` entry mentions, and the fallback labels below —
+which exist on every panel regardless of tool and are translated through `_()`.
+
+`formgen.label_for(name, spec)` is the single rule, and the fallback is
+deliberately a *fallback*: `name.replace("_", " ").capitalize()` renders
+`cbct_landmarks` as "Cbct landmarks" and has no way to turn `input` into
+"Scan / Landmark Folder". There used to be **two** rules — `build()` used the
+raw schema name while `base_widget` prettified it — so an ASO panel showed
+"Reference" directly above "cbct_landmarks".
+
+The one place the two sides must agree by convention rather than by data is the
+`"Outputs"` box: the client creates it for the output-folder picker whenever
+`resultKind == "save_as"` (`base_widget._OUTPUTS_SECTION`), and a tool that
+wants its own arguments in the same box declares `section="Outputs"` — which
+ASO's `output_suffix` does. A tool naming that section anything else gets a
+second box below it rather than a merge.
+
+`build()` gained two optional parameters for this and kept its signature
+otherwise: `sections={name: QFormLayout}` routes each argument to its box, and
+`rows` is an out-parameter filled with `{arg_name: (label, field)}` — the pair
+a caller has to hide *together*. An out-parameter rather than a second return
+value because the labels are created inside `build()` and a QFormLayout's label
+for a field cannot be recovered reliably across PythonQt versions.
 
 ### `choice` and `multichoice`
 

@@ -607,5 +607,232 @@ class FileOrFolderInputTest(unittest.TestCase):
             self.assertLessEqual(picker.nameFilterAssignments, 1, mode)
 
 
+# ---------------------------------------------------------------------------
+# Presentation hints (ArgSpec.section / visible_when / ui / groups)
+# ---------------------------------------------------------------------------
+
+def _multichoice(choices, **hints):
+    spec = {
+        "type": "multichoice", "types": ["multichoice"], "required": False,
+        "description": "", "server_selectable": None, "choices": choices,
+        "initial": None,
+    }
+    spec.update(hints)
+    return spec
+
+
+# Four options, two groups, one option left out of every group on purpose.
+_LAYOUT_CHOICES = {"a": True, "b": False, "c": True, "d": False}
+_LAYOUT_GROUPS = {"First": ["a", "b"], "Second": ["c"]}
+
+
+class MultiChoiceLayoutTest(unittest.TestCase):
+    """The four layouts must be indistinguishable from the outside.
+
+    This is the property that makes a presentation hint safe: a layout the
+    client renders badly is ugly, never wrong on the wire. Everything
+    downstream (collect, connect_changed, all_required_filled, and the JSON
+    client.py builds) reads `boxes` and `value()`, so those must not depend on
+    where the boxes were put.
+    """
+
+    def _group(self, layout, groups=None):
+        return formgen.MultiChoiceGroup(_LAYOUT_CHOICES, "", layout=layout, groups=groups)
+
+    def test_every_layout_reads_back_identically(self):
+        for layout, groups in ((None, None), ("inline", None),
+                               ("grid", _LAYOUT_GROUPS), ("tabs", _LAYOUT_GROUPS)):
+            group = self._group(layout, groups)
+            self.assertEqual(list(group.boxes), list(_LAYOUT_CHOICES), layout)
+            self.assertEqual(group.value(), _LAYOUT_CHOICES, layout)
+
+    def test_a_grouped_layout_keeps_declaration_order_not_group_order(self):
+        # "Second" holds "c", declared third; the read-back order stays the
+        # schema's, because that is the order the server matches against.
+        group = self._group("tabs", {"Second": ["c"], "First": ["a", "b"]})
+        self.assertEqual(list(group.boxes), ["a", "b", "c", "d"])
+
+    def test_an_option_left_out_of_every_group_is_still_offered(self):
+        # The server rejects a group naming an unknown option, but not an
+        # option no group mentions. Dropping it would hide a selection the
+        # tool genuinely offers.
+        group = self._group("tabs", _LAYOUT_GROUPS)
+        self.assertIn("d", group.boxes)
+
+    def test_an_unknown_layout_falls_back_to_the_flat_column(self):
+        # A presentation hint from a newer server must never break an older
+        # client: the panel still renders, just plainly.
+        group = self._group("carousel")
+        self.assertEqual(group.value(), _LAYOUT_CHOICES)
+
+    def test_tabs_makes_one_tab_per_group(self):
+        group = self._group("tabs", _LAYOUT_GROUPS)
+        tabs = [w for w in group.container.layout.widgets if isinstance(w, qt.QTabWidget)]
+        self.assertEqual(len(tabs), 1)
+        self.assertEqual([title for title, _w in tabs[0].tabs], ["First", "Second", "Other"])
+
+    def test_grid_puts_one_group_per_row_with_its_options_as_columns(self):
+        # The chart property: ASO asks for teeth "spread across the arch", and
+        # only the positions can show whether a selection is spread.
+        group = self._group("grid", _LAYOUT_GROUPS)
+        area = group.container.layout.widgets[0]
+        grid = area.widget.layout
+        self.assertIs(grid.cells[(0, 1)], group.boxes["a"])
+        self.assertIs(grid.cells[(0, 2)], group.boxes["b"])
+        self.assertIs(grid.cells[(1, 1)], group.boxes["c"])
+
+    def test_select_all_none_and_default(self):
+        group = self._group(None)
+        group.setAll(True)
+        self.assertEqual(set(group.value().values()), {True})
+        group.setAll(False)
+        self.assertEqual(set(group.value().values()), {False})
+        # "Default" restores what the SERVER declared, which is what the old
+        # ASO module's per-mode Suggest() button did with a hardcoded list.
+        group.restoreDefaults()
+        self.assertEqual(group.value(), _LAYOUT_CHOICES)
+
+    def test_a_single_option_argument_gets_no_toolbar(self):
+        group = formgen.MultiChoiceGroup({"only": True})
+        self.assertEqual(len(group.container.layout.widgets), 1)
+
+    def test_the_layout_reaches_the_widget_through_the_schema(self):
+        # Not just constructible by hand: _make_widget has to read `ui`/`groups`
+        # off the spec, or a tool declaring them renders flat anyway.
+        widgets = formgen.build(
+            {"picks": _multichoice(_LAYOUT_CHOICES, ui="tabs", groups=_LAYOUT_GROUPS)},
+            qt.QFormLayout(),
+        )
+        tabs = [w for w in widgets["picks"].container.layout.widgets
+                if isinstance(w, qt.QTabWidget)]
+        self.assertEqual(len(tabs), 1)
+
+
+class LabelTest(unittest.TestCase):
+    """The words a user reads are the tool's, not this file's."""
+
+    def test_the_declared_label_wins(self):
+        self.assertEqual(
+            formgen.label_for("input", {"label": "Scan / Landmark Folder"}),
+            "Scan / Landmark Folder",
+        )
+
+    def test_the_fallback_prettifies_the_argument_name(self):
+        self.assertEqual(formgen.label_for("output_suffix", {}), "Output suffix")
+        self.assertEqual(formgen.label_for("input", {"label": None}), "Input")
+        self.assertEqual(formgen.label_for("input", {"label": "   "}), "Input")
+
+    def test_the_fallback_is_why_labels_belong_server_side(self):
+        # It cannot know that "cbct" is an acronym, nor that ASO's `input`
+        # holds the scans AND their landmarks. That is not a bug to fix here —
+        # no naming rule can recover a phrase nobody wrote down.
+        self.assertEqual(formgen.label_for("cbct_landmarks", {}), "Cbct landmarks")
+
+    def test_one_rule_for_generated_fields_and_file_inputs(self):
+        # Regression: build() used the raw schema name while base_widget
+        # prettified it, so one panel showed "Reference" above "cbct_landmarks".
+        schema = {
+            "plain": {"type": "str", "types": ["str"], "required": True},
+            "named": {"type": "str", "types": ["str"], "label": "A Real Name"},
+        }
+        layout = qt.QFormLayout()
+        formgen.build(schema, layout)
+        self.assertEqual([label.text for label, _f in layout.rows], ["Plain *", "A Real Name"])
+
+
+class SectionTest(unittest.TestCase):
+    def test_an_argument_declaring_nothing_lands_in_the_default_section(self):
+        self.assertEqual(formgen.section_of({}), formgen.DEFAULT_SECTION)
+        self.assertEqual(formgen.section_of({"section": None}), formgen.DEFAULT_SECTION)
+
+    def test_sections_are_ordered_by_first_mention(self):
+        schema = {
+            "a": {"type": "str", "section": "Setup"},
+            "b": {"type": "str"},
+            "c": {"type": "str", "section": "Setup"},
+            "d": {"type": "str", "section": "Tuning"},
+        }
+        self.assertEqual(
+            formgen.sections_of(schema), ["Setup", formgen.DEFAULT_SECTION, "Tuning"]
+        )
+
+    def test_extra_sections_are_appended_unless_already_claimed(self):
+        schema = {"a": {"type": "str", "section": "Outputs"}}
+        self.assertEqual(formgen.sections_of(schema, ["Outputs", "Extra"]), ["Outputs", "Extra"])
+
+    def test_every_example_tool_argument_keeps_the_single_default_section(self):
+        # The compatibility guarantee: a tool declaring no section must render
+        # exactly as it did before sections existed.
+        self.assertEqual(
+            formgen.sections_of(EXAMPLE_TOOL_SCHEMA["arguments"]), [formgen.DEFAULT_SECTION]
+        )
+
+    def test_build_routes_each_argument_to_its_section(self):
+        schema = {
+            "here": {"type": "str", "types": ["str"], "section": "Setup"},
+            "there": {"type": "str", "types": ["str"], "section": "Tuning"},
+            "nowhere": {"type": "str", "types": ["str"]},
+        }
+        fallback = qt.QFormLayout()
+        sections = {"Setup": qt.QFormLayout(), "Tuning": qt.QFormLayout()}
+        rows = {}
+        formgen.build(schema, fallback, sections=sections, rows=rows)
+
+        self.assertEqual(len(sections["Setup"].rows), 1)
+        self.assertEqual(len(sections["Tuning"].rows), 1)
+        # No layout was created for the default section, so it falls back.
+        self.assertEqual(len(fallback.rows), 1)
+        self.assertEqual(set(rows), {"here", "there", "nowhere"})
+        # A row is the pair a caller has to hide together.
+        self.assertEqual(len(rows["here"]), 2)
+
+
+class VisibilityTest(unittest.TestCase):
+    def test_an_argument_declaring_nothing_is_always_visible(self):
+        self.assertTrue(formgen.is_visible({}, {}))
+
+    def test_every_condition_must_match(self):
+        spec = {"visible_when": {"modality": "CBCT", "automation": "Fully-Automated"}}
+        self.assertTrue(
+            formgen.is_visible(spec, {"modality": "CBCT", "automation": "Fully-Automated"})
+        )
+        self.assertFalse(
+            formgen.is_visible(spec, {"modality": "CBCT", "automation": "Semi-Automated"})
+        )
+        self.assertFalse(
+            formgen.is_visible(spec, {"modality": "IOS", "automation": "Fully-Automated"})
+        )
+
+    def test_a_list_of_values_means_any_of_them(self):
+        spec = {"visible_when": {"mode": ["a", "b"]}}
+        self.assertTrue(formgen.is_visible(spec, {"mode": "b"}))
+        self.assertFalse(formgen.is_visible(spec, {"mode": "c"}))
+
+    def test_an_unevaluable_condition_hides_the_field(self):
+        # Only reachable when the schema could not be fetched. A field whose
+        # precondition is unknown is one the user cannot fill in meaningfully,
+        # and hiding it is the answer that cannot produce a wrong request.
+        self.assertFalse(formgen.is_visible({"visible_when": {"modality": "CBCT"}}, {}))
+
+    def test_controlling_arguments_are_collected_across_the_schema(self):
+        schema = {
+            "modality": {"type": "choice"},
+            "automation": {"type": "choice"},
+            "a": {"type": "str", "visible_when": {"modality": "CBCT"}},
+            "b": {"type": "str", "visible_when": {"modality": "IOS", "automation": "Semi"}},
+            "c": {"type": "str"},
+        }
+        self.assertEqual(
+            formgen.controlling_arguments(schema), {"modality", "automation"}
+        )
+
+    def test_a_hidden_required_field_does_not_block_apply(self):
+        schema = {"needed": {"type": "str", "types": ["str"], "required": True,
+                             "visible_when": {"mode": "on"}}}
+        widgets = formgen.build(schema, qt.QFormLayout())
+        self.assertFalse(formgen.all_required_filled(widgets, schema))
+        self.assertTrue(formgen.all_required_filled(widgets, schema, hidden={"needed"}))
+
+
 if __name__ == "__main__":
     unittest.main()

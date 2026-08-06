@@ -119,6 +119,7 @@ ASO_SCHEMA = {
     "output_kind": "files",
     "arguments": {
         "modality": {
+            "label": "Input Type",
             "type": "choice",
             "types": ["choice"],
             "required": True,
@@ -127,8 +128,10 @@ ASO_SCHEMA = {
             "choices": {"CBCT": True, "IOS": False},
             "initial": None,
             "extensions": None,
+            "section": "Inputs", "visible_when": None, "ui": None, "groups": None,
         },
         "automation": {
+            "label": "Mode",
             "type": "choice",
             "types": ["choice"],
             "required": True,
@@ -137,8 +140,10 @@ ASO_SCHEMA = {
             "choices": {"Semi-Automated": True, "Fully-Automated": False},
             "initial": None,
             "extensions": None,
+            "section": "Inputs", "visible_when": None, "ui": None, "groups": None,
         },
         "input": {
+            "label": "Scan / Landmark Folder",
             "type": "volume_or_zip_file",
             "types": ["volume_or_zip_file", "surface_file", "folder"],
             "required": True,
@@ -153,8 +158,10 @@ ASO_SCHEMA = {
                 "surface_file": [".vtk", ".vtp", ".stl", ".obj", ".off"],
                 "folder": [".zip"],
             },
+            "section": "Inputs", "visible_when": None, "ui": None, "groups": None,
         },
         "reference": {
+            "label": "Reference",
             "type": "zip_file",
             "types": ["zip_file", "folder"],
             "required": True,
@@ -163,8 +170,10 @@ ASO_SCHEMA = {
             "choices": None,
             "initial": None,
             "extensions": {"zip_file": [".zip"], "folder": [".zip"]},
+            "section": "Inputs", "visible_when": None, "ui": None, "groups": None,
         },
         "landmark_models": {
+            "label": "Landmark Models",
             "type": "str",
             "types": ["str"],
             "required": False,
@@ -173,8 +182,12 @@ ASO_SCHEMA = {
             "choices": None,
             "initial": None,
             "extensions": None,
+            "section": "Inputs",
+            "visible_when": {"modality": "CBCT", "automation": "Fully-Automated"},
+            "ui": None, "groups": None,
         },
         "cbct_landmarks": {
+            "label": "Landmarks",
             "type": "multichoice",
             "types": ["multichoice"],
             "required": False,
@@ -186,8 +199,14 @@ ASO_SCHEMA = {
             },
             "initial": None,
             "extensions": None,
+            "section": "Landmark Reference",
+            "visible_when": {"modality": "CBCT"},
+            "ui": "tabs",
+            "groups": {"Cranial base": ["Ba", "C2", "S", "N", "RPo", "LPo"],
+                       "Upper": ["ROr", "LOr", "A", "ANS"]},
         },
         "ios_teeth": {
+            "label": "Teeth",
             "type": "multichoice",
             "types": ["multichoice"],
             "required": False,
@@ -199,8 +218,14 @@ ASO_SCHEMA = {
             },
             "initial": None,
             "extensions": None,
+            "section": "Teeth & Landmarks",
+            "visible_when": {"modality": "IOS"},
+            "ui": "grid",
+            "groups": {"Upper": ["UR8", "UR6", "UL1", "UL6"],
+                       "Lower": ["LL6", "LR1", "LR6"]},
         },
         "ios_landmark_types": {
+            "label": "Landmark Types",
             "type": "multichoice",
             "types": ["multichoice"],
             "required": False,
@@ -209,8 +234,12 @@ ASO_SCHEMA = {
             "choices": {"O": True, "MB": False, "DB": False},
             "initial": None,
             "extensions": None,
+            "section": "Teeth & Landmarks",
+            "visible_when": {"modality": "IOS", "automation": "Semi-Automated"},
+            "ui": "inline", "groups": None,
         },
         "ios_jaws": {
+            "label": "Jaws",
             "type": "multichoice",
             "types": ["multichoice"],
             "required": False,
@@ -219,8 +248,12 @@ ASO_SCHEMA = {
             "choices": {"Upper": True, "Lower": True},
             "initial": None,
             "extensions": None,
+            "section": "Teeth & Landmarks",
+            "visible_when": {"modality": "IOS"},
+            "ui": "inline", "groups": None,
         },
         "ios_occlusion": {
+            "label": "Occlusion",
             "type": "choice",
             "types": ["choice"],
             "required": False,
@@ -233,8 +266,12 @@ ASO_SCHEMA = {
             },
             "initial": None,
             "extensions": None,
+            "section": "Teeth & Landmarks",
+            "visible_when": {"modality": "IOS"},
+            "ui": None, "groups": None,
         },
         "dicom_input": {
+            "label": "DICOM Input",
             "type": "bool",
             "types": ["bool"],
             "required": False,
@@ -243,8 +280,12 @@ ASO_SCHEMA = {
             "choices": None,
             "initial": False,
             "extensions": None,
+            "section": "Inputs",
+            "visible_when": {"modality": "CBCT"},
+            "ui": None, "groups": None,
         },
         "output_suffix": {
+            "label": "Suffix",
             "type": "str",
             "types": ["str"],
             "required": False,
@@ -253,6 +294,7 @@ ASO_SCHEMA = {
             "choices": None,
             "initial": "Or",
             "extensions": None,
+            "section": "Outputs", "visible_when": None, "ui": None, "groups": None,
         },
     },
 }
@@ -400,6 +442,295 @@ class ResultDiscoveryTest(unittest.TestCase):
         would halve the effective load cap and load the same file twice."""
         self._write("patient1_Or.nii.gz")
         self.assertEqual(len(ASOWidget._findResults(self.dir)), 1)
+
+
+# ---------------------------------------------------------------------------
+# The four modes, and what each one shows
+# ---------------------------------------------------------------------------
+
+_ARGUMENTS = ASO_SCHEMA["arguments"]
+
+
+def _hidden_in(**mode) -> set:
+    """The arguments whose `visible_when` is not satisfied — exactly what
+    base_widget._applyVisibility computes and what collectArgs then drops."""
+    return {
+        name for name, spec in _ARGUMENTS.items() if not formgen.is_visible(spec, mode)
+    }
+
+
+class ModePanelTest(unittest.TestCase):
+    """ASO's four modes share one schema, so a panel showing every argument
+    shows the 130 CBCT landmarks next to the 32 teeth while a run uses one or
+    the other. The old Slicer module solved this with a four-page
+    QStackedWidget built by hand; the server states the same thing as
+    `visible_when`, and these tests are what notices if it stops.
+    """
+
+    def test_a_cbct_run_is_not_asked_about_teeth(self):
+        hidden = _hidden_in(modality="CBCT", automation="Semi-Automated")
+        self.assertEqual(
+            hidden,
+            {"ios_teeth", "ios_landmark_types", "ios_jaws", "ios_occlusion",
+             "landmark_models"},
+        )
+        self.assertNotIn("cbct_landmarks", hidden)
+        self.assertNotIn("dicom_input", hidden)
+
+    def test_an_ios_run_is_not_asked_about_cbct_landmarks(self):
+        hidden = _hidden_in(modality="IOS", automation="Semi-Automated")
+        self.assertIn("cbct_landmarks", hidden)
+        # DICOM is a CBCT acquisition format; offering it for a mesh is how a
+        # user comes to believe an .stl might be one.
+        self.assertIn("dicom_input", hidden)
+        self.assertNotIn("ios_teeth", hidden)
+        self.assertNotIn("ios_jaws", hidden)
+
+    def test_the_landmark_bundle_belongs_to_exactly_one_of_the_four_modes(self):
+        """It is read only by Fully-Automated CBCT, and offering it elsewhere
+        is what makes Semi-Automated look like it needs a model."""
+        self.assertNotIn(
+            "landmark_models", _hidden_in(modality="CBCT", automation="Fully-Automated")
+        )
+        for modality, automation in (("CBCT", "Semi-Automated"),
+                                     ("IOS", "Fully-Automated"),
+                                     ("IOS", "Semi-Automated")):
+            self.assertIn("landmark_models", _hidden_in(modality=modality, automation=automation))
+
+    def test_semi_automated_ios_is_the_only_mode_asking_for_landmark_types(self):
+        """Fully-Automated IOS registers on tooth centroids and reads no
+        landmark file at all, so the eight types have nothing to apply to."""
+        self.assertNotIn(
+            "ios_landmark_types", _hidden_in(modality="IOS", automation="Semi-Automated")
+        )
+        self.assertIn(
+            "ios_landmark_types", _hidden_in(modality="IOS", automation="Fully-Automated")
+        )
+
+    def test_the_two_scans_and_the_reference_are_asked_for_in_every_mode(self):
+        for modality in ("CBCT", "IOS"):
+            for automation in ("Semi-Automated", "Fully-Automated"):
+                hidden = _hidden_in(modality=modality, automation=automation)
+                self.assertNotIn("input", hidden)
+                self.assertNotIn("reference", hidden)
+                self.assertNotIn("output_suffix", hidden)
+
+    def test_the_two_selection_sections_are_mutually_exclusive(self):
+        """Which is what makes them behave like the old module's stacked
+        pages: a section whose every row is hidden is hidden too."""
+        sections = {name: formgen.section_of(spec) for name, spec in _ARGUMENTS.items()}
+        for modality, live, dead in (("CBCT", "Landmark Reference", "Teeth & Landmarks"),
+                                     ("IOS", "Teeth & Landmarks", "Landmark Reference")):
+            hidden = _hidden_in(modality=modality, automation="Semi-Automated")
+            visible_sections = {
+                section for name, section in sections.items() if name not in hidden
+            }
+            self.assertIn(live, visible_sections, modality)
+            self.assertNotIn(dead, visible_sections, modality)
+
+    def test_the_panel_is_laid_out_in_four_boxes_in_reading_order(self):
+        self.assertEqual(
+            formgen.sections_of(_ARGUMENTS),
+            ["Inputs", "Landmark Reference", "Teeth & Landmarks", "Outputs"],
+        )
+
+    def test_every_condition_names_a_choice_argument_of_this_tool(self):
+        """A visible_when naming an argument the tool doesn't publish would
+        hide its field forever, and nothing on screen would say why. The
+        server's check_schema rejects it at boot; this is the client-side half
+        of the same guard, against a schema fetched from an older server."""
+        for name in formgen.controlling_arguments(_ARGUMENTS):
+            self.assertIn(name, _ARGUMENTS, name)
+            self.assertEqual(_ARGUMENTS[name]["type"], "choice", name)
+        for name, spec in _ARGUMENTS.items():
+            for other, expected in (spec.get("visible_when") or {}).items():
+                wanted = expected if isinstance(expected, (list, tuple)) else [expected]
+                for value in wanted:
+                    self.assertIn(value, _ARGUMENTS[other]["choices"], f"{name} -> {other}")
+
+
+class HiddenArgumentsAreNotSentTest(unittest.TestCase):
+    """collectArgs must DROP a hidden argument, not send whatever its invisible
+    widget happens to hold.
+
+    A multichoice is read back as the complete {option: checked} dict and the
+    server reads what it receives AS the selection — so sending `ios_teeth`
+    with a CBCT run states a selection the user was never shown, and freezes it
+    at whatever the widget was built with even after the default changes
+    server-side.
+    """
+
+    def setUp(self):
+        self.panel = ServerToolWidgetBase.__new__(ServerToolWidgetBase)
+        self.panel._schema = ASO_SCHEMA
+        self.panel._inputWidgets = {}
+        self.panel._argWidgets = formgen.build(_ARGUMENTS, qt.QFormLayout())
+
+    def _collect(self, **mode):
+        self.panel._argWidgets["modality"].setCurrentIndex(
+            list(_ARGUMENTS["modality"]["choices"]).index(mode["modality"])
+        )
+        self.panel._argWidgets["automation"].setCurrentIndex(
+            list(_ARGUMENTS["automation"]["choices"]).index(mode["automation"])
+        )
+        self.panel._hiddenArgs = _hidden_in(**mode)
+        return ServerToolWidgetBase.collectArgs(self.panel)
+
+    def test_a_cbct_request_carries_no_ios_argument(self):
+        sent = self._collect(modality="CBCT", automation="Semi-Automated")
+        self.assertEqual([name for name in sent if name.startswith("ios_")], [])
+        self.assertIn("cbct_landmarks", sent)
+        self.assertEqual(sent["modality"], "CBCT")
+
+    def test_an_ios_request_carries_no_cbct_argument(self):
+        sent = self._collect(modality="IOS", automation="Semi-Automated")
+        self.assertNotIn("cbct_landmarks", sent)
+        self.assertNotIn("dicom_input", sent)
+        self.assertIn("ios_teeth", sent)
+
+    def test_what_is_sent_is_still_the_complete_multichoice_state(self):
+        """Dropping the hidden ones must not turn into dropping the unchecked
+        options of a visible one: absent means "apply the default", and every
+        box unchecked is a different, meaningful request."""
+        sent = self._collect(modality="CBCT", automation="Semi-Automated")
+        self.assertEqual(
+            set(sent["cbct_landmarks"]), set(_ARGUMENTS["cbct_landmarks"]["choices"])
+        )
+
+
+class _FakeClient:
+    """Answers the two calls _buildAutoUI makes, with no HTTP and no server."""
+
+    def __init__(self, schema):
+        self._schema = schema
+
+    def get_tool_schema(self, _name, force_refresh=False):
+        return self._schema
+
+    def list_tool_data(self, _name):
+        return {"models": ["Frankfurt_Horizontal_Midsagittal_Plane.zip"], "testfiles": []}
+
+
+class BuiltPanelTest(unittest.TestCase):
+    """Builds the real panel through ServerToolWidgetBase._buildAutoUI.
+
+    The tests above check the schema states the right thing; this one checks
+    the widget actually acts on it — the two used to be the same assertion only
+    because there was nothing between them but a single form layout.
+    """
+
+    def setUp(self):
+        self.panel = ServerToolWidgetBase.__new__(ASOWidget)
+        # The parts of __init__ _buildAutoUI touches. Constructed by hand
+        # rather than through __init__, which reaches for get_client() and a
+        # live Slicer scene.
+        self.panel.client = _FakeClient(ASO_SCHEMA)
+        self.panel._argWidgets = {}
+        self.panel._inputWidgets = {}
+        self.panel._inputModes = {}
+        self.panel._sectionBoxes = {}
+        self.panel._sectionLayouts = {}
+        self.panel._rows = {}
+        self.panel._rowSections = {}
+        self.panel._sectionsWithOwnRows = set()
+        self.panel._hiddenArgs = set()
+        self.panel._schema = None
+        self.panel._schemaError = None
+        self.panel._outputFolderWidget = None
+        self.panel.applyButton = None
+        self.panel._loadResultsCheckBox = None
+
+        self.panel._buildAutoUI(qt.QVBoxLayout())
+
+    def _boxes(self):
+        return {name: box for name, box in self.panel._sectionBoxes.items()}
+
+    def _visible_sections(self):
+        return {name for name, box in self._boxes().items() if box.isVisible()}
+
+    def _setMode(self, modality, automation):
+        for arg, value in (("modality", modality), ("automation", automation)):
+            widget = self.panel._argWidgets[arg]
+            widget.setCurrentIndex(list(ASO_SCHEMA["arguments"][arg]["choices"]).index(value))
+
+    def test_the_panel_is_built_in_four_titled_boxes(self):
+        self.assertEqual(
+            list(self.panel._sectionBoxes),
+            ["Inputs", "Landmark Reference", "Teeth & Landmarks", "Outputs"],
+        )
+
+    def test_the_file_inputs_land_in_the_section_their_spec_names(self):
+        self.assertEqual(self.panel._rowSections["input"], "Inputs")
+        self.assertEqual(self.panel._rowSections["reference"], "Inputs")
+        self.assertEqual(self.panel._rowSections["cbct_landmarks"], "Landmark Reference")
+        self.assertEqual(self.panel._rowSections["output_suffix"], "Outputs")
+
+    def test_it_opens_on_the_declared_defaults_already_filtered(self):
+        # CBCT + Semi-Automated are the schema's own defaults, so the panel
+        # must open showing the CBCT half only -- not everything until the
+        # user touches a combo box.
+        self.assertEqual(self._visible_sections(), {"Inputs", "Landmark Reference", "Outputs"})
+        self.assertIn("ios_teeth", self.panel._hiddenArgs)
+        self.assertNotIn("cbct_landmarks", self.panel._hiddenArgs)
+
+    def test_switching_modality_swaps_the_two_selection_sections(self):
+        self._setMode("IOS", "Semi-Automated")
+        self.assertEqual(self._visible_sections(), {"Inputs", "Teeth & Landmarks", "Outputs"})
+        self.assertIn("cbct_landmarks", self.panel._hiddenArgs)
+        self.assertNotIn("ios_teeth", self.panel._hiddenArgs)
+
+        self._setMode("CBCT", "Semi-Automated")
+        self.assertEqual(self._visible_sections(), {"Inputs", "Landmark Reference", "Outputs"})
+
+    def test_the_outputs_box_stays_even_though_no_argument_of_it_is_required(self):
+        """It holds the output folder picker, which belongs to no schema
+        argument — a section is only empty when nothing at all is in it."""
+        self._setMode("IOS", "Fully-Automated")
+        self.assertIn("Outputs", self._visible_sections())
+        self.assertIsNotNone(self.panel._outputFolderWidget)
+
+    def test_a_row_hidden_by_the_mode_hides_its_label_too(self):
+        """Otherwise a stray "Ios teeth *" label sits above nothing."""
+        self._setMode("CBCT", "Semi-Automated")
+        for widget in self.panel._rows["ios_teeth"]:
+            self.assertFalse(widget.isVisible())
+        for widget in self.panel._rows["cbct_landmarks"]:
+            self.assertTrue(widget.isVisible())
+
+    def test_the_landmark_bundle_row_follows_both_combo_boxes(self):
+        self._setMode("CBCT", "Fully-Automated")
+        self.assertTrue(self.panel._rows["landmark_models"][0].isVisible())
+        self._setMode("CBCT", "Semi-Automated")
+        self.assertFalse(self.panel._rows["landmark_models"][0].isVisible())
+
+    def test_the_landmark_catalog_is_rendered_as_the_servers_own_tabs(self):
+        group = self.panel._argWidgets["cbct_landmarks"]
+        tabs = [w for w in group.container.layout.widgets if isinstance(w, qt.QTabWidget)]
+        self.assertEqual([title for title, _w in tabs[0].tabs], ["Cranial base", "Upper"])
+
+    def test_every_row_is_labelled_by_the_server(self):
+        """No wording in this panel is the client's. The fallback would render
+        `cbct_landmarks` as "Cbct landmarks" and could never produce
+        "Scan / Landmark Folder" from `input` — so the tool declares them, and
+        this is what notices if one goes missing server-side."""
+        labels = {
+            name: widgets[0].text.rstrip(" *") for name, widgets in self.panel._rows.items()
+        }
+        self.assertEqual(labels["input"], "Scan / Landmark Folder")
+        self.assertEqual(labels["modality"], "Input Type")
+        self.assertEqual(labels["automation"], "Mode")
+        self.assertEqual(labels["cbct_landmarks"], "Landmarks")
+        self.assertEqual(labels["output_suffix"], "Suffix")
+        # And none of them fell back to a schema identifier.
+        for name, text in labels.items():
+            self.assertNotIn("_", text, name)
+
+    def test_the_reference_dropdown_is_filled_from_the_server(self):
+        """The panel still does everything it did before it had sections."""
+        self.assertIn(
+            "Frankfurt_Horizontal_Midsagittal_Plane.zip",
+            self.panel._inputWidgets["reference"].combo._items,
+        )
 
 
 if __name__ == "__main__":
