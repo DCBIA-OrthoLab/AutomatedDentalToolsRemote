@@ -119,6 +119,7 @@ ASO_SCHEMA = {
     "output_kind": "files",
     "arguments": {
         "modality": {
+            "label": "Input Type",
             "type": "choice",
             "types": ["choice"],
             "required": True,
@@ -130,6 +131,7 @@ ASO_SCHEMA = {
             "section": "Inputs", "visible_when": None, "ui": None, "groups": None,
         },
         "automation": {
+            "label": "Mode",
             "type": "choice",
             "types": ["choice"],
             "required": True,
@@ -141,6 +143,7 @@ ASO_SCHEMA = {
             "section": "Inputs", "visible_when": None, "ui": None, "groups": None,
         },
         "input": {
+            "label": "Scan / Landmark Folder",
             "type": "volume_or_zip_file",
             "types": ["volume_or_zip_file", "surface_file", "folder"],
             "required": True,
@@ -158,6 +161,7 @@ ASO_SCHEMA = {
             "section": "Inputs", "visible_when": None, "ui": None, "groups": None,
         },
         "reference": {
+            "label": "Reference",
             "type": "zip_file",
             "types": ["zip_file", "folder"],
             "required": True,
@@ -169,6 +173,7 @@ ASO_SCHEMA = {
             "section": "Inputs", "visible_when": None, "ui": None, "groups": None,
         },
         "landmark_models": {
+            "label": "Landmark Models",
             "type": "str",
             "types": ["str"],
             "required": False,
@@ -182,6 +187,7 @@ ASO_SCHEMA = {
             "ui": None, "groups": None,
         },
         "cbct_landmarks": {
+            "label": "Landmarks",
             "type": "multichoice",
             "types": ["multichoice"],
             "required": False,
@@ -200,6 +206,7 @@ ASO_SCHEMA = {
                        "Upper": ["ROr", "LOr", "A", "ANS"]},
         },
         "ios_teeth": {
+            "label": "Teeth",
             "type": "multichoice",
             "types": ["multichoice"],
             "required": False,
@@ -218,6 +225,7 @@ ASO_SCHEMA = {
                        "Lower": ["LL6", "LR1", "LR6"]},
         },
         "ios_landmark_types": {
+            "label": "Landmark Types",
             "type": "multichoice",
             "types": ["multichoice"],
             "required": False,
@@ -231,6 +239,7 @@ ASO_SCHEMA = {
             "ui": "inline", "groups": None,
         },
         "ios_jaws": {
+            "label": "Jaws",
             "type": "multichoice",
             "types": ["multichoice"],
             "required": False,
@@ -244,6 +253,7 @@ ASO_SCHEMA = {
             "ui": "inline", "groups": None,
         },
         "ios_occlusion": {
+            "label": "Occlusion",
             "type": "choice",
             "types": ["choice"],
             "required": False,
@@ -261,6 +271,7 @@ ASO_SCHEMA = {
             "ui": None, "groups": None,
         },
         "dicom_input": {
+            "label": "DICOM Input",
             "type": "bool",
             "types": ["bool"],
             "required": False,
@@ -274,6 +285,7 @@ ASO_SCHEMA = {
             "ui": None, "groups": None,
         },
         "output_suffix": {
+            "label": "Suffix",
             "type": "str",
             "types": ["str"],
             "required": False,
@@ -695,6 +707,23 @@ class BuiltPanelTest(unittest.TestCase):
         group = self.panel._argWidgets["cbct_landmarks"]
         tabs = [w for w in group.container.layout.widgets if isinstance(w, qt.QTabWidget)]
         self.assertEqual([title for title, _w in tabs[0].tabs], ["Cranial base", "Upper"])
+
+    def test_every_row_is_labelled_by_the_server(self):
+        """No wording in this panel is the client's. The fallback would render
+        `cbct_landmarks` as "Cbct landmarks" and could never produce
+        "Scan / Landmark Folder" from `input` — so the tool declares them, and
+        this is what notices if one goes missing server-side."""
+        labels = {
+            name: widgets[0].text.rstrip(" *") for name, widgets in self.panel._rows.items()
+        }
+        self.assertEqual(labels["input"], "Scan / Landmark Folder")
+        self.assertEqual(labels["modality"], "Input Type")
+        self.assertEqual(labels["automation"], "Mode")
+        self.assertEqual(labels["cbct_landmarks"], "Landmarks")
+        self.assertEqual(labels["output_suffix"], "Suffix")
+        # And none of them fell back to a schema identifier.
+        for name, text in labels.items():
+            self.assertNotIn("_", text, name)
 
     def test_the_reference_dropdown_is_filled_from_the_server(self):
         """The panel still does everything it did before it had sections."""

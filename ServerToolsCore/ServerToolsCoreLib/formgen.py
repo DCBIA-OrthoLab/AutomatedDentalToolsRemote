@@ -491,6 +491,24 @@ def row_widget(field):
     return getattr(field, "container", field)
 
 
+def label_for(name: str, spec: dict) -> str:
+    """The text shown next to an argument's widget.
+
+    **The schema's `label` when it declares one**, so the words a user reads
+    are the tool's own — "Scan / Landmark Folder", not something this file
+    invented. The fallback prettifies the argument name and is exactly that: a
+    fallback for a tool that declares none. It cannot do better than
+    "Cbct landmarks" for `cbct_landmarks`, and it has no way to know that ASO's
+    `input` is the folder holding both the scans and their landmarks.
+
+    There is ONE rule and it lives here. There used to be two — `build()` used
+    the raw schema name while base_widget prettified it — so a single panel
+    showed "Reference" and "cbct_landmarks" one above the other.
+    """
+    declared = (spec.get("label") or "").strip()
+    return declared or name.replace("_", " ").capitalize()
+
+
 def section_of(spec: dict) -> str:
     """The collapsible box this argument belongs in. An argument declaring no
     `section` — every argument of every tool but ASO today — lands in the one
@@ -579,7 +597,8 @@ def build(arguments_schema: dict, layout, sections=None, rows=None) -> dict:
         if description:
             widget.setToolTip(description)
 
-        label = design.required_label(name) if spec.get("required") else design.section_title(name)
+        text = label_for(name, spec)
+        label = design.required_label(text) if spec.get("required") else design.section_title(text)
         target = (sections or {}).get(section_of(spec), layout)
         field = row_widget(widget)
         target.addRow(label, field)

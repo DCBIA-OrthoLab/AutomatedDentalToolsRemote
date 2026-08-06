@@ -708,6 +708,38 @@ class MultiChoiceLayoutTest(unittest.TestCase):
         self.assertEqual(len(tabs), 1)
 
 
+class LabelTest(unittest.TestCase):
+    """The words a user reads are the tool's, not this file's."""
+
+    def test_the_declared_label_wins(self):
+        self.assertEqual(
+            formgen.label_for("input", {"label": "Scan / Landmark Folder"}),
+            "Scan / Landmark Folder",
+        )
+
+    def test_the_fallback_prettifies_the_argument_name(self):
+        self.assertEqual(formgen.label_for("output_suffix", {}), "Output suffix")
+        self.assertEqual(formgen.label_for("input", {"label": None}), "Input")
+        self.assertEqual(formgen.label_for("input", {"label": "   "}), "Input")
+
+    def test_the_fallback_is_why_labels_belong_server_side(self):
+        # It cannot know that "cbct" is an acronym, nor that ASO's `input`
+        # holds the scans AND their landmarks. That is not a bug to fix here —
+        # no naming rule can recover a phrase nobody wrote down.
+        self.assertEqual(formgen.label_for("cbct_landmarks", {}), "Cbct landmarks")
+
+    def test_one_rule_for_generated_fields_and_file_inputs(self):
+        # Regression: build() used the raw schema name while base_widget
+        # prettified it, so one panel showed "Reference" above "cbct_landmarks".
+        schema = {
+            "plain": {"type": "str", "types": ["str"], "required": True},
+            "named": {"type": "str", "types": ["str"], "label": "A Real Name"},
+        }
+        layout = qt.QFormLayout()
+        formgen.build(schema, layout)
+        self.assertEqual([label.text for label, _f in layout.rows], ["Plain *", "A Real Name"])
+
+
 class SectionTest(unittest.TestCase):
     def test_an_argument_declaring_nothing_lands_in_the_default_section(self):
         self.assertEqual(formgen.section_of({}), formgen.DEFAULT_SECTION)

@@ -598,6 +598,7 @@ did before they existed**, asserted for `example_tool` in `test_formgen.py`.
 
 | Field | Read by | Effect |
 |---|---|---|
+| `label` | `formgen.label_for` | the text next to the widget. Absent → the argument name prettified (`output_suffix` → "Output suffix") |
 | `section` | `formgen.section_of` / `sections_of` | which `ctkCollapsibleButton` the row goes in. Absent → `formgen.DEFAULT_SECTION` (`"Inputs"`), the one box a panel has always had. Boxes are created in the order the schema first mentions them |
 | `visible_when` | `formgen.is_visible` | `{other_argument: value}` (a list means "any of these"); every entry must match. A row whose condition fails is hidden, label included |
 | `ui` | `formgen.MultiChoiceGroup` | how a `multichoice`'s boxes are laid out: `"tabs"`, `"grid"`, `"inline"` |
@@ -632,6 +633,28 @@ Every `multichoice` with more than one option also gets an **All / None /
 Default** row (`design.link_button`). "Default" restores the state the schema
 declared — the old ASO module's per-mode `Suggest()` button, now on every tool,
 with the suggestion living server-side where it belongs.
+
+**Where the words come from, and the line between the two.** Everything
+describing a *tool* is the server's: the field label (`label`), the section
+title (`section`), the tab and chart-row names (`groups`), the option names
+(`choices`), the tooltip (`description`). The client owns only its own chrome —
+Apply, Cancel, Retry, "Output folder", All / None / Default, the `"Other"`
+group for options no `groups` entry mentions, and the fallback labels below —
+which exist on every panel regardless of tool and are translated through `_()`.
+
+`formgen.label_for(name, spec)` is the single rule, and the fallback is
+deliberately a *fallback*: `name.replace("_", " ").capitalize()` renders
+`cbct_landmarks` as "Cbct landmarks" and has no way to turn `input` into
+"Scan / Landmark Folder". There used to be **two** rules — `build()` used the
+raw schema name while `base_widget` prettified it — so an ASO panel showed
+"Reference" directly above "cbct_landmarks".
+
+The one place the two sides must agree by convention rather than by data is the
+`"Outputs"` box: the client creates it for the output-folder picker whenever
+`resultKind == "save_as"` (`base_widget._OUTPUTS_SECTION`), and a tool that
+wants its own arguments in the same box declares `section="Outputs"` — which
+ASO's `output_suffix` does. A tool naming that section anything else gets a
+second box below it rather than a merge.
 
 `build()` gained two optional parameters for this and kept its signature
 otherwise: `sections={name: QFormLayout}` routes each argument to its box, and

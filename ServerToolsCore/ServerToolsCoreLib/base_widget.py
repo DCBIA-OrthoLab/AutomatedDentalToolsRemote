@@ -431,8 +431,13 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return (self._schema or {}).get("arguments", {}).get(arg_name, {})
 
     def _buildFileInputWidget(self, layout, arg_name: str, mode: str):
-        label = _(arg_name.replace("_", " ").capitalize())
         spec = self._schemaArgument(arg_name)
+        # Same rule as every other row (formgen.label_for): the tool's own
+        # wording when it declares one, the prettified name otherwise. Not
+        # wrapped in _(): a label coming from the server is not in this
+        # module's translation catalog, and the fallback is a schema
+        # identifier rather than a phrase anyone wrote.
+        label = formgen.label_for(arg_name, spec)
         # A file argument goes in the section its own spec names, like every
         # other argument; `layout` is the fallback for one that names none.
         section = formgen.section_of(spec)
