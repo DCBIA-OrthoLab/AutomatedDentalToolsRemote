@@ -13,11 +13,20 @@ Three things about ALI's schema are worth knowing when reading this file:
   engine itself. This module must not guess: a `.zip` can carry either kind,
   so an extension tells you nothing.
 * **Both engines' selections are always shown, and one of them is always
-  inert.** The schema cannot express "this argument only applies to CBCT", and
-  the engine isn't known until the server has looked at the data. The server
-  says which is which in each argument's description, which formgen renders as
-  a visible hint. Hiding one by guessing would be wrong more often than the
-  clutter is annoying.
+  inert.** The engine isn't known until the server has looked at the data, so
+  there is no field to hide the other one behind — `visible_when` needs a
+  `choice` argument to test, and ALI declares none on purpose. What the schema
+  does instead is put each engine's selection in its own collapsible box
+  (`section`) and repeat "CBCT only" / "IOS only" in each description, which
+  formgen renders as a visible hint. Hiding one by guessing would be wrong more
+  often than the clutter is annoying.
+* **CBCT landmarks can be chosen by region or one by one.** `cbct_regions` is
+  the granularity a human wants; `landmarks` (118 options, rendered as tabs
+  from the server's own grouping) is for asking for named points, and naming
+  any of them *replaces* the region selection rather than narrowing it. It
+  exists because ASO's fully-automated mode registers on seven landmarks that
+  straddle two regions, and going through regions would run 58 deep-RL agents
+  to use seven.
 * **A partial run is normal and is not an error.** A landmark whose weights
   are missing from the bundle, or whose agent never converged, is reported in
   `run_report.json` while every other landmark is still written out. Surfacing

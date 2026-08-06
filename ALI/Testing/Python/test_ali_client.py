@@ -50,6 +50,8 @@ ALI_SCHEMA = {
     "output_kind": "files",
     "arguments": {
         "input": {
+            "label": "Scan or Folder", "section": "Inputs",
+            "visible_when": None, "ui": None, "groups": None,
             "type": "volume_or_zip_file",
             "types": ["volume_or_zip_file", "surface_or_zip_file"],
             "required": True,
@@ -65,24 +67,60 @@ ALI_SCHEMA = {
                 "recognised inside the archive and converted automatically"
             ),
         },
+        # required: False — the server picks the hosted bundle matching the
+        # detected mode when no name is sent.
         "model": {
-            "type": "str", "types": ["str"], "required": True,
+            "label": "Model Bundle", "section": "Inputs",
+            "visible_when": None, "ui": None, "groups": None,
+            "type": "str", "types": ["str"], "required": False,
             "server_selectable": "model", "choices": None, "extensions": None,
             "description": "Name of a model bundle hosted on the server (see GET /tools/ALI/data)",
         },
         "cbct_regions": {
+            "label": "Regions", "section": "CBCT landmarks",
+            "visible_when": None, "ui": "inline", "groups": None,
             "type": "multichoice", "types": ["multichoice"], "required": False,
             "server_selectable": None, "extensions": None,
             "choices": {"Cranial base": True, "Upper": True, "Lower": True, "Impacted canine": True},
             "description": "CBCT only: anatomical regions to predict",
         },
+        # The full catalog is 118 options across the same four groups; a
+        # representative slice of each is enough here, since what these tests
+        # check is the shape — every option starts off, and the tabs are the
+        # server's own grouping.
+        "landmarks": {
+            "label": "Individual landmarks", "section": "CBCT landmarks",
+            "visible_when": None, "ui": "tabs",
+            "groups": {
+                "Cranial base": ["Ba", "S", "N", "RPo", "LPo"],
+                "Upper": ["ROr", "LOr", "ANS"],
+                "Lower": ["Me", "Gn", "Pog"],
+                "Impacted canine": ["UR3OIP"],
+            },
+            "type": "multichoice", "types": ["multichoice"], "required": False,
+            "server_selectable": None, "extensions": None,
+            "choices": {
+                name: False
+                for name in ("Ba", "S", "N", "RPo", "LPo", "ROr", "LOr", "ANS",
+                             "Me", "Gn", "Pog", "UR3OIP")
+            },
+            "description": (
+                "CBCT only: predict exactly these landmarks. Leave every box unchecked "
+                "to select by region instead -- naming any landmark here REPLACES the "
+                "region selection rather than narrowing it"
+            ),
+        },
         "ios_networks": {
+            "label": "Landmark families", "section": "IOS landmarks",
+            "visible_when": None, "ui": "inline", "groups": None,
             "type": "multichoice", "types": ["multichoice"], "required": False,
             "server_selectable": None, "extensions": None,
             "choices": {"Occlusal": True, "Cervical": True},
             "description": "IOS only: landmark families to predict",
         },
         "prediction_ID": {
+            "label": "Prediction ID", "section": "Outputs",
+            "visible_when": None, "ui": None, "groups": None,
             "type": "str", "types": ["str"], "required": False,
             "server_selectable": None, "choices": None, "extensions": None,
             "description": "Suffix used in output file names, e.g. scan_lm_Pred.mrk.json",
@@ -261,11 +299,23 @@ class TestTaskOneRequest(unittest.TestCase):
             ToolServerClient._stringify({"model": "ALI_CBCT_v2"}), {"model": "ALI_CBCT_v2"}
         )
 
-    def test_a_missing_model_is_caught_before_the_round_trip(self):
+    def test_omitting_the_model_is_legal_and_lets_the_server_pick(self):
+        """`model` is OPTIONAL, and that is load-bearing rather than lax.
+
+        The engine is chosen from what the data turns out to hold, and the
+        bundle has to match it — so the server picks the hosted bundle whose
+        layout the detected engine recognises. A client that demanded a name up
+        front would be asking the user to answer, before the data is looked at,
+        a question only the data can answer; naming one is for disambiguating
+        between several bundles of the same kind.
+        """
+        ToolServerClient._validate_against_schema(ALI_SCHEMA, {}, {"input": "/tmp/cohort.zip"})
+
+    def test_a_missing_input_is_caught_before_the_round_trip(self):
         from ServerToolsCoreLib.errors import ServerToolError
 
         with self.assertRaises(ServerToolError):
-            ToolServerClient._validate_against_schema(ALI_SCHEMA, {}, {"input": "/tmp/cohort.zip"})
+            ToolServerClient._validate_against_schema(ALI_SCHEMA, {"model": "ALI_CBCT_v2"}, {})
 
     def test_the_result_is_saved_not_loaded_as_one_node(self):
         # output_kind "files" is a zip of several files: it can only be saved.
@@ -281,7 +331,8 @@ class TestSelectionGroups(unittest.TestCase):
 
         # The file argument gets its own input row, not a form field.
         self.assertEqual(
-            sorted(widgets), ["cbct_regions", "ios_networks", "model", "prediction_ID"]
+            sorted(widgets),
+            ["cbct_regions", "ios_networks", "landmarks", "model", "prediction_ID"],
         )
         for name in ("cbct_regions", "ios_networks"):
             group = widgets[name]
@@ -343,6 +394,105 @@ class TestErrorMessages(unittest.TestCase):
     def test_a_500_is_not_shown_verbatim(self):
         # A crash inside a tool can name server-side paths and modules.
         self.assertNotIn("Traceback", error_for_status(500, "Traceback (most recent call last)...").message)
+
+
+class TestLandmarkSelection(unittest.TestCase):
+    """`landmarks` — asking for named points instead of whole regions.
+
+    The argument exists for ASO, which registers on seven CBCT landmarks
+    straddling two regions and would otherwise run 58 agents to use 7. It is
+    offered to a human too, which is why its 118 options have to be readable.
+    """
+
+    def _spec(self):
+        return _argument("landmarks")
+
+    def test_it_starts_with_every_box_unchecked(self):
+        """"All off" is what "not specified" looks like for a multichoice, and
+        it is what hands the decision back to `cbct_regions` — so a panel
+        nobody touches keeps meaning what it meant before this argument."""
+        group = formgen.MultiChoiceGroup(self._spec()["choices"])
+        self.assertTrue(all(not box.isChecked() for box in group.boxes.values()))
+
+    def test_the_catalog_is_rendered_as_the_servers_own_tabs(self):
+        spec = self._spec()
+        group = formgen.MultiChoiceGroup(
+            spec["choices"], spec["description"], layout=spec["ui"], groups=spec["groups"]
+        )
+        tabs = [w for w in group.container.layout.widgets if isinstance(w, qt.QTabWidget)]
+        self.assertEqual(len(tabs), 1)
+        self.assertEqual(
+            [title for title, _page in tabs[0].tabs],
+            ["Cranial base", "Upper", "Lower", "Impacted canine"],
+        )
+
+    def test_the_tabs_do_not_change_what_is_sent(self):
+        """The property that makes a presentation hint safe: a layout the
+        client renders badly is ugly, never wrong on the wire."""
+        spec = self._spec()
+        flat = formgen.MultiChoiceGroup(spec["choices"])
+        tabbed = formgen.MultiChoiceGroup(
+            spec["choices"], layout=spec["ui"], groups=spec["groups"]
+        )
+        self.assertEqual(list(flat.boxes), list(tabbed.boxes))
+        self.assertEqual(flat.value(), tabbed.value())
+
+    def test_every_grouped_option_is_one_the_argument_offers(self):
+        spec = self._spec()
+        for options in spec["groups"].values():
+            self.assertTrue(set(options) <= set(spec["choices"]))
+
+    def test_the_complete_selection_travels_so_the_server_can_tell_it_apart(self):
+        """An option left out counts as off whatever its default, and an
+        argument omitted entirely is what applies the defaults — here, "let the
+        regions decide". Those are different requests, and only the full state
+        distinguishes them."""
+        group = formgen.MultiChoiceGroup(self._spec()["choices"])
+        for name in ("Ba", "S", "N"):
+            group.boxes[name].setChecked(True)
+
+        payload = json.loads(
+            ToolServerClient._stringify({"landmarks": group.value()})["landmarks"]
+        )
+        self.assertEqual(set(payload), set(self._spec()["choices"]))
+        self.assertEqual({name for name, on in payload.items() if on}, {"Ba", "S", "N"})
+
+
+class TestPanelSections(unittest.TestCase):
+    """ALI has no `mode` argument — the server decides from the data — so one
+    of the two engines' selections is always inert and cannot be hidden. The
+    least the panel can do is keep them apart instead of interleaving them."""
+
+    def test_the_panel_is_laid_out_in_four_boxes_in_reading_order(self):
+        self.assertEqual(
+            formgen.sections_of(ALI_SCHEMA["arguments"]),
+            ["Inputs", "CBCT landmarks", "IOS landmarks", "Outputs"],
+        )
+
+    def test_each_engines_selection_sits_in_its_own_box(self):
+        sections = {
+            name: formgen.section_of(spec) for name, spec in ALI_SCHEMA["arguments"].items()
+        }
+        self.assertEqual(sections["cbct_regions"], sections["landmarks"])
+        self.assertNotEqual(sections["cbct_regions"], sections["ios_networks"])
+
+    def test_no_row_is_labelled_by_the_client(self):
+        """The fallback would render `cbct_regions` as "Cbct regions" and
+        `prediction_ID` as "Prediction id"."""
+        for name, spec in ALI_SCHEMA["arguments"].items():
+            label = formgen.label_for(name, spec)
+            self.assertTrue(spec.get("label"), name)
+            self.assertEqual(label, spec["label"])
+            self.assertNotIn("_", label)
+
+    def test_nothing_is_hidden_because_nothing_can_be(self):
+        """`visible_when` needs a `choice` argument to test, and ALI declares
+        none on purpose: a .zip can hold either kind of data, so the mode is
+        detected server-side rather than asked for. Guessing here would hide
+        the selection that actually applies."""
+        self.assertEqual(formgen.controlling_arguments(ALI_SCHEMA["arguments"]), set())
+        for spec in ALI_SCHEMA["arguments"].values():
+            self.assertTrue(formgen.is_visible(spec, {}))
 
 
 if __name__ == "__main__":

@@ -910,6 +910,53 @@ be saved. Verified in Slicer: loading this module builds the whole panel, and
 `_inputModes` resolves to `{"input": "file_or_folder"}` with `resultKind` at
 `"save_as"`, from `TOOL_NAME` alone.
 
+## `ALI`
+
+```python
+class ALIWidget(ServerToolWidgetBase):
+    TOOL_NAME   = "ALI"
+    FILE_INPUTS = {"input": "file_or_folder"}
+```
+
+Plus a `configureFields` (one placeholder), an `addExtraWidgets` (one check
+box) and a `handleResult` that reads the run report — about 250 lines, almost
+all of it the report summary.
+
+`FILE_INPUTS` is the one thing ALI's schema cannot state: `input` is typed
+`("volume_or_zip_file", "surface_or_zip_file")` — two *file* types and no
+`"folder"` — so `auto_file_mode` would give it a file picker only. But a
+cohort, and **any** DICOM series, is a directory. The schema cannot add
+`"folder"` either: `main.py` would then extract the archive itself, and the
+client would have to guess which of the two kinds it is sending in order to
+pick a file filter, which is exactly what it cannot know.
+
+**ALI has no `mode` argument, deliberately, and that is why it has no
+`visible_when`.** A `.zip` can hold volumes or meshes and a DICOM series has no
+extension at all, so nothing in the request distinguishes them — only the data
+does, and the server looks. The cost is that both engines' selections are
+always rendered and one of them is inert on any given run. Since there is no
+`choice` field to key visibility off, the schema does the next best thing:
+`section` puts each engine's selection in its own collapsible box (Inputs /
+CBCT landmarks / IOS landmarks / Outputs), so a CBCT user reads one box and
+ignores the other instead of scanning a flat list.
+
+**Two granularities for the same CBCT selection**, and the second one exists
+for another tool: `cbct_regions` is four check boxes, which is what a human
+placing a full set of points wants; `landmarks` is all 118 labels, rendered as
+tabs (`ui="tabs"`, `groups` = the server's own `GROUP_LABELS`). Naming any
+landmark *replaces* the region selection rather than narrowing it. ASO's
+fully-automated CBCT mode registers on seven landmarks straddling two regions,
+so going through regions would run 58 deep-RL agents to use seven — and the
+argument is offered to the Slicer user too, which is what makes the tabs worth
+having rather than a 118-row column.
+
+`handleResult` is overridden rather than extended: the base `"save_as"` info
+dialog would pop before `run_report.json` has been read, and that report is the
+module's one real job. A landmark absent from the scene means one of two very
+different things — *not in the selected bundle* (use another one) or *never
+converged* (this scan is hard) — and only the report tells them apart, so the
+summary is built around the failures and names both kinds separately.
+
 ## How to add a new module in 5 minutes
 
 Worked example: migrating `AMASSS` (CBCT volume in, segmentation out).
