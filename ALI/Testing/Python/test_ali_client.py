@@ -84,7 +84,7 @@ ALI_SCHEMA = {
             "choices": {"Cranial base": True, "Upper": True, "Lower": True, "Impacted canine": True},
             "description": "CBCT only: anatomical regions to predict",
         },
-        # The full catalog is 118 options across the same four groups; a
+        # The full catalog is 119 options across the same four groups; a
         # representative slice of each is enough here, since what these tests
         # check is the shape — every option starts off, and the tabs are the
         # server's own grouping.
@@ -401,7 +401,7 @@ class TestLandmarkSelection(unittest.TestCase):
 
     The argument exists for ASO, which registers on seven CBCT landmarks
     straddling two regions and would otherwise run 58 agents to use 7. It is
-    offered to a human too, which is why its 118 options have to be readable.
+    offered to a human too, which is why its 119 options have to be readable.
     """
 
     def _spec(self):

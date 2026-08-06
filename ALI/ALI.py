@@ -21,7 +21,7 @@ Three things about ALI's schema are worth knowing when reading this file:
   formgen renders as a visible hint. Hiding one by guessing would be wrong more
   often than the clutter is annoying.
 * **CBCT landmarks can be chosen by region or one by one.** `cbct_regions` is
-  the granularity a human wants; `landmarks` (118 options, rendered as tabs
+  the granularity a human wants; `landmarks` (119 options, rendered as tabs
   from the server's own grouping) is for asking for named points, and naming
   any of them *replaces* the region selection rather than narrowing it. It
   exists because ASO's fully-automated mode registers on seven landmarks that

@@ -947,13 +947,13 @@ ignores the other instead of scanning a flat list.
 
 **Two granularities for the same CBCT selection**, and the second one exists
 for another tool: `cbct_regions` is four check boxes, which is what a human
-placing a full set of points wants; `landmarks` is all 118 labels, rendered as
+placing a full set of points wants; `landmarks` is all 119 labels, rendered as
 tabs (`ui="tabs"`, `groups` = the server's own `GROUP_LABELS`). Naming any
 landmark *replaces* the region selection rather than narrowing it. ASO's
 fully-automated CBCT mode registers on seven landmarks straddling two regions,
 so going through regions would run 58 deep-RL agents to use seven — and the
 argument is offered to the Slicer user too, which is what makes the tabs worth
-having rather than a 118-row column.
+having rather than a 119-row column.
 
 `handleResult` is overridden rather than extended: the base `"save_as"` info
 dialog would pop before `run_report.json` has been read, and that report is the
