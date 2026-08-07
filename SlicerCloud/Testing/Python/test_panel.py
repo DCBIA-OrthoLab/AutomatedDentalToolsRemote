@@ -120,6 +120,12 @@ def _extend_stubs():
         def setLineWrapMode(self, _mode):
             pass
 
+        # A PROPERTY, not a method — PythonQt collapses QTextEdit's
+        # document()/setDocument() pair into an attribute, and modelling it as
+        # a method is what let `self.logView.document()` ship. It raised
+        # "'QTextDocument' object is not callable" inside setup() on a fresh
+        # Slicer, leaving the whole panel half-built.
+        @property
         def document(self):
             return types.SimpleNamespace(setMaximumBlockCount=lambda _n: None)
 
@@ -307,6 +313,47 @@ class PanelTestCase(unittest.TestCase):
 
 
 class TestOpeningThePanel(PanelTestCase):
+    def test_the_panel_builds_completely(self):
+        """Asserted explicitly, because setup()'s try/except would otherwise
+        HIDE a build failure from every other test here: they would all pass
+        against a panel that is nothing but an error label.
+
+        This is the check that catches a PythonQt property mismatch — the real
+        one was `self.logView.document()`, which raised on a fresh Slicer and
+        left _progressLabel and cancelButton uncreated, so every later click
+        died on an AttributeError instead of on the actual cause.
+        """
+        widget = self.panel()
+        self.assertFalse(widget._buildFailed, "setup() fell back to its error panel")
+        for name in ("installButton", "updateButton", "stopButton", "downloadButton",
+                     "refreshButton", "cancelButton", "_progressLabel", "logView",
+                     "hintLabel", "installDirEdit", "branchEdit", "portSpin"):
+            self.assertTrue(hasattr(widget, name), f"setup() never created {name}")
+
+    def test_a_widget_that_raises_still_leaves_something_usable(self):
+        """The safety net itself. A half-built panel is the worst outcome:
+        no message, and every click failing somewhere unrelated."""
+        original = SlicerCloud.SlicerCloudWidget._buildLogBox
+
+        def boom(_self):
+            raise RuntimeError("simulated PythonQt mismatch")
+
+        SlicerCloud.SlicerCloudWidget._buildLogBox = boom
+        try:
+            widget = SlicerCloud.SlicerCloudWidget()
+            widget.setup()
+        finally:
+            SlicerCloud.SlicerCloudWidget._buildLogBox = original
+
+        self.assertTrue(widget._buildFailed)
+        # The two widgets every error path needs exist even so...
+        self.assertTrue(hasattr(widget, "_progressLabel"))
+        self.assertTrue(hasattr(widget, "cancelButton"))
+        # ...and nothing runs against the wreckage.
+        widget.onRefresh()
+        widget.enter()
+        self.assertEqual(DIALOGS["error"], [])
+
     def test_install_is_clickable_as_soon_as_the_panel_opens(self):
         """The reported bug, exactly: a fresh panel whose Install button cannot
         be pressed. The status check is passive and must never disable it."""

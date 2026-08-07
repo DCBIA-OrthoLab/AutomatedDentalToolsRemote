@@ -64,6 +64,19 @@ _ROW_LABELS = (
 )
 
 
+def _qt_get(obj, name):
+    """Read a Qt getter that PythonQt may have turned into a property.
+
+    PythonQt collapses a `foo()` / `setFoo()` pair into an attribute, while
+    PyQt (and every stub written from the C++ docs) keeps `foo()` a method.
+    `QTextEdit.document` is one of those, and getting it wrong is not a
+    cosmetic difference: it raised inside `setup()`, so the panel was left
+    half-built and every later click died on a missing attribute.
+    """
+    value = getattr(obj, name)
+    return value() if callable(value) else value
+
+
 def stopServerOnExit() -> None:
     """Stop the managed container as Slicer quits, if the user asked for that.
 
@@ -155,6 +168,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self._lastStatus = None
         self._jobBlocking = True      # False while a passive status check runs
         self._loadingSettings = False  # True while _loadSettings writes the widgets
+        self._buildFailed = False      # setup() could not build the panel
 
     # ------------------------------------------------------------------
     # Slicer lifecycle
@@ -170,20 +184,41 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self._statusBadge = design.status_badge()
         root.addWidget(self._statusBadge)
 
-        root.addWidget(self._buildServerBox())
-        root.addWidget(self._buildDataBox())
-        root.addWidget(self._buildLogBox())
-
+        # Created BEFORE anything that can fail, because `_setBusy` touches
+        # both and every job path goes through it. When a widget below raised,
+        # these two did not exist and each later click died on an
+        # AttributeError instead of on the real problem.
         self._progressLabel = design.progress_label()
-        root.addWidget(self._progressLabel)
         self.cancelButton = design.danger_button(_("Cancel"))
         self.cancelButton.setVisible(False)
         self.cancelButton.clicked.connect(self.onCancel)
-        root.addWidget(self.cancelButton)
 
+        # One bad widget must not cost the whole panel. ServerToolWidgetBase
+        # already wraps its own build for exactly this reason (ARCHITECTURE.md,
+        # "Schema fetch is synchronous"); this one did not, and a single
+        # PythonQt property mismatch turned the module into a dead screen with
+        # nothing on it explaining why.
+        try:
+            root.addWidget(self._buildServerBox())
+            root.addWidget(self._buildDataBox())
+            root.addWidget(self._buildLogBox())
+        except Exception as exc:  # noqa: BLE001 - reported on screen, see above
+            logger.exception("Could not build the Slicer Cloud panel")
+            self._buildFailed = True
+            root.addWidget(design.warning_label(_(
+                "The Slicer Cloud panel could not be built: {0}\n\n"
+                "This is a bug — please report it with the Python console output. "
+                "The server itself is unaffected; it can be driven from a terminal with "
+                "python3 scripts/server_ctl.py in the install folder."
+            ).format(exc)))
+
+        root.addWidget(self._progressLabel)
+        root.addWidget(self.cancelButton)
         root.addStretch(1)
         design.apply(self.uiWidget)
 
+        if self._buildFailed:
+            return
         self._loadSettings()
         self.onRefresh()
 
@@ -194,6 +229,8 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self._cancelJob()
 
     def enter(self) -> None:
+        if self._buildFailed:
+            return
         design.apply(self.uiWidget)
         # Cheap and offline: a status refresh never fetches from the remote, so
         # coming back to the panel cannot hang on a machine with no network.
@@ -371,7 +408,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self.logView.setReadOnly(True)
         self.logView.setLineWrapMode(qt.QTextEdit.NoWrap)
         self.logView.setMinimumHeight(design.TABS_MIN_HEIGHT)
-        self.logView.document().setMaximumBlockCount(_LOG_MAX_BLOCKS)
+        _qt_get(self.logView, "document").setMaximumBlockCount(_LOG_MAX_BLOCKS)
         layout.addWidget(self.logView)
         clear = design.link_button(_("Clear"))
         clear.clicked.connect(lambda: self.logView.clear())
@@ -472,6 +509,8 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
     def _startJob(self, name: str, task, on_success, refresh_on_error: bool = True,
                   blocking: bool = True) -> None:
+        if self._buildFailed:
+            return
         if self._job is not None:
             if self._jobBlocking:
                 slicer.util.warningDisplay(
@@ -856,8 +895,9 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self._toolRows = {}
         while self._toolLayout.count():
             item = self._toolLayout.takeAt(0)
-            if item.layout():
-                item.layout().deleteLater()
+            sublayout = _qt_get(item, "layout")
+            if sublayout:
+                sublayout.deleteLater()
 
         for tool in catalog.get("tools", []):
             row = qt.QHBoxLayout()
