@@ -119,6 +119,45 @@ class TestRunCtl(TempInstallDir):
             self.deployment().run_ctl(["up"])
         self.assertEqual(str(caught.exception), "The docker daemon refused this user.")
 
+    def test_a_failure_carries_what_the_command_actually_said(self):
+        """"failed (exit code 1)" and nothing else is what made a real failure
+        on a fresh machine impossible to diagnose from the bug report. The tail
+        of stderr is the diagnosis; it has to reach the dialog, not only the
+        log pane the user may never open."""
+        _write_fake_ctl(self.install_dir, (
+            "print('ERROR: the docker daemon refused this user', file=sys.stderr)\n"
+            "print('  hint: add yourself to the docker group', file=sys.stderr)\n"
+            "sys.exit(1)\n"
+        ))
+        with self.assertRaises(DeploymentError) as caught:
+            self.deployment().run_ctl(["status"])
+        message = str(caught.exception)
+        self.assertIn("exit code 1", message)
+        self.assertIn("docker daemon refused this user", message)
+        self.assertIn("add yourself to the docker group", message)
+
+    def test_a_silent_failure_says_it_was_silent(self):
+        """Distinguishable from "it said something you did not read"."""
+        _write_fake_ctl(self.install_dir, "sys.exit(1)\n")
+        with self.assertRaises(DeploymentError) as caught:
+            self.deployment().run_ctl(["status"])
+        self.assertIn("printed nothing at all", str(caught.exception))
+
+    def test_only_the_TAIL_of_a_huge_log_travels(self):
+        """`docker compose up` prints tens of thousands of lines; an error
+        dialog must not try to show them all."""
+        _write_fake_ctl(self.install_dir, (
+            "for i in range(5000):\n"
+            "    print('layer %d' % i, file=sys.stderr)\n"
+            "sys.exit(1)\n"
+        ))
+        with self.assertRaises(DeploymentError) as caught:
+            self.deployment().run_ctl(["up"])
+        message = str(caught.exception)
+        self.assertIn("layer 4999", message)
+        self.assertNotIn("layer 100\n", message)
+        self.assertLess(len(message.splitlines()), 20)
+
     def test_unparseable_output_is_reported_rather_than_swallowed(self):
         _write_fake_ctl(self.install_dir, "print('not json at all')\nsys.exit(3)\n")
         with self.assertRaises(DeploymentError) as caught:

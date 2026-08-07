@@ -18,6 +18,7 @@ stderr, which is what lets `run_ctl` stream a live log into the GUI *and*
 return a parsed result from the same call.
 """
 
+import collections
 import json
 import os
 import shutil
@@ -26,6 +27,9 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+
+# How much of a failed command's output travels with its error message.
+_ERROR_TAIL_LINES = 12
 
 DEFAULT_REPO_URL = "https://github.com/Jules-GP/slicer-remote-tool-server.git"
 DEFAULT_BRANCH = "docker"
@@ -164,6 +168,7 @@ class LocalServerDeployment:
         # would leave 12 GB still coming down the wire.
         self._process = None
         self._cancelled = False
+        self._last_stderr = []
 
     # -- paths ---------------------------------------------------------
 
@@ -227,9 +232,18 @@ class LocalServerDeployment:
 
         self._process = process
 
+        # Kept as well as streamed: when the command fails, the last lines of
+        # what it said ARE the diagnosis, and an error dialog reading only
+        # "exit code 1" sends the user hunting through a log pane they may not
+        # have opened. Bounded, because `docker compose up` prints tens of
+        # thousands of layer-progress lines.
+        tail = collections.deque(maxlen=_ERROR_TAIL_LINES)
+
         def drain_stderr():
             for line in process.stderr:
-                _emit(progress_cb, line.rstrip())
+                line = line.rstrip()
+                tail.append(line)
+                _emit(progress_cb, line)
 
         reader = threading.Thread(target=drain_stderr, daemon=True)
         reader.start()
@@ -244,6 +258,7 @@ class LocalServerDeployment:
 
         if self._cancelled:
             raise DeploymentError("Cancelled.")
+        self._last_stderr = [line for line in tail if line.strip()]
         return process.returncode, out
 
     def run_ctl(self, args, progress_cb=None):
@@ -259,15 +274,26 @@ class LocalServerDeployment:
         try:
             result = json.loads(out) if out.strip() else {}
         except ValueError:
-            raise DeploymentError(
-                f"server_ctl.py {' '.join(args)} produced no usable result "
-                f"(exit code {returncode}). See the log for what it printed."
-            ) from None
+            raise DeploymentError(self._failure_message(args, returncode, "produced no usable result"))
         if "error" in result:
             raise DeploymentError(result["error"])
         if returncode != 0:
-            raise DeploymentError(f"server_ctl.py {' '.join(args)} failed (exit code {returncode}).")
+            raise DeploymentError(self._failure_message(args, returncode, "failed"))
         return result
+
+    def _failure_message(self, args, returncode: int, what: str) -> str:
+        """The error the user actually sees, with the tail of what the command said.
+
+        Without this it read "server_ctl.py status --branch docker failed (exit
+        code 1)" and nothing else — true, useless, and the reason a real
+        failure on a fresh machine could not be diagnosed from the report.
+        """
+        message = f"server_ctl.py {' '.join(args)} {what} (exit code {returncode})."
+        if self._last_stderr:
+            message += "\n\nIt printed:\n    " + "\n    ".join(self._last_stderr)
+        else:
+            message += " It printed nothing at all."
+        return message
 
     # -- operations ----------------------------------------------------
 
