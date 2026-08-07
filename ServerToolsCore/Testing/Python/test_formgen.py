@@ -834,5 +834,195 @@ class VisibilityTest(unittest.TestCase):
         self.assertTrue(formgen.all_required_filled(widgets, schema, hidden={"needed"}))
 
 
+# ---------------------------------------------------------------------------
+# Sliders (ArgSpec.ui = "slider" on int/float) and bounds on spin boxes
+# ---------------------------------------------------------------------------
+
+def _numeric(arg_type, **hints):
+    spec = {
+        "type": arg_type, "types": [arg_type], "required": False,
+        "description": "", "server_selectable": None, "choices": None,
+        "initial": None,
+    }
+    spec.update(hints)
+    return spec
+
+
+class SliderWidgetTest(unittest.TestCase):
+    """`ui: "slider"` on a bounded int/float renders the combined
+    slider+spinbox; everything else stays a spin box."""
+
+    def _one(self, spec):
+        return formgen.build({"k": spec}, qt.QFormLayout())["k"]
+
+    def test_bounded_float_with_the_hint_becomes_a_slider(self):
+        widget = self._one(_numeric("float", ui="slider", min=-180, max=180, step=0.5, initial=10))
+
+        self.assertIsInstance(widget, ctk.ctkSliderWidget)
+        self.assertEqual(widget.minimum, -180.0)
+        self.assertEqual(widget.maximum, 180.0)
+        self.assertEqual(widget.singleStep, 0.5)
+        self.assertEqual(widget.value, 10.0)
+
+    def test_an_int_slider_reads_back_as_an_int(self):
+        widget = self._one(_numeric("int", ui="slider", min=0, max=95, step=5, initial=5))
+
+        self.assertEqual(widget.decimals, 0)
+        value = formgen.collect({"k": widget})["k"]
+        self.assertEqual(value, 5)
+        self.assertIsInstance(value, int)
+
+    def test_float_decimals_follow_the_step(self):
+        widget = self._one(_numeric("float", ui="slider", min=0, max=1, step=0.05))
+        self.assertEqual(widget.decimals, 2)
+
+    def test_declared_decimals_win_over_the_step(self):
+        widget = self._one(_numeric("float", ui="slider", min=0, max=1, step=0.05, decimals=4))
+        self.assertEqual(widget.decimals, 4)
+
+    def test_a_slider_without_bounds_falls_back_to_a_spin_box(self):
+        # An unbounded slider has no geometry; the panel must render anyway.
+        self.assertIsInstance(self._one(_numeric("float", ui="slider")), qt.QDoubleSpinBox)
+        self.assertIsInstance(self._one(_numeric("int", ui="slider", min=0)), qt.QSpinBox)
+
+    def test_bounds_without_the_hint_constrain_the_spin_box(self):
+        # min/max alone must not switch the widget kind: a bound added
+        # server-side for validation cannot silently produce a slider.
+        widget = self._one(_numeric("int", min=1, max=10, step=2))
+
+        self.assertIsInstance(widget, qt.QSpinBox)
+        self.assertEqual((widget.minimum, widget.maximum), (1, 10))
+        self.assertEqual(widget.singleStep, 2)
+
+    def test_an_unknown_scalar_ui_falls_back_to_a_spin_box(self):
+        self.assertIsInstance(self._one(_numeric("float", ui="dial")), qt.QDoubleSpinBox)
+
+    def test_changing_the_slider_notifies(self):
+        widget = self._one(_numeric("float", ui="slider", min=0, max=10))
+        calls = []
+        formgen.connect_changed(widget, lambda *_a: calls.append(1))
+
+        widget.value = 3.5
+
+        self.assertEqual(len(calls), 1)
+
+    def test_slider_value_is_sent_in_clear(self):
+        widget = self._one(_numeric("float", ui="slider", min=0, max=10, initial=2.5))
+        data = ToolServerClient._stringify(formgen.collect({"k": widget}))
+        self.assertEqual(data["k"], "2.5")
+
+    def test_a_required_slider_at_zero_still_counts_as_filled(self):
+        schema = {"k": _numeric("float", ui="slider", min=-10, max=10, required=True)}
+        widgets = formgen.build(schema, qt.QFormLayout())
+        self.assertTrue(formgen.all_required_filled(widgets, schema))
+
+
+# ---------------------------------------------------------------------------
+# vec2 (two numbers set together, ui = "joystick" for the 2D pad)
+# ---------------------------------------------------------------------------
+
+def _vec2(**hints):
+    spec = {
+        "type": "vec2", "types": ["vec2"], "required": False,
+        "description": "", "server_selectable": None, "choices": None,
+        "initial": None,
+    }
+    spec.update(hints)
+    return spec
+
+
+class JoystickWidgetTest(unittest.TestCase):
+    def _one(self, spec):
+        return formgen.build({"k": spec}, qt.QFormLayout())["k"]
+
+    def test_vec2_with_the_hint_gets_a_pad_with_the_declared_ranges(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[-15, 15], y_range=[-5, 5]))
+
+        self.assertIsInstance(widget, formgen.JoystickInput)
+        self.assertIsNotNone(widget.pad)
+        self.assertEqual((widget.pad.x_start, widget.pad.x_end), (-15.0, 15.0))
+        self.assertEqual((widget.pad.y_start, widget.pad.y_end), (-5.0, 5.0))
+
+    def test_vec2_without_the_hint_is_two_plain_spin_boxes(self):
+        widget = self._one(_vec2(x_range=[0, 1], y_range=[0, 1]))
+        self.assertIsInstance(widget, formgen.JoystickInput)
+        self.assertIsNone(widget.pad)
+
+    def test_an_unknown_vec2_ui_falls_back_to_the_boxes_alone(self):
+        widget = self._one(_vec2(ui="trackball", x_range=[0, 1], y_range=[0, 1]))
+        self.assertIsNone(widget.pad)
+
+    def test_the_declared_initial_reaches_boxes_and_pad(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[-15, 15], y_range=[-5, 5], initial=[3, -2]))
+
+        self.assertEqual(widget.value(), [3.0, -2.0])
+        self.assertEqual((widget.pad.x, widget.pad.y), (3.0, -2.0))
+
+    def test_no_initial_opens_at_the_centre_of_both_axes(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[0, 10], y_range=[-5, 5]))
+        self.assertEqual(widget.value(), [5.0, 0.0])
+
+    def test_collect_returns_the_pair_and_it_travels_as_json(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[-15, 15], y_range=[-5, 5], initial=[3, -2]))
+
+        collected = formgen.collect({"k": widget})
+        self.assertEqual(collected["k"], [3.0, -2.0])
+        self.assertEqual(json.loads(ToolServerClient._stringify(collected)["k"]), [3.0, -2.0])
+
+    def test_editing_a_box_moves_the_pad(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[-15, 15], y_range=[-5, 5], initial=[0, 0]))
+
+        widget.xBox.setValue(7.5)
+
+        self.assertEqual(widget.pad.x, 7.5)
+
+    def test_moving_the_pad_updates_the_boxes(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[-15, 15], y_range=[-5, 5], initial=[0, 0]))
+
+        widget.pad.setValues(4.0, -1.0, notify=True)
+
+        self.assertEqual(widget.value(), [4.0, -1.0])
+
+    def test_any_input_path_notifies(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[-15, 15], y_range=[-5, 5], initial=[0, 0]))
+        calls = []
+        formgen.connect_changed(widget, lambda *_a: calls.append(1))
+
+        widget.yBox.setValue(2.0)       # typing
+        widget.pad.setValues(1.0, 2.0, notify=True)  # dragging
+
+        self.assertGreaterEqual(len(calls), 2)
+
+    def test_a_spring_back_pad_accumulates_displacements(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[-10, 10], y_range=[-10, 10],
+                                 initial=[0, 0], spring_back=True))
+        pad = widget.pad
+
+        # One push: offset (2, 1) from the rest position, then release.
+        pad.setValues(2.0, 1.0, notify=True)
+        self.assertEqual(widget.value(), [2.0, 1.0])
+        pad.mouseReleaseEvent(None)
+        self.assertEqual((pad.x, pad.y), (0.0, 0.0))  # sprang home
+
+        # A second push adds to the committed base instead of replacing it.
+        pad.setValues(1.0, 1.0, notify=True)
+        self.assertEqual(widget.value(), [3.0, 2.0])
+
+    def test_the_description_is_shown_above_the_widgets(self):
+        widget = formgen._make_widget("k", _vec2(ui="joystick", description="Move the landmark"))
+        laid_out = widget.container.layout.widgets
+        self.assertIsInstance(laid_out[0], qt.QLabel)
+        self.assertEqual(laid_out[0].text, "Move the landmark")
+
+    def test_an_invalid_range_falls_back_to_the_unit_axis(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[3], y_range=[0, 1]))
+        self.assertEqual((widget.pad.x_start, widget.pad.x_end), (0.0, 1.0))
+
+    def test_a_required_vec2_always_counts_as_filled(self):
+        schema = {"k": _vec2(ui="joystick", x_range=[0, 1], y_range=[0, 1], required=True)}
+        widgets = formgen.build(schema, qt.QFormLayout())
+        self.assertTrue(formgen.all_required_filled(widgets, schema))
+
+
 if __name__ == "__main__":
     unittest.main()

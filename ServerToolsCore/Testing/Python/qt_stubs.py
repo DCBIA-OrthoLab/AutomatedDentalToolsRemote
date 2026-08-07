@@ -60,6 +60,15 @@ class QObject:
     def setMinimumHeight(self, height):
         self._minimum_height = height
 
+    def setFixedSize(self, width, height):
+        self._fixed_size = (width, height)
+
+    def setFocusPolicy(self, _policy):
+        pass
+
+    def update(self):
+        pass
+
 
 class QWidget(QObject):
     def __init__(self, parent=None):
@@ -144,11 +153,19 @@ class QCursor:
 
 
 class Qt:
-    """The Qt namespace enum values design/formgen reach for."""
+    """The Qt namespace enum values design/formgen/joystick reach for."""
 
     ScrollBarAlwaysOff = 1
     ScrollBarAsNeeded = 0
     PointingHandCursor = 13
+    StrongFocus = 11
+    AlignCenter = 0x84
+    ControlModifier = 0x04000000
+    ShiftModifier = 0x02000000
+    Key_Left = 0x01000012
+    Key_Up = 0x01000013
+    Key_Right = 0x01000014
+    Key_Down = 0x01000015
 
 
 class QFileDialog:
@@ -200,6 +217,10 @@ class QPushButton(QObject):
         QObject.__init__(self)
         self.text = text
         self.clicked = Signal()
+        self._checkable = False
+
+    def setCheckable(self, checkable):
+        self._checkable = bool(checkable)
 
 
 class QLineEdit(QObject):
@@ -293,14 +314,20 @@ class QSpinBox(QObject):
         self.value = 0
         self.minimum = 0
         self.maximum = 99
+        self.singleStep = 1
         self.valueChanged = Signal()
 
     def setRange(self, minimum, maximum):
         self.minimum, self.maximum = minimum, maximum
 
+    def setSingleStep(self, step):
+        self.singleStep = step
+
     def setValue(self, value):
-        self.value = value
-        self.valueChanged.emit(value)
+        # Clamped like the real widget: JoystickInput's spring-back mode
+        # relies on the boxes clamping the accumulated displacement.
+        self.value = min(max(value, self.minimum), self.maximum)
+        self.valueChanged.emit(self.value)
 
 
 class QDoubleSpinBox(QSpinBox):
@@ -371,6 +398,33 @@ class ctkCollapsibleButton(QWidget):
         self.text = ""
 
 
+class ctkSliderWidget(QObject):
+    """PythonQt exposes minimum/maximum/decimals/singleStep/value as writable
+    properties. `value` clamps into [minimum, maximum] like the real widget."""
+
+    def __init__(self):
+        QObject.__init__(self)
+        self.minimum = 0.0
+        self.maximum = 99.0
+        self.decimals = 2
+        self.singleStep = 1.0
+        self.pageStep = 1.0
+        self._value = 0.0
+        self.valueChanged = Signal()
+
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, new_value):
+        self._value = min(max(float(new_value), self.minimum), self.maximum)
+        self.valueChanged.emit(self._value)
+
+    def setValue(self, new_value):
+        self.value = new_value
+
+
 def install():
     """Register the fake `qt`, `ctk` and `slicer` modules in sys.modules.
 
@@ -386,6 +440,7 @@ def install():
     ctk = types.ModuleType("ctk")
     ctk.ctkPathLineEdit = ctkPathLineEdit
     ctk.ctkCollapsibleButton = ctkCollapsibleButton
+    ctk.ctkSliderWidget = ctkSliderWidget
 
     sys.modules.setdefault("qt", qt)
     sys.modules.setdefault("ctk", ctk)

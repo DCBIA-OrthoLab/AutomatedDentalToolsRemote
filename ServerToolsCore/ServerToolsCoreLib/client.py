@@ -564,7 +564,9 @@ class ToolServerClient:
         for key, value in args.items():
             if isinstance(value, bool):
                 stringified[key] = "true" if value else "false"
-            elif isinstance(value, dict):
+            elif isinstance(value, (dict, list, tuple)):
+                # dict: the multichoice state above. list/tuple: a "vec2"
+                # argument's [x, y] pair (formgen.JoystickInput).
                 stringified[key] = json.dumps(value)
             else:
                 stringified[key] = str(value)

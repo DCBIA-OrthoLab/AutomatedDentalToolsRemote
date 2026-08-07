@@ -27,6 +27,7 @@ _LIGHT = {
     "BORDER": "#e0e6ed",
     "BACKGROUND": "#f8f9fa",
     "SURFACE": "#ffffff",
+    "SURFACE_HOVER": "#fbfcfd",
     "DISABLED_BG": "#bdc3c7",
     "DISABLED_TEXT": "#95a5a6",
 }
@@ -44,9 +45,43 @@ _DARK = {
     "BORDER": "#454545",
     "BACKGROUND": "#2b2b2b",
     "SURFACE": "#383838",
+    "SURFACE_HOVER": "#414141",
     "DISABLED_BG": "#555555",
     "DISABLED_TEXT": "#888888",
 }
+
+# (top, bottom) gradient stops per button role and state. The vertical
+# qlineargradient is the SlicerAutomatedDentalTools button: every .ui of the
+# original extension paints QPushButton with exactly it, and the flat fill
+# that shipped here first read as a different product next to those modules.
+# Dark accents follow the original's applyDarkModeStyles (#5dade2 family).
+_BUTTON_STOPS_LIGHT = {
+    "primary":   {"base": ("#4ba3ff", "#3498db"), "hover": ("#5cb3ff", "#2980b9"), "pressed": ("#2980b9", "#1f618d")},
+    "danger":    {"base": ("#ec7063", "#e74c3c"), "hover": ("#f1948a", "#c0392b"), "pressed": ("#c0392b", "#922b21")},
+    "success":   {"base": ("#66bb6a", "#4caf50"), "hover": ("#81c784", "#43a047"), "pressed": ("#43a047", "#2e7d32")},
+    "secondary": {"base": ("#78909c", "#607d8b"), "hover": ("#90a4ae", "#546e7a"), "pressed": ("#546e7a", "#455a64")},
+}
+_BUTTON_STOPS_DARK = {
+    "primary":   {"base": ("#5dade2", "#3498db"), "hover": ("#7bbcef", "#5dade2"), "pressed": ("#3498db", "#2980b9")},
+    "danger":    {"base": ("#ec7063", "#e74c3c"), "hover": ("#f1948a", "#ec7063"), "pressed": ("#c0392b", "#a93226")},
+    "success":   {"base": ("#58d68d", "#2ecc71"), "hover": ("#82e0aa", "#58d68d"), "pressed": ("#2ecc71", "#28b463")},
+    "secondary": {"base": ("#90a4ae", "#78909c"), "hover": ("#b0bec5", "#90a4ae"), "pressed": ("#78909c", "#607d8b")},
+}
+
+# The two colors of a checkable on/off button (see toggle_button). Fixed
+# Material values in both themes, exactly as GreedyReg's interactive-tool
+# toggle: blue reads "click to start", red reads "active, click to stop".
+_TOGGLE_OFF = "#2196f3"
+_TOGGLE_ON = "#f44336"
+
+# White check mark drawn inside a checked QCheckBox indicator. An inline SVG
+# rather than a Qt resource (:/Icons/SmallCheckMark.png in the original .ui
+# files) so it needs no resource file compiled into the extension.
+_CHECKMARK_SVG = (
+    "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
+    "<path fill='white' d='M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0"
+    "l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z'/></svg>"
+)
 
 
 def is_dark_mode() -> bool:
@@ -79,6 +114,11 @@ def _base_stylesheet(t: dict) -> str:
     }}
     ctkCollapsibleButton:hover {{
       border: 1px solid {t['PRIMARY']};
+      background-color: {t['SURFACE_HOVER']};
+    }}
+    QLabel {{
+      color: {t['TEXT']};
+      font-weight: 500;
     }}
     QLineEdit, QTextEdit {{
       background-color: {t['SURFACE']};
@@ -106,6 +146,52 @@ def _base_stylesheet(t: dict) -> str:
       selection-background-color: {t['PRIMARY']};
       border: 1px solid {t['BORDER']};
     }}
+    QSpinBox, QDoubleSpinBox {{
+      background-color: {t['SURFACE']};
+      border: 1px solid {t['BORDER']};
+      border-radius: 4px;
+      padding: {SPACING_XS}px {SPACING_SM}px;
+      color: {t['TEXT']};
+    }}
+    QSpinBox:focus, QDoubleSpinBox:focus {{ border: 2px solid {t['PRIMARY']}; }}
+    QCheckBox {{
+      color: {t['TEXT']};
+      font-weight: 500;
+      spacing: {SPACING_SM}px;
+    }}
+    QCheckBox::indicator {{
+      width: 18px;
+      height: 18px;
+      border: 1px solid {t['BORDER']};
+      border-radius: 3px;
+      background-color: {t['SURFACE']};
+    }}
+    QCheckBox::indicator:hover {{
+      border: 1px solid {t['PRIMARY']};
+      background-color: {t['SURFACE_HOVER']};
+    }}
+    QCheckBox::indicator:checked {{
+      background-color: {t['PRIMARY']};
+      border: 1px solid {t['PRIMARY']};
+      image: url("{_CHECKMARK_SVG}");
+    }}
+    QSlider::groove:horizontal {{
+      border: 1px solid {t['BORDER']};
+      height: 8px;
+      background-color: {t['SURFACE']};
+      border-radius: 4px;
+    }}
+    QSlider::handle:horizontal {{
+      background-color: {t['PRIMARY']};
+      border: 1px solid {t['PRIMARY']};
+      width: 16px;
+      margin: -4px 0;
+      border-radius: 8px;
+    }}
+    QSlider::handle:horizontal:hover {{
+      background-color: {t['PRIMARY_HOVER']};
+      border: 1px solid {t['PRIMARY_HOVER']};
+    }}
     QProgressBar {{
       border: 1px solid {t['BORDER']};
       border-radius: 4px;
@@ -117,13 +203,27 @@ def _base_stylesheet(t: dict) -> str:
       background-color: {t['PRIMARY']};
       border-radius: 3px;
     }}
+    {_button_stylesheet("primary", t)}
     """
 
 
-def _button_stylesheet(base: str, hover: str, pressed: str, disabled_bg: str, disabled_text: str) -> str:
+def _gradient(top: str, bottom: str) -> str:
+    return f"qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {top}, stop:1 {bottom})"
+
+
+def _button_stops() -> dict:
+    return _BUTTON_STOPS_DARK if is_dark_mode() else _BUTTON_STOPS_LIGHT
+
+
+def _button_stylesheet(role: str, t: dict) -> str:
+    """The QSS of one button role. Also embedded in the base stylesheet as the
+    bare-QPushButton rule (role "primary"), so a plain button someone adds
+    (formgen's File.../Folder... browse buttons) comes out looking like the
+    original's Search buttons rather than falling back to Slicer's default."""
+    stops = _button_stops()[role]
     return f"""
     QPushButton {{
-      background-color: {base};
+      background-color: {_gradient(*stops['base'])};
       color: white;
       border: none;
       border-radius: 6px;
@@ -132,9 +232,9 @@ def _button_stylesheet(base: str, hover: str, pressed: str, disabled_bg: str, di
       padding: {SPACING_MD}px;
       margin-top: {SPACING_XS}px;
     }}
-    QPushButton:hover:!pressed {{ background-color: {hover}; }}
-    QPushButton:pressed {{ background-color: {pressed}; }}
-    QPushButton:disabled {{ background-color: {disabled_bg}; color: {disabled_text}; }}
+    QPushButton:hover:!pressed {{ background-color: {_gradient(*stops['hover'])}; }}
+    QPushButton:pressed {{ background-color: {_gradient(*stops['pressed'])}; }}
+    QPushButton:disabled {{ background-color: {t['DISABLED_BG']}; color: {t['DISABLED_TEXT']}; }}
     """
 
 
@@ -143,20 +243,48 @@ def apply(widget) -> None:
     widget.setStyleSheet(_base_stylesheet(tokens()))
 
 
-def primary_button(text: str) -> qt.QPushButton:
-    t = tokens()
+def _role_button(text: str, role: str) -> qt.QPushButton:
     button = qt.QPushButton(text)
-    button.setStyleSheet(
-        _button_stylesheet(t["PRIMARY"], t["PRIMARY_HOVER"], t["PRIMARY_PRESSED"], t["DISABLED_BG"], t["DISABLED_TEXT"])
-    )
+    button.setStyleSheet(_button_stylesheet(role, tokens()))
     return button
 
 
+def primary_button(text: str) -> qt.QPushButton:
+    """The panel's main action: Apply, Retry."""
+    return _role_button(text, "primary")
+
+
 def danger_button(text: str) -> qt.QPushButton:
+    """A destructive or interrupting action: Cancel."""
+    return _role_button(text, "danger")
+
+
+def success_button(text: str) -> qt.QPushButton:
+    """A confirming action distinct from the main one: GreedyReg's green
+    Run/Save family. Not used by the generated panel itself; offered to
+    modules adding their own buttons (addExtraWidgets)."""
+    return _role_button(text, "success")
+
+
+def secondary_button(text: str) -> qt.QPushButton:
+    """A secondary tool that must not compete with the main action: the
+    blue-gray of the original's utility buttons."""
+    return _role_button(text, "secondary")
+
+
+def toggle_button(text: str) -> qt.QPushButton:
+    """A checkable on/off button: blue when off ("click to start"), red while
+    checked ("active, click to stop"), as GreedyReg's interactive-tool toggle.
+    Flat fills, not gradients: the two-state color IS the information, and a
+    gradient would make it read as one more action button."""
     t = tokens()
     button = qt.QPushButton(text)
+    button.setCheckable(True)
     button.setStyleSheet(
-        _button_stylesheet(t["DANGER"], t["DANGER_HOVER"], t["DANGER_PRESSED"], t["DISABLED_BG"], t["DISABLED_TEXT"])
+        f"QPushButton {{ background-color: {_TOGGLE_OFF}; color: white; border: none;"
+        f" border-radius: 4px; font-weight: 600; padding: {SPACING_SM}px; }}"
+        f"QPushButton:checked {{ background-color: {_TOGGLE_ON}; }}"
+        f"QPushButton:disabled {{ background-color: {t['DISABLED_BG']}; color: {t['DISABLED_TEXT']}; }}"
     )
     return button
 
@@ -211,6 +339,25 @@ def link_button(text: str) -> qt.QPushButton:
 # Both are floors, not fixed heights: the layouts still grow with the panel.
 CHART_MIN_HEIGHT = 90   # two rows of check boxes plus their group labels
 TABS_MIN_HEIGHT = 220   # a tab bar plus roughly six rows of options
+
+# Joystick pad (joystick.JoystickPad). The side is FlexReg's PAD_SIZE; the
+# paint colors are FlexReg's pad palette, which was designed against this same
+# blue theme. Hex strings rather than QColors so this module stays importable
+# under the test stubs; the pad wraps them at paint time.
+PAD_SIZE = 128
+_PAD_LIGHT = {
+    "background": "#f4f7fa", "border": "#d3dce5", "grid": "#e3eaf1",
+    "text": "#93a2b1", "label": "#6b7c8d", "knob": "#3498db", "trail": "#bcd7ef",
+}
+_PAD_DARK = {
+    "background": "#2b3138", "border": "#4a5560", "grid": "#3d454e",
+    "text": "#8b97a3", "label": "#b6c2ce", "knob": "#4ba3ff", "trail": "#3f5871",
+}
+
+
+def pad_palette() -> dict:
+    """The joystick pad's paint colors for the current theme, as hex strings."""
+    return _PAD_DARK if is_dark_mode() else _PAD_LIGHT
 
 
 def warning_label(text: str) -> qt.QLabel:
