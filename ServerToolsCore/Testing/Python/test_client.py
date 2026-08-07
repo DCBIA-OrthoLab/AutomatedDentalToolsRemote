@@ -7,7 +7,9 @@ Usage:
 import io
 import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 import zipfile
 from unittest import mock
@@ -23,6 +25,7 @@ from ServerToolsCoreLib.client import (
     _TOOLS_FETCH_TIMEOUT,
     accepts_folder,
     argument_types,
+    download_file,
     file_extensions_for,
     is_file_type,
 )
@@ -1175,6 +1178,69 @@ class ExampleToolRequestTest(unittest.TestCase):
             {"label": "test", "threshold": 1.0},
             {"input": __file__},
         )
+
+
+class DownloadFileTest(unittest.TestCase):
+    """download_file: the GitHub test-data fetch base_widget drives. Not part
+    of ToolServerClient on purpose (no server URL, no token) but tested here
+    like the rest of the module, requests mocked."""
+
+    URL = "https://github.com/example/releases/download/v1/MG_test_scan.nii.gz"
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp(prefix="download_test_")
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.destination = os.path.join(self.work, "MG_test_scan.nii.gz")
+
+    def _streaming_response(self, chunks, headers=None, status=200):
+        response = mock.MagicMock()
+        response.status_code = status
+        response.headers = headers or {}
+        response.iter_content = lambda chunk_size: iter(chunks)
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        if status >= 400:
+            response.raise_for_status.side_effect = requests.HTTPError(f"{status} error")
+        else:
+            response.raise_for_status.return_value = None
+        return response
+
+    def test_streams_the_body_to_the_destination(self):
+        response = self._streaming_response([b"abc", b"def"])
+
+        with mock.patch.object(requests, "get", return_value=response) as get:
+            result = download_file(self.URL, self.destination)
+
+        self.assertEqual(result, self.destination)
+        with open(self.destination, "rb") as handle:
+            self.assertEqual(handle.read(), b"abcdef")
+        # stream=True is what keeps a 100 MB scan out of Slicer's RAM.
+        self.assertTrue(get.call_args.kwargs.get("stream"))
+        self.assertEqual(get.call_args.args[0], self.URL)
+
+    def test_progress_reports_percentages_from_content_length(self):
+        response = self._streaming_response(
+            [b"a" * 512, b"b" * 512], headers={"Content-Length": "1024"}
+        )
+        messages = []
+
+        with mock.patch.object(requests, "get", return_value=response):
+            download_file(self.URL, self.destination, progress_cb=messages.append)
+
+        self.assertEqual(len(messages), 2)
+        self.assertIn("(50%)", messages[0])
+        self.assertIn("(100%)", messages[1])
+        # The label is the file being fetched, not the tool-run wording.
+        self.assertIn("MG_test_scan.nii.gz", messages[0])
+
+    def test_an_http_error_raises_and_writes_nothing(self):
+        response = self._streaming_response([], status=404)
+
+        with mock.patch.object(requests, "get", return_value=response):
+            with self.assertRaises(requests.HTTPError):
+                download_file(self.URL, self.destination)
+
+        self.assertFalse(os.path.exists(self.destination))
 
 
 if __name__ == "__main__":

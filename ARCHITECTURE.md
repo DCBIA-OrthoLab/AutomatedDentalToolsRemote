@@ -203,6 +203,12 @@ interpreter launch:
   module `setup()`, since the server-side list can change independently of
   the `/tools` schema. Uses `_TOOLS_FETCH_TIMEOUT`, same rationale as the
   schema fetch.
+- `download_file(url, destination, progress_cb=None)`, module-level and not a
+  `ToolServerClient` method on purpose: it fetches a GitHub release asset
+  (the original extension's test data, see `base_widget.TEST_DATA`), so no
+  server URL and no token are involved. It lives in this file because
+  client.py is the one module allowed to speak HTTP; streamed in chunks like
+  a result download, with the same progress-message shape.
 - `run(tool_name, args=None, files=None, output_dir=None, progress_cb=None)`
   → `ToolResult(kind="text"|"file", text=..., path=...)`. `files` is
   `{schema_argument_name: local_file_path}` — **there is no single reserved
@@ -334,6 +340,7 @@ class SurgMovPredWidget(ServerToolWidgetBase):
     TOOL_NAME   = "SurgMovPred"
     FILE_INPUTS = {"input": "folder_zip"}   # schema says zip_file; we want a folder picker
     RESULT_KIND = "save_as"                 # output_kind "file" doesn't say what to do with it
+    TEST_DATA   = {"input": "https://..."}  # optional: inline "Test data" download button
     AUTO_UI     = True                      # False → override buildCustomUI()
 ```
 
@@ -348,6 +355,8 @@ What is derived, and what a module still has to say:
 | fill an input from a node in the scene (`volume_node`) | **no** — the server doesn't know a scene exists |
 | offer a folder picker for an argument the server types as a plain zip | **no** — an ergonomics choice (`SurgMovPred`) |
 | leave an optional file argument out of the panel (`"none"`) | **no** — a module's decision |
+| offer the scene's open volumes in the input dropdown | **yes**: any file argument `formgen.accepts_volume` says yes to (volume-ish type name or a published volume extension) |
+| a "Test data" download button on an input row (`TEST_DATA`) | **no**: the URL is the original extension's GitHub release, which the server knows nothing about |
 
 This is what keeps "add a field to a tool = zero client-side lines" true for
 *file* arguments too, not just scalar ones: a new file argument server-side
@@ -578,7 +587,7 @@ fields) into a `qt.QFormLayout`, using the type table below, and returns
 | Schema `type` | Qt widget |
 |---|---|
 | any non-file type with `server_selectable` set | `QComboBox` (populated by `base_widget._populateServerSelectables` from `GET /tools/{tool}/data` — `formgen` itself never talks HTTP) |
-| any **file** type with `server_selectable` set | `ServerFileInput`: the same dropdown of hosted names, wrapped around the normal local picker — the argument accepts either shape |
+| any **file** type with `server_selectable` set, or one `accepts_volume` says yes to | `ServerFileInput`: a one-line row, [sources dropdown][local picker][test data]. The dropdown offers the upload entry, then the scene's open volumes, then the server-hosted names (see "The input row" below) |
 | `str` | `QLineEdit` |
 | `int` | `QSpinBox` (range/step bounded by `min`/`max`/`step` when declared), or a `ctkSliderWidget` when the spec says `ui: "slider"` and declares both bounds |
 | `float` | `QDoubleSpinBox`, same rule, plus `decimals` |
@@ -693,6 +702,45 @@ axis, Shift+wheel = horizontal, arrows one step each, double-click back to
 the defaults. The geometry/value mapping is unit-tested in
 `test_joystick.py`; the schema-to-widget contract in `test_formgen.py`.
 
+### The input row: sources dropdown, open volumes, test data
+
+A file argument's row is ONE line, like the original modules. When the
+argument has more than one possible source, the local picker comes wrapped in
+`ServerFileInput` with a leading dropdown; the row is then
+[sources dropdown][path field + browse buttons][test data button].
+
+The dropdown's entries, in order:
+
+1. **"Upload my own file..."**, the default: the local picker is the value.
+2. **The scene's open scalar volumes**, for any argument
+   `formgen.accepts_volume` says yes to (a volume-ish type name, or a
+   published volume extension; a csv input never offers them). `base_widget`
+   feeds the names (`_refreshSceneVolumes`, re-run on `enter()`, on scene
+   node add/remove, and after a scene close) and keeps the name-to-node map;
+   at upload time the chosen node is exported to a temporary `.nii.gz` and
+   sent like any local file. formgen itself never touches the MRML scene.
+3. **The server-hosted names** (`GET /tools/{tool}/data`), unchanged: the
+   name travels as a plain form value, the file itself never moves.
+
+Which kind is selected is decided by index, never by parsing the entry text,
+and rebuilding either list preserves the current selection when it is still
+offered. Picking any dropdown entry clears the path field and vice versa,
+same mutual-exclusion rule as before.
+
+**The test-data button** (`TEST_DATA = {argument: url}` on the module) ports
+the original modules' "Test Files" / "Download Test file" buttons: one click
+downloads the original extension's GitHub release asset to
+`~/Documents/<app>Downloads/<tool>/Test_Files/<name>/` (the original's
+location), unpacks it when it is a real `.zip` (a bare `.nii.gz` is kept
+as-is, where the original's `DownloadUnzip` called `ZipFile` on it and
+raised), and points the row at the result: the single file it holds when
+there is exactly one, the folder otherwise. The transfer runs on a
+`BackgroundJob` with the progress label reporting it; the fetch is staged in
+a sibling directory and renamed at the end, so an interrupted download can
+never leave a half-extracted folder that the idempotence check would mistake
+for a completed one. The HTTP lives in `client.download_file`; formgen only
+builds the button so the row stays one line.
+
 **Where the words come from, and the line between the two.** Everything
 describing a *tool* is the server's: the field label (`label`), the section
 title (`section`), the tab and chart-row names (`groups`), the option names
@@ -789,7 +837,8 @@ stylesheets win over the inherited rule where they apply.
 
 Factories: `primary_button(text)`, `danger_button(text)`,
 `success_button(text)` (the original GreedyReg's green Run/Save family),
-`secondary_button(text)` (blue-gray utility), `toggle_button(text)`
+`secondary_button(text)` (blue-gray utility), `compact_button(text)` (the
+tight inline variant the one-line input rows use), `toggle_button(text)`
 (checkable, blue → red while checked; flat on purpose, the two-state color
 is the information), `section_title(text)`, `required_label(text)`,
 `hint_label(text)`, `link_button(text)`, `warning_label(text)`,

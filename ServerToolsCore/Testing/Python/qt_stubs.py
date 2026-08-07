@@ -39,6 +39,9 @@ class QObject:
     def isVisible(self):
         return self._visible
 
+    def setEnabled(self, enabled):
+        self._enabled = bool(enabled)
+
     def setProperty(self, name, value):
         self._properties[name] = value
 
@@ -262,10 +265,14 @@ class QCheckBox(QObject):
 
 
 class QComboBox(QObject):
+    AdjustToMinimumContentsLengthWithIcon = 2
+
     def __init__(self):
         QObject.__init__(self)
         self._items = []
         self._index = -1
+        self.sizeAdjustPolicy = 0
+        self.minimumContentsLength = 0
         self.currentTextChanged = Signal()
 
     def addItems(self, items):

@@ -82,6 +82,33 @@ BROWSE_FILE_LABEL = "File..."
 BROWSE_FOLDER_LABEL = "Folder..."
 PATH_PLACEHOLDER = "Select a file or a folder"
 
+# The one-click test-data button at the end of an input row (the original
+# extension's "Test Files" / "Download Test file" buttons, now inline). The
+# button is only built when the module declares a URL for the argument
+# (base_widget.TEST_DATA); the download itself lives in base_widget, this
+# module never talks HTTP.
+DOWNLOAD_LABEL = "Test data"
+
+# How a volume already open in the scene appears in the input dropdown, next
+# to the server-hosted names. Selection kind is decided by index, never by
+# parsing this prefix back (see ServerFileInput._selection).
+OPEN_VOLUME_PREFIX = "Open volume: "
+
+# Extensions Slicer holds as a scalar volume in the scene. A file argument
+# accepting one of these can equally be satisfied by a volume the user already
+# has open, exported at upload time (base_widget._prepareOneInputFile).
+_VOLUME_EXTENSIONS = {".nii", ".nii.gz", ".nrrd", ".gipl", ".gipl.gz", ".mha", ".mhd"}
+
+
+def accepts_volume(spec: dict) -> bool:
+    """Whether this file argument can be satisfied by a scalar volume loaded
+    in the MRML scene. Read off the schema, like every other widget decision:
+    a type whose name says volume/nifti, or whose published extensions
+    include a volume format. A csv input must never offer scene volumes."""
+    if any("volume" in name or "nifti" in name for name in argument_types(spec)):
+        return True
+    return any(extension in _VOLUME_EXTENSIONS for extension in file_extensions_for(spec))
+
 # `ArgSpec.ui` values on the scalar types (the multichoice ones are LAYOUTS
 # below). "slider" turns a bounded int/float into a ctkSliderWidget; "joystick"
 # gives a vec2 the 2D pad. Like every presentation hint, an unknown one falls
@@ -492,7 +519,7 @@ class FileOrFolderInput:
     observable.
     """
 
-    def __init__(self, extensions=()):
+    def __init__(self, extensions=(), with_download=False):
         self._extensions = tuple(extensions)
 
         self.container = qt.QWidget()
@@ -502,11 +529,18 @@ class FileOrFolderInput:
 
         self.pathEdit = qt.QLineEdit()
         self.pathEdit.setPlaceholderText(PATH_PLACEHOLDER)
-        self.fileButton = qt.QPushButton(BROWSE_FILE_LABEL)
-        self.folderButton = qt.QPushButton(BROWSE_FOLDER_LABEL)
+        self.fileButton = design.compact_button(BROWSE_FILE_LABEL)
+        self.folderButton = design.compact_button(BROWSE_FOLDER_LABEL)
         row_layout.addWidget(self.pathEdit, 1)
         row_layout.addWidget(self.fileButton)
         row_layout.addWidget(self.folderButton)
+
+        # Built here so the whole input, test-data button included, stays one
+        # line; base_widget connects it (the download itself is HTTP).
+        self.downloadButton = None
+        if with_download:
+            self.downloadButton = design.compact_button(DOWNLOAD_LABEL)
+            row_layout.addWidget(self.downloadButton)
 
         self.fileButton.clicked.connect(self._onBrowseFile)
         self.folderButton.clicked.connect(self._onBrowseFolder)
@@ -545,71 +579,143 @@ class FileOrFolderInput:
 
 
 class ServerFileInput:
-    """One input row for a file argument the SERVER can also provide by name —
-    `server_selectable` on a file type, e.g. ALI's and AMASSS's `input`.
+    """One input row for a file argument that can be satisfied three ways: a
+    local file or folder to upload, a file the SERVER already hosts by name
+    (`server_selectable`, e.g. ALI's and AMASSS's `input`), or a scalar
+    volume already OPEN in the scene (any argument `accepts_volume` says yes
+    to).
 
-    Such an argument accepts either shape: the caller uploads its own file, or
-    it sends the *name* of one the server already hosts (`GET
-    /tools/<tool>/data`), which the server resolves against its read-only data
-    store. The named file never travels, in either direction — which is the
-    whole point for a test cohort of confidential scans.
+    Everything sits on ONE line, [sources dropdown][local picker][test data],
+    matching the original modules where each input is a single row.
 
-    On the wire the two are genuinely different: an upload is a multipart file
-    part, a server-side selection is a plain form value under the argument's
-    own name. So this holder keeps the local picker it wraps, and answers which
-    of the two the user actually chose (`server_name`).
+    The dropdown's entries, in order: the upload entry, the open volumes
+    (fed by base_widget; formgen never touches the MRML scene), then the
+    server-hosted names (`GET /tools/<tool>/data`). Which kind is selected is
+    decided by INDEX (`_selection`), never by parsing the text back, so a
+    hosted file whose name happens to start with the volume prefix cannot be
+    misread.
 
-    The two are kept mutually exclusive by clearing the other one, not by
-    letting one silently win: picking a server file empties the path field, and
-    typing/browsing a path resets the dropdown. A precedence rule the user
-    cannot see is how you end up uploading a file you thought you had replaced.
+    On the wire the three are genuinely different: an upload is a multipart
+    file part, a server-side selection is a plain form value under the
+    argument's own name (the named file never travels in either direction,
+    which is the whole point for a test cohort of confidential scans), and an
+    open volume is exported to disk at upload time and sent like a local file
+    (base_widget._prepareOneInputFile).
+
+    The sources are kept mutually exclusive by clearing the other one, not by
+    letting one silently win: picking a dropdown entry empties the path
+    field, and typing/browsing a path resets the dropdown. A precedence rule
+    the user cannot see is how you end up uploading a file you thought you
+    had replaced.
+
+    Rebuilding the dropdown (`setChoices`/`setVolumeChoices`) preserves the
+    current selection by text when it is still offered: both lists are
+    refreshed on every `enter()`, and a refresh must not silently reset a
+    chosen entry to the first one in the list.
     """
 
-    # First entry, and the one that means "no server-side file": a combo box
+    # First entry, and the one that means "nothing chosen here": a combo box
     # cannot express "nothing selected" in a way a user reads as deliberate.
     UPLOAD_OPTION = "Upload my own file..."
 
-    def __init__(self, local):
+    def __init__(self, local, with_download=False):
         self.local = local
         self._syncing = False
+        self._server_names = []
+        self._volume_names = []
 
         self.container = qt.QWidget()
-        column = qt.QVBoxLayout(self.container)
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(design.SPACING_XS)
+        row = qt.QHBoxLayout(self.container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(design.SPACING_XS)
 
         self.combo = qt.QComboBox()
+        # Without this a long hosted name (cohort_10_patients.zip) widens the
+        # dropdown until the path field has no room left on the line.
+        self.combo.sizeAdjustPolicy = qt.QComboBox.AdjustToMinimumContentsLengthWithIcon
+        self.combo.minimumContentsLength = 14
         self.combo.addItems([self.UPLOAD_OPTION])
-        column.addWidget(self.combo)
-        column.addWidget(row_widget(local))
+        row.addWidget(self.combo)
+        row.addWidget(row_widget(local), 1)
 
-        self.combo.currentTextChanged.connect(self._onServerChoice)
+        # Built here so the whole input, test-data button included, stays one
+        # line; base_widget connects it (the download itself is HTTP).
+        self.downloadButton = None
+        if with_download:
+            self.downloadButton = design.compact_button(DOWNLOAD_LABEL)
+            row.addWidget(self.downloadButton)
+
+        self.combo.currentTextChanged.connect(self._onComboChoice)
         connect_changed(local, self._onLocalChoice)
 
     def setChoices(self, names) -> None:
-        """Fill the dropdown with the server-side names, keeping the upload
-        entry first. Called once the schema is known — formgen never talks
-        HTTP (see ARCHITECTURE.md dependency rule)."""
-        self.combo.clear()
-        self.combo.addItems([self.UPLOAD_OPTION] + list(names))
+        """Fill the dropdown with the server-hosted names. Called once the
+        schema is known and again on every enter(); formgen never talks HTTP
+        (see ARCHITECTURE.md dependency rule)."""
+        self._server_names = list(names)
+        self._rebuild()
+
+    def setVolumeChoices(self, names) -> None:
+        """The scalar volumes currently open in the scene, as display names.
+        base_widget owns the name-to-node mapping and the refresh triggers;
+        this widget only offers the entries."""
+        self._volume_names = list(names)
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        previous = self.combo.currentText
+        # Guarded: clear()+addItems reselects index 0, which would otherwise
+        # run the mutual-exclusion sync for a choice the user never made.
+        self._syncing = True
+        try:
+            self.combo.clear()
+            entries = [self.UPLOAD_OPTION]
+            entries += [OPEN_VOLUME_PREFIX + name for name in self._volume_names]
+            entries += self._server_names
+            self.combo.addItems(entries)
+            if previous in entries:
+                self.combo.setCurrentIndex(entries.index(previous))
+        finally:
+            self._syncing = False
+
+    def _selection(self):
+        """("upload" | "volume" | "server", name) for the current entry,
+        decided by index so no name can be misparsed."""
+        index = self.combo.currentIndex
+        if index <= 0:
+            return "upload", ""
+        if index <= len(self._volume_names):
+            return "volume", self._volume_names[index - 1]
+        server_index = index - 1 - len(self._volume_names)
+        if server_index < len(self._server_names):
+            return "server", self._server_names[server_index]
+        return "upload", ""
 
     def server_name(self) -> str:
-        """The chosen server-side file name, or "" when uploading."""
-        text = self.combo.currentText
-        return "" if text in ("", self.UPLOAD_OPTION) else text
+        """The chosen server-side file name, or "" otherwise."""
+        kind, name = self._selection()
+        return name if kind == "server" else ""
+
+    def volume_name(self) -> str:
+        """The chosen open volume's display name, or "" otherwise."""
+        kind, name = self._selection()
+        return name if kind == "volume" else ""
 
     @property
     def currentPath(self) -> str:
-        """The LOCAL path to upload — empty while a server-side file is chosen,
-        so nothing is uploaded for an argument that is already satisfied."""
-        return "" if self.server_name() else _local_path(self.local)
+        """The LOCAL path to upload: empty while a server file or an open
+        volume is chosen, so nothing is read off disk for an argument that is
+        already satisfied another way."""
+        if self.server_name() or self.volume_name():
+            return ""
+        return _local_path(self.local)
 
     def is_folder(self) -> bool:
         checker = getattr(self.local, "is_folder", None)
         return bool(checker()) if checker else False
 
-    def _onServerChoice(self, _text=None) -> None:
-        if self._syncing or not self.server_name():
+    def _onComboChoice(self, _text=None) -> None:
+        if self._syncing or self.combo.currentIndex <= 0:
             return
         self._syncing = True
         try:
@@ -633,6 +739,22 @@ class ServerFileInput:
 
     def setToolTip(self, text) -> None:
         self.container.setToolTip(text)
+
+
+def download_button(widget):
+    """The row's test-data button, wherever the composite put it, or None."""
+    button = getattr(widget, "downloadButton", None)
+    if button is not None:
+        return button
+    return getattr(getattr(widget, "local", None), "downloadButton", None)
+
+
+def set_local_path(widget, value: str) -> None:
+    """Write a local path into any input-row kind: what base_widget fills in
+    once the test data has been downloaded. Writing the local half of a
+    ServerFileInput also resets its dropdown, through its own sync."""
+    target = widget.local if isinstance(widget, ServerFileInput) else widget
+    _set_local_path(target, value)
 
 
 def _local_path(widget) -> str:
@@ -1059,30 +1181,42 @@ def result_kind_for(output_kind, declared=None) -> str:
     return declared or _RESULT_KIND_FOR_OUTPUT.get(output_kind, "text")
 
 
-def file_widget(spec: dict, mode: str = "auto"):
+def file_widget(spec: dict, mode: str = "auto", with_download: bool = False):
     """The picker for a file argument. `mode` defaults to the schema-driven
     rule above; base_widget passes an explicit one for what the schema cannot
     express (or to force a single selection kind).
 
-    Kept here (rather than in base_widget) so every "schema shape -> Qt widget"
-    decision lives in one file; `build()` itself never emits one — see the
-    module docstring and FILE_INPUTS.
+    `with_download` adds the inline test-data button: the module declared a
+    TEST_DATA URL for this argument. The button is created here so the row
+    stays one line; base_widget wires it (the download itself is HTTP).
+
+    Kept here (rather than in base_widget) so every "schema shape -> Qt
+    widget" decision lives in one file; `build()` itself never emits one (see
+    the module docstring and FILE_INPUTS).
     """
     if mode == "auto":
         mode = auto_file_mode(spec)
 
+    # One dropdown serves both extra sources: a file the server can provide
+    # by name (server_selectable), and a volume already open in the scene
+    # (accepts_volume). Only file-typed arguments reach here: a SCALAR
+    # server_selectable argument (a model, which must never leave the server)
+    # is a plain combo box built by _make_widget, with no local picker at all.
+    wrap = bool(spec.get("server_selectable")) or accepts_volume(spec)
+
     extensions = file_extensions_for(spec)
     if mode == "file_or_folder":
-        local = FileOrFolderInput(extensions)
+        local = FileOrFolderInput(extensions, with_download=with_download and not wrap)
     else:
         local = path_widget(extensions, mode)
+        if with_download and not wrap:
+            logger.warning(
+                "Test data declared for an argument whose bare path picker "
+                "cannot host the button; ignoring"
+            )
 
-    # A file argument the server can also provide by name gets the dropdown
-    # too. Only file-typed ones reach here: a SCALAR server_selectable argument
-    # (a model, which must never leave the server) is a plain combo box built
-    # by _make_widget, with no local picker at all.
-    if spec.get("server_selectable"):
-        return ServerFileInput(local)
+    if wrap:
+        return ServerFileInput(local, with_download=with_download)
     return local
 
 

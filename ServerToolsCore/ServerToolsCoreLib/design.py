@@ -272,6 +272,24 @@ def secondary_button(text: str) -> qt.QPushButton:
     return _role_button(text, "secondary")
 
 
+def compact_button(text: str) -> qt.QPushButton:
+    """A small inline button for a form row (browse, test-data download): the
+    primary gradient with tighter padding and no top margin, so a row of them
+    stays one text-field tall and the whole input fits on a single line."""
+    t = tokens()
+    stops = _button_stops()["primary"]
+    button = qt.QPushButton(text)
+    button.setStyleSheet(
+        f"QPushButton {{ background-color: {_gradient(*stops['base'])}; color: white;"
+        f" border: none; border-radius: 4px; font-weight: 600;"
+        f" padding: {SPACING_XS}px {SPACING_MD}px; margin: 0px; }}"
+        f"QPushButton:hover:!pressed {{ background-color: {_gradient(*stops['hover'])}; }}"
+        f"QPushButton:pressed {{ background-color: {_gradient(*stops['pressed'])}; }}"
+        f"QPushButton:disabled {{ background-color: {t['DISABLED_BG']}; color: {t['DISABLED_TEXT']}; }}"
+    )
+    return button
+
+
 def toggle_button(text: str) -> qt.QPushButton:
     """A checkable on/off button: blue when off ("click to start"), red while
     checked ("active, click to stop"), as GreedyReg's interactive-tool toggle.
