@@ -152,18 +152,23 @@ class TestCommandBuilding(TempInstallDir):
                          ["--json", "up", "--force-recreate"])
         self.assertEqual(self.args_of(lambda d: d.up(port=8123)),
                          ["--json", "up", "--port", "8123"])
+        # deploy.DEFAULT_BRANCH, not the literal "main": which branch a
+        # deployment ships is configuration, and a test that pins it fails the
+        # moment someone legitimately retargets it.
+        default = deploy.DEFAULT_BRANCH
         self.assertEqual(self.args_of(lambda d: d.update()),
-                         ["--json", "update", "--branch", "main"])
+                         ["--json", "update", "--branch", default])
         self.assertEqual(self.args_of(lambda d: d.update(force=True)),
-                         ["--json", "update", "--branch", "main", "--force"])
+                         ["--json", "update", "--branch", default, "--force"])
 
     def test_status_only_hits_the_network_when_asked(self):
         """The panel refreshes on every visit; a `git fetch` there would hang
         the module for 30s on a machine with no network."""
+        default = deploy.DEFAULT_BRANCH
         self.assertEqual(self.args_of(lambda d: d.status()),
-                         ["--json", "status", "--branch", "main"])
+                         ["--json", "status", "--branch", default])
         self.assertEqual(self.args_of(lambda d: d.status(check_remote=True)),
-                         ["--json", "status", "--branch", "main", "--check-remote"])
+                         ["--json", "status", "--branch", default, "--check-remote"])
 
     def test_the_configured_branch_travels_on_every_status_and_update(self):
         """A clone is created ONCE. Without the branch on every later call, a
@@ -171,9 +176,10 @@ class TestCommandBuilding(TempInstallDir):
         in silence — the change to the Branch field would simply do nothing."""
         for call in (lambda d: d.status(), lambda d: d.update()):
             args = call(LocalServerDeployment(
-                self.install_dir, branch="docker", python_executable=sys.executable))["args"]
+                self.install_dir, branch="a-very-specific-branch",
+                python_executable=sys.executable))["args"]
             self.assertIn("--branch", args)
-            self.assertEqual(args[args.index("--branch") + 1], "docker")
+            self.assertEqual(args[args.index("--branch") + 1], "a-very-specific-branch")
 
     def test_every_selected_tool_is_named(self):
         self.assertEqual(

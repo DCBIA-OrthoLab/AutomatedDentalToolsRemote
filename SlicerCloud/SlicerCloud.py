@@ -153,6 +153,8 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self._catalog = None
         self._registeredTools = None  # tool names the running server exposes, None if unknown
         self._lastStatus = None
+        self._jobBlocking = True      # False while a passive status check runs
+        self._loadingSettings = False  # True while _loadSettings writes the widgets
 
     # ------------------------------------------------------------------
     # Slicer lifecycle
@@ -195,7 +197,9 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         design.apply(self.uiWidget)
         # Cheap and offline: a status refresh never fetches from the remote, so
         # coming back to the panel cannot hang on a machine with no network.
-        if self._job is None:
+        # Skipped only while real work runs, so re-entering the module during
+        # an install neither disturbs it nor pops a dialog.
+        if not self._busyWithWork():
             self.onRefresh()
 
     # ------------------------------------------------------------------
@@ -382,6 +386,17 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
     # ------------------------------------------------------------------
 
     def _loadSettings(self) -> None:
+        # Assigning currentPath emits currentPathChanged, which is wired to
+        # _onInstallDirChanged and would launch a refresh from inside setup() —
+        # then setup()'s own refresh found one already running and popped a
+        # modal "Something is already running" on every single module open.
+        self._loadingSettings = True
+        try:
+            self._loadSettingsInto()
+        finally:
+            self._loadingSettings = False
+
+    def _loadSettingsInto(self) -> None:
         settings = qt.QSettings()
         self.installDirEdit.currentPath = str(settings.value(_KEY_INSTALL_DIR) or DEFAULT_INSTALL_DIR)
         self.repoUrlEdit.text = str(settings.value(_KEY_REPO_URL) or DEFAULT_REPO_URL)
@@ -423,39 +438,62 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         return self._deployment
 
     def _onInstallDirChanged(self, _path=None) -> None:
+        if self._loadingSettings:
+            return
         self._saveSettings()
-        if self._job is None:
+        if not self._busyWithWork():
             self.onRefresh()
 
     # ------------------------------------------------------------------
     # Background jobs — one at a time
     # ------------------------------------------------------------------
 
-    def _setBusy(self, busy: bool, what: str = "") -> None:
-        for button in (self.installButton, self.updateButton, self.stopButton,
-                       self.downloadButton, self.refreshButton, self.checkUpdateButton,
-                       self.showLogsButton):
-            button.setEnabled(not busy)
-        self.cancelButton.setVisible(busy)
+    def _busyWithWork(self) -> bool:
+        """A real job is running — as opposed to a passive status check, which
+        never blocks anything and is superseded on demand."""
+        return self._job is not None and self._jobBlocking
+
+    def _setBusy(self, busy: bool, what: str = "", disable: bool = True) -> None:
+        """`disable=False` for a passive job — it narrates without locking the panel.
+
+        Greying every button during a *status check* is what made the panel
+        feel dead: the check runs on setup() and on every enter(), so the first
+        thing a new user meets is an Install button they cannot press, for
+        reasons nothing on screen explains.
+        """
+        if disable:
+            for button in (self.installButton, self.updateButton, self.stopButton,
+                           self.downloadButton, self.refreshButton, self.checkUpdateButton,
+                           self.showLogsButton):
+                button.setEnabled(not busy)
+            self.cancelButton.setVisible(busy)
         self._progressLabel.setVisible(busy or bool(what))
         self._progressLabel.setText(what)
 
-    def _startJob(self, name: str, task, on_success, refresh_on_error: bool = True) -> None:
+    def _startJob(self, name: str, task, on_success, refresh_on_error: bool = True,
+                  blocking: bool = True) -> None:
         if self._job is not None:
-            slicer.util.warningDisplay(_("Something is already running: {0}.").format(self._jobName))
-            return
+            if self._jobBlocking:
+                slicer.util.warningDisplay(
+                    _("Something is already running: {0}.").format(self._jobName))
+                return
+            # A passive status check is always superseded rather than waited
+            # for: by real work, and by a newer check (the folder just changed,
+            # so the one in flight is answering about the wrong deployment).
+            self._cancelJob()
         self._jobName = name
-        self._setBusy(True, name)
+        self._jobBlocking = blocking
+        self._setBusy(True, name, disable=blocking)
         self._log(f"--- {name} ---")
 
         def succeeded(result):
             self._job = None
-            self._setBusy(False)
+            self._setBusy(False, disable=blocking)
             on_success(result)
 
         def failed(exc):
             self._job = None
-            self._setBusy(False)
+            self._setBusy(False, disable=blocking)
             self._onJobError(name, exc, refresh_on_error)
 
         self._job = BackgroundJob(task, on_success=succeeded, on_error=failed, on_progress=self._log)
@@ -515,7 +553,8 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                 registered = deployment.list_tools(status.get("server", {}).get("url"))
             return status, catalog, registered
 
-        self._startJob(_("Checking the server"), task, self._onRefreshed, refresh_on_error=False)
+        self._startJob(_("Checking the server"), task, self._onRefreshed,
+                       refresh_on_error=False, blocking=False)
 
     def _onRefreshed(self, result) -> None:
         status, catalog, registered = result
