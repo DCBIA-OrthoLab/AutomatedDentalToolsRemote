@@ -24,7 +24,8 @@ SlicerAutomatedDentalTools/
 │   │                                        # (also applies saved settings on Slicer startup)
 │   ├── Testing/Python/test_client.py       # plain unittest, requests mocked, no Slicer needed
 │   ├── Testing/Python/test_formgen.py      # plain unittest, qt/ctk/slicer stubbed, no Slicer needed
-│   ├── Testing/Python/qt_stubs.py          # the stand-ins test_formgen runs against
+│   ├── Testing/Python/test_joystick.py     # the 2D pad's value/geometry logic, same stubs
+│   ├── Testing/Python/qt_stubs.py          # the stand-ins test_formgen/test_joystick run against
 │   └── ServerToolsCoreLib/                 # the importable Python package
 │       ├── __init__.py                     # get_client() + ToolServerClient/ToolResult/ServerToolError
 │       ├── config.py                       # SERVER_URL, API_TOKEN, VERIFY_TLS, TIMEOUT (compiled-in defaults)
@@ -33,6 +34,7 @@ SlicerAutomatedDentalTools/
 │       ├── slicer_io.py                    # TempWorkspace, node export, zip/unzip, result loading
 │       ├── design.py                       # theme tokens, dark/light detection, styled-widget factories
 │       ├── formgen.py                      # /tools schema → Qt widgets, and back
+│       ├── joystick.py                     # JoystickPad, the 2D pad behind vec2's ui:"joystick"
 │       ├── worker.py                       # off-UI-thread execution (BackgroundJob)
 │       ├── base_widget.py                  # ServerToolWidgetBase: all the Slicer boilerplate
 │       └── settings_qt.py                  # QSettings-backed override of config.py's defaults
@@ -90,7 +92,7 @@ since `client.py` has no Slicer dependency to avoid).
 
 ## Tests
 
-Two plain-unittest suites, both registered as ctests and both runnable with
+Three plain-unittest suites, all registered as ctests and all runnable with
 `python3 -m unittest` from `ServerToolsCore/Testing/Python/` — no Slicer
 interpreter launch:
 
@@ -105,6 +107,10 @@ interpreter launch:
   schema-to-widget logic, which is where the tool contract actually lives.
   It runs against `EXAMPLE_TOOL_SCHEMA`, the server's real `GET /tools` entry
   for `example_tool` copied verbatim.
+- **`test_joystick.py`**: the 2D pad under the same stubs. The value/pixel
+  mapping, clamping, and the gesture handlers' arithmetic (absolute and
+  spring-back drags, wheel, arrows). Painting is not exercised, there is no
+  real Qt to paint with.
 
 ## How the pieces fit together
 
@@ -197,6 +203,12 @@ interpreter launch:
   module `setup()`, since the server-side list can change independently of
   the `/tools` schema. Uses `_TOOLS_FETCH_TIMEOUT`, same rationale as the
   schema fetch.
+- `download_file(url, destination, progress_cb=None)`, module-level and not a
+  `ToolServerClient` method on purpose: it fetches a GitHub release asset
+  (the original extension's test data, see `base_widget.TEST_DATA`), so no
+  server URL and no token are involved. It lives in this file because
+  client.py is the one module allowed to speak HTTP; streamed in chunks like
+  a result download, with the same progress-message shape.
 - `run(tool_name, args=None, files=None, output_dir=None, progress_cb=None)`
   → `ToolResult(kind="text"|"file", text=..., path=...)`. `files` is
   `{schema_argument_name: local_file_path}` — **there is no single reserved
@@ -328,6 +340,7 @@ class SurgMovPredWidget(ServerToolWidgetBase):
     TOOL_NAME   = "SurgMovPred"
     FILE_INPUTS = {"input": "folder_zip"}   # schema says zip_file; we want a folder picker
     RESULT_KIND = "save_as"                 # output_kind "file" doesn't say what to do with it
+    TEST_DATA   = {"input": "https://..."}  # optional: inline "Test data" download button
     AUTO_UI     = True                      # False → override buildCustomUI()
 ```
 
@@ -342,6 +355,8 @@ What is derived, and what a module still has to say:
 | fill an input from a node in the scene (`volume_node`) | **no** — the server doesn't know a scene exists |
 | offer a folder picker for an argument the server types as a plain zip | **no** — an ergonomics choice (`SurgMovPred`) |
 | leave an optional file argument out of the panel (`"none"`) | **no** — a module's decision |
+| offer the scene's open volumes in the input dropdown | **yes**: any file argument `formgen.accepts_volume` says yes to (volume-ish type name or a published volume extension) |
+| a "Test data" download button on an input row (`TEST_DATA`) | **no**: the URL is the original extension's GitHub release, which the server knows nothing about |
 
 This is what keeps "add a field to a tool = zero client-side lines" true for
 *file* arguments too, not just scalar ones: a new file argument server-side
@@ -572,11 +587,12 @@ fields) into a `qt.QFormLayout`, using the type table below, and returns
 | Schema `type` | Qt widget |
 |---|---|
 | any non-file type with `server_selectable` set | `QComboBox` (populated by `base_widget._populateServerSelectables` from `GET /tools/{tool}/data` — `formgen` itself never talks HTTP) |
-| any **file** type with `server_selectable` set | `ServerFileInput`: the same dropdown of hosted names, wrapped around the normal local picker — the argument accepts either shape |
+| any **file** type with `server_selectable` set, or one `accepts_volume` says yes to | `ServerFileInput`: a one-line row, [sources dropdown][local picker][test data]. The dropdown offers the upload entry, then the scene's open volumes, then the server-hosted names (see "The input row" below) |
 | `str` | `QLineEdit` |
-| `int` | `QSpinBox` |
-| `float` | `QDoubleSpinBox` |
+| `int` | `QSpinBox` (range/step bounded by `min`/`max`/`step` when declared), or a `ctkSliderWidget` when the spec says `ui: "slider"` and declares both bounds |
+| `float` | `QDoubleSpinBox`, same rule, plus `decimals` |
 | `bool` | `QCheckBox` |
+| `vec2` | a `JoystickInput`: two `QDoubleSpinBox`es set together, plus the 2D `JoystickPad` when the spec says `ui: "joystick"` (see "Numbers" below) |
 | `choice` | `QComboBox` filled from `choices` |
 | `multichoice` | a `MultiChoiceGroup`: one `QCheckBox` per entry of `choices` |
 | any type where `is_file_type()` is true (`file`, `zip_file`, `nifti_file`, ...) | `ctkPathLineEdit`, or a `FileOrFolderInput` when `types` also contains `"folder"` (`file_widget`; `build()` itself never emits one — see `FILE_INPUTS` and the escape hatch below) |
@@ -606,8 +622,8 @@ did before they existed**, asserted for `example_tool` in `test_formgen.py`.
 | `label` | `formgen.label_for` | the text next to the widget. Absent → the argument name prettified (`output_suffix` → "Output suffix") |
 | `section` | `formgen.section_of` / `sections_of` | which `ctkCollapsibleButton` the row goes in. Absent → `formgen.DEFAULT_SECTION` (`"Inputs"`), the one box a panel has always had. Boxes are created in the order the schema first mentions them |
 | `visible_when` | `formgen.is_visible` | `{other_argument: value}` (a list means "any of these"); every entry must match. A row whose condition fails is hidden, label included |
-| `ui` | `formgen.MultiChoiceGroup` | how a `multichoice`'s boxes are laid out: `"tabs"`, `"grid"`, `"inline"` |
-| `groups` | same | `{group name: [option, ...]}` for the two grouped layouts |
+| `ui` | `formgen.MultiChoiceGroup` / `_make_numeric_widget` / `_make_vec2_widget` | per-type presentation: how a `multichoice`'s boxes are laid out (`"tabs"`, `"grid"`, `"inline"`), `"slider"` on a bounded int/float, `"joystick"` on a vec2 |
+| `groups` | `formgen.MultiChoiceGroup` | `{group name: [option, ...]}` for the two grouped layouts |
 
 **The layouts change where the boxes are put and nothing else.**
 `MultiChoiceGroup.boxes` is keyed and ordered by `choices` whatever the layout,
@@ -638,6 +654,92 @@ Every `multichoice` with more than one option also gets an **All / None /
 Default** row (`design.link_button`). "Default" restores the state the schema
 declared — the old ASO module's per-mode `Suggest()` button, now on every tool,
 with the suggestion living server-side where it belongs.
+
+### Numbers: `min`/`max`/`step`, `ui: "slider"`, and the `vec2` joystick
+
+`int` and `float` carry four more optional fields, all presentation-side like
+the hints above (the server's own `validate()` ignores them): `min`, `max`,
+`step`, and (float only) `decimals`.
+
+- Declared **without** `ui: "slider"`, they only constrain the spin box:
+  range, step, decimals. A bound a server adds for documentation can never
+  silently switch the widget kind.
+- With `ui: "slider"` **and both bounds**, the argument renders as a
+  `ctkSliderWidget`, the slider + spin box combination the original
+  extension's manual-alignment rows use (GreedyReg / MRI2CBCT: rotations
+  ±180°, translations ±200 mm). An integer slider sets `decimals = 0` and
+  reads back as an `int`; a float slider derives its decimals from `step`
+  (0.05 → 2) unless `decimals` says otherwise.
+- `ui: "slider"` without both bounds falls back to the spin box with a logged
+  warning: an unbounded slider has no geometry, and a presentation hint must
+  never be able to break the panel.
+
+**`vec2`** is an argument *type*, not a hint: two numbers set together,
+travelling as a JSON `[x, y]` pair (`client._stringify` encodes lists like it
+already encoded the multichoice dict). It renders as `formgen.JoystickInput`:
+two `QDoubleSpinBox`es (labeled from `x_label`/`y_label`, default "X"/"Y")
+that ARE the value, plus, when the spec says `ui: "joystick"`, the 2D pad
+ported from FlexReg's butterfly-patch corner controls
+(`joystick.JoystickPad`, the one genuine QWidget subclass in the library;
+painting and mouse handling cannot be composed from stock widgets). Optional
+fields:
+
+| Field | Meaning |
+|---|---|
+| `x_range` / `y_range` | `[left/bottom end, right/top end]` of each axis. Index 0 is drawn at the left/bottom by construction, so declaring the bounds inverted (`[15, -15]`) mirrors the axis. Absent or invalid → `(0, 1)` with a warning |
+| `initial` | the `[x, y]` the panel opens at. Absent → the centre of both axes, a joystick's natural rest position |
+| `step` | one wheel notch, arrow key, or spin-box step. Absent → a hundredth of each axis |
+| `x_label` / `y_label` | the axis names shown next to the spin boxes |
+| `x_labels` / `y_labels` | 2-element *end* labels drawn in the pad's gutters (`["R", "L"]`, `["POST", "ANT"]`), paired with the range by index |
+| `spring_back` | the pad becomes relative: each drag deals a displacement onto the boxes (clamped by their own ranges) and the knob springs home on release, so repeated pushes never saturate against the ends |
+
+The pad writes into the spin boxes and holds no state of its own: `value()`
+reads the boxes, `connect_changed` wires the boxes, so drag, wheel, arrow
+keys and typing are one code path, and a pad that is not built (no `ui`, or
+an unknown hint from a newer server) changes nothing on the wire. Gestures
+match FlexReg: absolute drag, Ctrl+drag five times finer, wheel = vertical
+axis, Shift+wheel = horizontal, arrows one step each, double-click back to
+the defaults. The geometry/value mapping is unit-tested in
+`test_joystick.py`; the schema-to-widget contract in `test_formgen.py`.
+
+### The input row: sources dropdown, open volumes, test data
+
+A file argument's row is ONE line, like the original modules. When the
+argument has more than one possible source, the local picker comes wrapped in
+`ServerFileInput` with a leading dropdown; the row is then
+[sources dropdown][path field + browse buttons][test data button].
+
+The dropdown's entries, in order:
+
+1. **"Upload my own file..."**, the default: the local picker is the value.
+2. **The scene's open scalar volumes**, for any argument
+   `formgen.accepts_volume` says yes to (a volume-ish type name, or a
+   published volume extension; a csv input never offers them). `base_widget`
+   feeds the names (`_refreshSceneVolumes`, re-run on `enter()`, on scene
+   node add/remove, and after a scene close) and keeps the name-to-node map;
+   at upload time the chosen node is exported to a temporary `.nii.gz` and
+   sent like any local file. formgen itself never touches the MRML scene.
+3. **The server-hosted names** (`GET /tools/{tool}/data`), unchanged: the
+   name travels as a plain form value, the file itself never moves.
+
+Which kind is selected is decided by index, never by parsing the entry text,
+and rebuilding either list preserves the current selection when it is still
+offered. Picking any dropdown entry clears the path field and vice versa,
+same mutual-exclusion rule as before.
+
+**The test-data button** (`TEST_DATA = {argument: url}` on the module) ports
+the original modules' "Test Files" / "Download Test file" buttons: one click
+downloads the original extension's GitHub release asset to
+`~/Documents/<app>Downloads/<tool>/Test_Files/<name>/` (the original's
+location), unpacks it when it is a real `.zip` (a bare `.nii.gz` is kept
+as-is, where the original's `DownloadUnzip` called `ZipFile` on it and
+raised), and points the row at the result: the single file it holds when
+there is exactly one, the folder otherwise. The transfer runs on a
+`BackgroundJob` with the progress label reporting it; the fetch is staged in
+a sibling directory and renamed at the end, so an interrupted download can
+never leave a half-extracted folder that the idempotence check would mistake
+for a completed one. The HTTP lives in `client.download_file`; formgen only
+builds the button so the row stays one line.
 
 **Where the words come from, and the line between the two.** Everything
 describing a *tool* is the server's: the field label (`label`), the section
@@ -711,19 +813,39 @@ not implemented.
 ## `design.py`
 
 One dict of tokens per theme (`_LIGHT`/`_DARK`: `PRIMARY`, `DANGER`, `SUCCESS`,
-`TEXT`, `TEXT_MUTED`, `BORDER`, `BACKGROUND`, `SURFACE`, `DISABLED_*`) plus a
-spacing scale. `is_dark_mode()` is the **only** place in the extension that
-inspects `slicer.app.palette()` luminance. `tokens()` re-reads it every call,
-so `apply()`/the factories always reflect the current mode — `base_widget`
-calls `design.apply(self.uiWidget)` again in `enter()`, which is when a user
+`TEXT`, `TEXT_MUTED`, `BORDER`, `BACKGROUND`, `SURFACE`, `SURFACE_HOVER`,
+`DISABLED_*`) plus a spacing scale, plus `_BUTTON_STOPS_LIGHT`/`_DARK`, the
+(top, bottom) stops of the vertical button gradient every `.ui` of the
+original SlicerAutomatedDentalTools paints its buttons with, one pair per
+role (`primary`, `danger`, `success`, `secondary`) and state. `is_dark_mode()`
+is the **only** place in the extension that inspects `slicer.app.palette()`
+luminance. `tokens()` re-reads it every call, so `apply()`/the factories
+always reflect the current mode; `base_widget` calls
+`design.apply(self.uiWidget)` again in `enter()`, which is when a user
 switching Slicer's theme and reopening the module will see it recompute.
 (A live in-place recompute while the module is already open and visible is
 not wired up — see "Known limitations".)
 
-Factories: `primary_button(text)`, `danger_button(text)`, `section_title(text)`,
-`required_label(text)`, `status_badge()` / `update_status_badge(label, ok)`.
-Changing the primary color across the whole extension is a one-line edit to
-`_LIGHT["PRIMARY"]` / `_DARK["PRIMARY"]`.
+The base stylesheet (`apply()`) covers the widget family the original
+styles: collapsible sections, labels, line edits, combo boxes, spin boxes,
+check boxes (18 px indicator, primary fill with an inline-SVG check mark when
+checked, no compiled Qt resource needed), sliders (8 px groove, 16 px round
+handle, which also styles the slider inside a `ctkSliderWidget`), progress
+bars, and **bare `QPushButton`s**: a browse button nobody styled comes out
+looking like the original's Search buttons, and the factories' own
+stylesheets win over the inherited rule where they apply.
+
+Factories: `primary_button(text)`, `danger_button(text)`,
+`success_button(text)` (the original GreedyReg's green Run/Save family),
+`secondary_button(text)` (blue-gray utility), `compact_button(text)` (the
+tight inline variant the one-line input rows use), `toggle_button(text)`
+(checkable, blue → red while checked; flat on purpose, the two-state color
+is the information), `section_title(text)`, `required_label(text)`,
+`hint_label(text)`, `link_button(text)`, `warning_label(text)`,
+`status_badge()` / `update_status_badge(label, ok)`, `progress_label()`.
+The joystick pad's paint colors live here too (`pad_palette()`, `PAD_SIZE`),
+so theme detection and color choices stay in this one file. Changing the
+primary color across the whole extension is still an edit to this file alone.
 
 ## `worker.py`
 

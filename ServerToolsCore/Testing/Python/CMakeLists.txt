@@ -20,3 +20,11 @@ add_test(
   COMMAND ${Python3_EXECUTABLE} -m unittest test_formgen
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
+
+# test_joystick.py: the 2D pad's value/geometry logic under the same stubs.
+# Painting aside, the pad is plain arithmetic.
+add_test(
+  NAME ServerToolsCore_test_joystick
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_joystick
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )

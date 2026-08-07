@@ -38,15 +38,15 @@ _SERVER_MESSAGE_MAX_LEN = 500
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 
 
-def _download_message(received: int, expected: Optional[int]) -> str:
+def _download_message(received: int, expected: Optional[int], label: str = "results") -> str:
     """"Downloading results... 8.2 / 14.1 MB (58%)", or without the total when
     the server sent no usable Content-Length."""
     received_mb = received / (1024 * 1024)
     if not expected:
-        return f"Downloading results... {received_mb:.1f} MB"
+        return f"Downloading {label}... {received_mb:.1f} MB"
     expected_mb = expected / (1024 * 1024)
     percent = min(100, round(100 * received / expected))
-    return f"Downloading results... {received_mb:.1f} / {expected_mb:.1f} MB ({percent}%)"
+    return f"Downloading {label}... {received_mb:.1f} / {expected_mb:.1f} MB ({percent}%)"
 
 
 def is_file_type(type_name: str) -> bool:
@@ -564,7 +564,9 @@ class ToolServerClient:
         for key, value in args.items():
             if isinstance(value, bool):
                 stringified[key] = "true" if value else "false"
-            elif isinstance(value, dict):
+            elif isinstance(value, (dict, list, tuple)):
+                # dict: the multichoice state above. list/tuple: a "vec2"
+                # argument's [x, y] pair (formgen.JoystickInput).
                 stringified[key] = json.dumps(value)
             else:
                 stringified[key] = str(value)
@@ -602,3 +604,31 @@ class ToolServerClient:
                     raise ServerToolError(f"Missing required file argument '{name}' for tool '{tool_name}'.")
             elif spec.get("required") and name not in args:
                 raise ServerToolError(f"Missing required argument '{name}' for tool '{tool_name}'.")
+
+def download_file(url: str, destination: str, progress_cb: Optional[Callable] = None,
+                  timeout: int = 600) -> str:
+    """Stream the file at `url` (a GitHub release asset holding the original
+    extension's test data) to `destination`, reporting progress.
+
+    Module-level rather than a ToolServerClient method on purpose: the URL is
+    not the tool server and no token travels with the request. It lives in
+    this file because client.py is the one module allowed to speak HTTP
+    (ARCHITECTURE.md dependency rule); base_widget runs it on a BackgroundJob
+    and owns what happens to the payload afterwards.
+    """
+    logger.info("Downloading %s -> %s", url, destination)
+    label = os.path.basename(destination)
+    with requests.get(url, stream=True, timeout=timeout) as response:
+        response.raise_for_status()
+        try:
+            expected = int(response.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            expected = 0
+        received = 0
+        with open(destination, "wb") as out_file:
+            for chunk in response.iter_content(chunk_size=_DOWNLOAD_CHUNK_BYTES):
+                out_file.write(chunk)
+                received += len(chunk)
+                if progress_cb:
+                    progress_cb(_download_message(received, expected, label))
+    return destination
