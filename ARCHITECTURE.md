@@ -39,6 +39,13 @@ SlicerAutomatedDentalTools/
 ├── ServerToolsSettings/                    # visible module: edit server URL/API key/TLS/timeout
 │   ├── CMakeLists.txt
 │   └── ServerToolsSettings.py
+├── SlicerCloud/                            # visible module: deploy & maintain the server itself
+│   ├── CMakeLists.txt
+│   ├── SlicerCloud.py                      # the panel (install / update / stop, tool-data picker)
+│   ├── Testing/Python/test_deploy.py       # plain unittest, real subprocesses, no Slicer needed
+│   └── SlicerCloudLib/
+│       ├── __init__.py
+│       └── deploy.py                       # clone + drive scripts/server_ctl.py. No slicer, no qt.
 ├── SurgMovPred/
 │   ├── CMakeLists.txt
 │   └── SurgMovPred.py                      # ~35 lines, declarative
@@ -90,8 +97,8 @@ since `client.py` has no Slicer dependency to avoid).
 
 ## Tests
 
-Two plain-unittest suites, both registered as ctests and both runnable with
-`python3 -m unittest` from `ServerToolsCore/Testing/Python/` — no Slicer
+Three plain-unittest suites, all registered as ctests and all runnable with
+`python3 -m unittest` from their own `Testing/Python/` folder — no Slicer
 interpreter launch:
 
 - **`test_client.py`** — `requests` mocked. HTTP behavior, local schema
@@ -105,6 +112,13 @@ interpreter launch:
   schema-to-widget logic, which is where the tool contract actually lives.
   It runs against `EXAMPLE_TOOL_SCHEMA`, the server's real `GET /tools` entry
   for `example_tool` copied verbatim.
+- **`SlicerCloud/Testing/Python/test_deploy.py`** — nothing mocked at all.
+  A stand-in `scripts/server_ctl.py` is written to a temp directory and really
+  executed, because the two things worth testing there are the pipe protocol
+  (one JSON result on stdout *while* a live log streams on stderr) and the
+  deadlock a naive two-pipe read walks into — neither of which a mocked
+  `Popen` can exhibit. One test writes 20 000 stderr lines specifically to
+  push past the pipe buffer.
 
 ## How the pieces fit together
 
@@ -820,6 +834,178 @@ only runs once, in `setup()`. If the new server has a different schema for the
 same tool name, the user needs to close and reopen the module (or use
 Developer mode's "Reload") to see the new fields.
 
+## `SlicerCloud` — deploying the server, not calling it
+
+Every other module here is a thin GUI over a tool the server exposes.
+`SlicerCloud` is the GUI over the **server itself**: clone it, check Docker,
+start it, notice when it has fallen behind its remote and relaunch it, and
+choose which tools' model bundles land on disk.
+
+It exists because the answer to "how do I get a server?" was a page of
+terminal instructions, and the tools are useless without one. Plug and play
+means the first thing a clinician opens is this panel, and the last thing they
+type is nothing.
+
+### The logic lives server-side, on purpose
+
+`SlicerCloudLib/deploy.py` is deliberately thin. Everything it does beyond the
+bootstrap is a call to **`scripts/server_ctl.py` in the server repository**,
+which it clones first. Two consequences, both wanted:
+
+- the panel and a terminal do *exactly* the same thing, so a deployment bug
+  cannot be fixed in one and left in the other;
+- a fix to the deployment logic ships with the **server**, not with a new
+  extension release — which matters when the thing being fixed is what stands
+  the server up.
+
+The only parts that cannot be delegated are the ones that run before the clone
+exists: `probe_host()` (is git/docker/compose there at all) and `clone()`.
+Nothing else is implemented client-side.
+
+### The pipe protocol
+
+`server_ctl.py --json` prints **one JSON object on stdout and narrates on
+stderr**. That split is what lets a single call both stream a live log into
+the panel *and* return a parsed result — a `docker compose up` on a fresh
+host is fifteen minutes of layer pulls, and a panel showing nothing during
+them reads as frozen and gets cancelled just before it would have worked.
+
+`_spawn` therefore drains stderr on **its own thread** while the calling
+thread reads stdout. Reading one pipe and then the other deadlocks as soon as
+the writer fills the one nobody is reading, which is precisely what that
+fifteen minutes of output does.
+
+`cancel()` reaches the `Popen` and terminates it. `BackgroundJob.cancel()`
+alone would only stop *listening* — and the thing being cancelled here is
+often a 12 GB download that would keep coming down the wire.
+
+### Dependency rule, again
+
+`deploy.py` imports neither `slicer` nor `qt` — subprocess and the standard
+library only, the same rule `client.py` follows and for the same reason: it is
+unit-tested under plain `python3 -m unittest`. `SlicerCloud.py` is the panel
+and may import whatever it likes.
+
+It also may not `pip install` anything, ever, so `server_ctl.py` is standard
+library only on its side too. `find_python()` picks the interpreter to run it
+with, and checks `sys.executable` **last** and only when it looks like a
+Python binary: inside Slicer that value can be the Slicer application, and
+handing it to `subprocess` launches a second Slicer rather than running a
+script — with no error message that says so.
+
+### GPU or not, and why the compose file grew a second service
+
+A compose device reservation is all-or-nothing: a service asking for an nvidia
+device cannot start *at all* on a machine that has none, and an override file
+cannot rescue it (compose merges the `devices` list rather than replacing it,
+so `devices: []` leaves the reservation in place — measured). The server repo
+therefore defines two services sharing one YAML anchor, `inference` and
+`inference-cpu`, and `server_ctl.py` picks between them from whether **docker**
+has an `nvidia` runtime — not from whether `nvidia-smi` exists on the host,
+which says nothing about whether the container toolkit is installed.
+
+### Choosing tool data
+
+`server_ctl.py catalog` compares `data-manifest.yml` against what is actually
+on disk and reports, per tool, **what a download would really transfer**. That
+distinction is the whole feature: the manifest is ~29 GB, and "ALI: 12.3 GB"
+shown next to an already-complete ALI is the number that makes someone skip a
+tool they already have.
+
+The download engine skips anything already present, so there is no separate
+"resume" and no separate "add one more tool" — re-running *is* both. The
+panel's selection is persisted in `QSettings`, so coming back to add a tool
+six months later starts from what was ticked last time.
+
+An empty selection is refused rather than treated as "everything", in
+`deploy.download_data`. A stray click on a button labelled "Download selected"
+must not start a 29 GB transfer.
+
+### What it does to the rest of the extension
+
+When the server comes up, the panel saves its URL and generated API key
+through `settings_qt.save_overrides` and `client.configure()` — the same path
+`ServerToolsSettings` uses, so every module immediately points at the new
+server with no restart. It deliberately does **not** touch `verify_tls`: that
+flag is irrelevant to an `http://localhost` URL, and clearing it here would
+silently disable certificate checking for whatever `https://` server the user
+points at next.
+
+### Which branch gets deployed
+
+`DEFAULT_REPO_URL` / `DEFAULT_BRANCH` in `deploy.py` are the compiled-in
+defaults; the panel's Advanced box exposes both, and a saved `QSettings` value
+wins over the constant. **Changing the constant therefore does nothing on a
+machine that has already saved a branch** — that is what the field is for.
+
+The subtle part is the clone, which is created exactly **once**: `clone()`
+returns early when `server_ctl.py` is already there, and `update()` used to
+fast-forward against whatever upstream the checked-out branch tracked. Pointing
+a deployment at another branch after the first install therefore had *no
+effect at all*, silently. So the configured branch travels on **every**
+`status` and `update`: `status` reports a mismatch (the panel's clone row and
+its next-step hint both say so), and `update` checks the clone out onto the
+requested branch before doing anything else — refusing, like the pull does, to
+move a tree with uncommitted changes.
+
+That also forced a reordering in `server_ctl.cmd_update`: the git half now runs
+**before** the docker preflight. Fetching new code needs neither a working
+docker nor a free port, and those are precisely what a user may be updating in
+order to fix — refusing to switch branch because port 8000 is busy is the tool
+getting in its own way.
+
+### Lifecycle: the container outlives Slicer unless told otherwise
+
+`docker compose up -d` is detached, so nothing about the container is tied to
+the Slicer process. Verified by `kill -9`-ing the parent: the container stays
+up. Leaving the module does nothing (there is deliberately no `exit()`
+override), and `cleanup()` — teardown only — cancels the running *subprocess*,
+never the container. A reboot brings it back (`restart: unless-stopped`).
+
+**"Stop the server when Slicer closes" (on by default)** is the answer to the
+obvious objection: a clinician should not be left with a background process
+they did not ask for. Idle it costs ~220 MB of RAM and no CPU or GPU (measured
+— the tools' heavy imports are lazy, so torch is not even loaded), but after a
+run the process keeps the loaded models resident until it restarts.
+
+Three things make it work:
+
+- **`stop`, never `down`.** The container is kept, so its writable layer keeps
+  the `pip install --user` its command performed. A later start is ~7 s
+  (measured) instead of the several minutes a fresh install takes. Removing
+  the container is what would make dependencies reinstall.
+- **Detached (`stop_detached`), not awaited.** A real `docker compose stop` on
+  this image measures **10.5 s**: uvicorn runs with `--reload` and does not act
+  on SIGTERM, so compose waits out the whole grace period and then SIGKILLs.
+  Every one of those seconds would be Slicer refusing to close. Detaching
+  takes the quit hook to **0.05 s**. Nothing is reported back, which is the
+  honest shape of the operation — by the time it finishes there is no window
+  to report into, and the failure mode is the container staying up, which is
+  where we already were.
+- **Hooked from the module class, not the widget.** `SlicerCloud.__init__`
+  runs at Slicer startup for every discovered module and connects
+  `aboutToQuit`. A widget only exists once someone has *opened* the panel, so
+  a server started last Monday and never revisited — precisely the case this
+  setting is for — would otherwise never be stopped.
+
+The handler swallows everything: an exception raised in an `aboutToQuit`
+handler is a crash on exit, for a background convenience.
+
+Turn it off when the machine serves other people; closing Slicer would stop
+their server too. That caveat is in the checkbox's tooltip, not only here.
+
+### Installing Docker
+
+Offered only where it can actually be delivered: Linux with a graphical
+`pkexec`. What runs as root is `scripts/install-docker.sh` **from the clone**
+— a file the user already has on disk and can read — not a curl-pipe-to-root
+started by a button. Everywhere else the panel prints the exact command, or
+the Docker Desktop link.
+
+The one thing that has to be shouted rather than logged: adding a user to the
+`docker` group only takes effect in a **new login session**, so a successful
+install is followed by "log out and back in", not by a working server.
+
 ## `SurgMovPred`
 
 ```python
@@ -1111,6 +1297,27 @@ This confirms the four success criteria from the brief:
   one does not repaint it until the user leaves and re-enters the module (or
   reopens Slicer). `design.tokens()` itself always reflects the current mode;
   only the "when do we re-apply the stylesheet" question is coarse.
+- **`SlicerCloud` deploys over plain HTTP, on loopback only**: the generated
+  deployment publishes port 8000 on `127.0.0.1` and the panel configures
+  `http://localhost:8000`. TLS on a self-signed loopback certificate buys
+  nothing a Slicer user would verify, and would make the plug-and-play path
+  fail on a certificate warning. The constraint that makes it acceptable is
+  the bind address, which `server_ctl.py` writes into `.env` — the moment that
+  server is published on a network address it is medical images in the clear,
+  and it needs a TLS terminator in front. `server/SECURITY.md` says so; this
+  is the client-side half of the same statement.
+- **The panel cannot deploy to a *remote* host**: it drives a clone on the
+  machine Slicer runs on. Standing a server up on the lab GPU box is the same
+  `scripts/setup-server.sh` over ssh, and then this panel is only used for its
+  "point every module at a server" half — which is what `ServerToolsSettings`
+  already does. Remote deployment would mean shipping ssh credentials handling
+  into a Slicer module, which is a different project.
+- **A cancelled model download loses only the file in flight**: the download
+  engine stages each item in a temp folder beside its destination and moves it
+  into place only once complete, so an interrupted run never leaves a
+  truncated model that the next run would report as "already present". The
+  partial bytes of the one file being transferred are discarded, and re-running
+  restarts that file from zero — there is no byte-range resume.
 - **`SurgMovPred_CLI` is orphaned, not deleted**: kept in the repo per the
   brief, no longer wired into the CMake build or called by the widget. It is
   the reference implementation for the server-side tool wrapper.

@@ -74,6 +74,23 @@ what testing against the real dev server surfaced. Each is explained in
   remains the compiled-in defaults; `QSettings` is the optional user override
   on top. See ARCHITECTURE.md, "Runtime configuration".
 
+- **Added beyond the original brief: the extension can now produce its own
+  server.** The brief assumed a server exists and the client points at it; in
+  practice the answer to "how do I get one?" was a page of terminal
+  instructions, and every module here is useless without one. `SlicerCloud`
+  is a visible module that clones the server repository, checks Docker (and
+  installs it where that can honestly be offered), starts the container,
+  reports when the clone has fallen behind its remote and relaunches it, and
+  lets a user pick **which tools' model bundles** are downloaded — the full
+  manifest is ~29 GB and nobody uses all of it, and anything already on disk
+  is skipped so coming back to add one tool costs only that tool. When the
+  server comes up it saves its URL and generated API key through the same
+  `settings_qt` path `ServerToolsSettings` uses, so every module points at it
+  with no restart. The deployment logic itself deliberately lives in the
+  server repository (`scripts/server_ctl.py`), driven over a JSON-on-stdout /
+  log-on-stderr protocol; `SlicerCloudLib/deploy.py` only bootstraps and
+  drives it. See ARCHITECTURE.md, "SlicerCloud".
+
 Local/dev server endpoints, tokens, and any other non-public details used
 while testing are kept out of this file — see `claude.secret.md` (gitignored,
 not committed) if you need them.
