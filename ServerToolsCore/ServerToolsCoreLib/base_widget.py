@@ -172,6 +172,15 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def enter(self) -> None:
         if self.uiWidget:
             design.apply(self.uiWidget)
+        # The hosted-file lists are re-read here, not only at setup(). They are
+        # server-side state that changes independently of the schema — a model
+        # dropped into DATA/<tool>/models/ does not touch /tools — so nothing
+        # in the schema-rebuild path (which only fires when the schema fetch
+        # FAILED) can ever notice one. Without this, a bundle added while
+        # Slicer is open is invisible until Slicer is restarted, with no
+        # affordance on the panel saying so: the user sees a dropdown that is
+        # simply missing the entry they were told to pick.
+        self._refreshServerSelectables()
         self._refreshServerStatus()
 
     def exit(self) -> None:
@@ -470,6 +479,85 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             widget.setToolTip(description)
         return widget
 
+    def _serverSelectableArguments(self) -> dict:
+        """`{argument name: "model" | "testfile"}` for every dropdown fed by
+        GET /tools/{tool}/data.
+
+        Two widget kinds, one mechanism: a SCALAR server_selectable argument
+        (a model, which must never leave the server) is a plain combo box in
+        `_argWidgets`; a FILE-typed one is an input row that also offers the
+        hosted names, in `_inputWidgets`. Both are filled from the same call.
+        """
+        arguments = (self._schema or {}).get("arguments", {})
+        return {
+            name: spec["server_selectable"]
+            for name, spec in arguments.items()
+            if spec.get("server_selectable")
+            and (name in self._argWidgets or name in self._inputWidgets)
+        }
+
+    def _fillServerSelectable(self, arg_name: str, kind: str, data: dict) -> list:
+        """Put the hosted names into one dropdown and return them.
+
+        **The current selection survives if the server still offers it.** This
+        is refilled on every `enter()`, so without it, switching away from the
+        module and back would silently reset a chosen model to the first entry
+        in the list — the kind of change a user does not look for, and which
+        would then run the tool against weights they never picked.
+        """
+        choices = list(data.get("models" if kind == "model" else "testfiles", []))
+        fileInput = self._inputWidgets.get(arg_name)
+
+        if fileInput is not None:
+            # A file input needs no "(automatic)" entry: it already leads with
+            # UPLOAD_OPTION, so it can express "nothing chosen here".
+            previous = fileInput.server_name()
+            fileInput.setChoices(choices)
+            # +1: setChoices keeps ServerFileInput.UPLOAD_OPTION at index 0.
+            if previous in choices:
+                fileInput.combo.setCurrentIndex(choices.index(previous) + 1)
+            return choices
+
+        spec = (self._schema or {}).get("arguments", {}).get(arg_name, {})
+        entries = list(choices)
+        if not spec.get("required"):
+            entries.insert(0, formgen.AUTOMATIC_OPTION)
+
+        widget = self._argWidgets[arg_name]
+        previous = widget.currentText
+        widget.clear()
+        widget.addItems(entries)
+        if previous in entries:
+            widget.setCurrentIndex(entries.index(previous))
+        return choices
+
+    def _refreshServerSelectables(self) -> None:
+        """Re-read the hosted-file lists and update the dropdowns in place.
+
+        Called from `enter()`. Deliberately quieter than the build-time pass:
+        it adds no warning label (there is no root layout to attach one to
+        outside a build, and a banner appended on every visit to the module
+        would accumulate), and a failure leaves the dropdowns exactly as they
+        were — the panel is already usable, so a server that has gone away
+        between two visits must not empty a working list.
+        """
+        selectable = self._serverSelectableArguments()
+        if not selectable:
+            return
+        try:
+            data = self.client.list_tool_data(self.TOOL_NAME)
+        except ServerToolError as exc:
+            logger.warning(
+                "Could not refresh server-side data for '%s': %s", self.TOOL_NAME, exc
+            )
+            return
+
+        for arg_name, kind in selectable.items():
+            self._fillServerSelectable(arg_name, kind, data)
+        # The refill can add the very entry that makes a required argument
+        # satisfiable, or remove the one that was satisfying it.
+        self._checkCanApply()
+
     def _populateServerSelectables(self, rootLayout) -> None:
         """Fill every server_selectable dropdown (see formgen._make_widget)
         with the file names hosted on the server for this tool, from
@@ -481,17 +569,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         capped at the same short timeout. A failure (or an empty list) shows a
         visible warning instead of leaving a silently empty dropdown.
         """
-        arguments = self._schema.get("arguments", {})
-        # Two widget kinds, one mechanism: a SCALAR server_selectable argument
-        # (a model, which must never leave the server) is a plain combo box in
-        # _argWidgets; a FILE-typed one is an input row that also offers the
-        # hosted names, in _inputWidgets. Both are filled from the same call.
-        selectable = {
-            name: spec["server_selectable"]
-            for name, spec in arguments.items()
-            if spec.get("server_selectable")
-            and (name in self._argWidgets or name in self._inputWidgets)
-        }
+        selectable = self._serverSelectableArguments()
         if not selectable:
             return
 
@@ -509,14 +587,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
 
         for arg_name, kind in selectable.items():
-            choices = data.get("models" if kind == "model" else "testfiles", [])
+            choices = self._fillServerSelectable(arg_name, kind, data)
             fileInput = self._inputWidgets.get(arg_name)
-            if fileInput is not None:
-                fileInput.setChoices(choices)
-            else:
-                widget = self._argWidgets[arg_name]
-                widget.clear()
-                widget.addItems(choices)
             logger.info("Populated '%s.%s' with %d server-side %s(s)",
                         self.TOOL_NAME, arg_name, len(choices), kind)
             # An empty list only blocks the user when there is no other way to

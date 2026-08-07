@@ -57,6 +57,22 @@ SELECT_ALL_LABEL = "All"
 SELECT_NONE_LABEL = "None"
 SELECT_DEFAULT_LABEL = "Default"
 
+# Leads the dropdown of an OPTIONAL scalar `server_selectable` argument, and
+# reads back as "" so collectArgs drops the argument entirely and the server
+# applies its own rule.
+#
+# It exists because a QComboBox cannot be empty: `addItems` selects index 0 the
+# moment the list arrives, so an optional argument whose schema says "leave
+# empty and the server decides" (ALI's `model`, ASO's `landmark_models`) had no
+# way to be left empty — the first hosted name was submitted by a user who
+# never chose it. For ASO that list is DATA/ASO/models/, which holds reference
+# bundles next to weight bundles, so the silent default was routinely a
+# reference and the run died on "No CBCT landmark weights found in ...".
+#
+# Only for OPTIONAL arguments: a required one has no server-side fallback to
+# defer to, so offering the entry would only produce a 422.
+AUTOMATIC_OPTION = "(automatic — the server chooses)"
+
 # The two browse buttons of an argument accepting a file or a folder. Which of
 # the two the user ends up giving is read back from the path, not from these.
 BROWSE_FILE_LABEL = "File..."
@@ -846,7 +862,14 @@ def _read_widget(widget):
         # The selected option's name for a "choice" argument, sent in clear.
         # "" while a server-side list hasn't been loaded (or is empty) — which
         # keeps all_required_filled() False and the Apply button disabled.
-        return widget.currentText
+        #
+        # The "(automatic)" entry reads back as "" so the argument is dropped
+        # rather than sent: matched on the text because that is what the entry
+        # IS here, and no server-side file name nor `choices` option can
+        # collide with it (both come from the server; one is a file name, the
+        # other a declared option, and this string is neither).
+        text = widget.currentText
+        return "" if text == AUTOMATIC_OPTION else text
     if isinstance(widget, (qt.QSpinBox, qt.QDoubleSpinBox)):
         return widget.value
     if isinstance(widget, ctk.ctkPathLineEdit):

@@ -21,6 +21,7 @@ Usage:
     python3 -m unittest ASO/Testing/Python/test_aso_client.py
 """
 
+import copy
 import os
 import shutil
 import sys
@@ -601,14 +602,195 @@ class HiddenArgumentsAreNotSentTest(unittest.TestCase):
 class _FakeClient:
     """Answers the two calls _buildAutoUI makes, with no HTTP and no server."""
 
-    def __init__(self, schema):
+    def __init__(self, schema, models=None):
         self._schema = schema
+        # Mutable, and read on every call: that is what lets a test add a
+        # bundle the way dropping one into DATA/<tool>/models/ does, between
+        # two calls and without rebuilding anything.
+        self.models = (
+            ["Frankfurt_Horizontal_Midsagittal_Plane.zip"] if models is None else list(models)
+        )
+        self.data_error = None
 
     def get_tool_schema(self, _name, force_refresh=False):
         return self._schema
 
     def list_tool_data(self, _name):
-        return {"models": ["Frankfurt_Horizontal_Midsagittal_Plane.zip"], "testfiles": []}
+        if self.data_error is not None:
+            raise self.data_error
+        return {"models": list(self.models), "testfiles": []}
+
+
+def _build_panel(client):
+    """A real panel built through ServerToolWidgetBase._buildAutoUI.
+
+    The parts of __init__ that _buildAutoUI touches are constructed by hand
+    rather than through __init__, which reaches for get_client() and a live
+    Slicer scene.
+    """
+    panel = ServerToolWidgetBase.__new__(ASOWidget)
+    panel.client = client
+    panel._argWidgets = {}
+    panel._inputWidgets = {}
+    panel._inputModes = {}
+    panel._sectionBoxes = {}
+    panel._sectionLayouts = {}
+    panel._rows = {}
+    panel._rowSections = {}
+    panel._sectionsWithOwnRows = set()
+    panel._hiddenArgs = set()
+    panel._schema = None
+    panel._schemaError = None
+    panel._outputFolderWidget = None
+    panel.applyButton = None
+    panel._loadResultsCheckBox = None
+
+    panel._buildAutoUI(qt.QVBoxLayout())
+    return panel
+
+
+class ServerSelectablesRefreshTest(unittest.TestCase):
+    """A bundle added to the server while Slicer is open must reach the
+    dropdowns without restarting Slicer.
+
+    The panel is built once and the hosted-file lists were read once with it.
+    But they are server-side state that changes independently of the schema --
+    dropping a folder into DATA/<tool>/models/ does not touch GET /tools -- so
+    the only rebuild path there was (a health check going green, and only while
+    the SCHEMA fetch had failed) could never notice one.
+
+    Found the hard way: DATA/ASO/models/ gained CBCT_landmark_models, and every
+    open Slicer went on offering the single reference bundle it had listed at
+    setup(). Fully-Automated CBCT was unselectable, with nothing on the panel
+    saying why -- the argument it needs is `required=False`, so not even the
+    Apply button could object.
+    """
+
+    def setUp(self):
+        self.client = _FakeClient(ASO_SCHEMA)
+        self.panel = _build_panel(self.client)
+
+    def _referenceItems(self):
+        return list(self.panel._inputWidgets["reference"].combo._items)
+
+    def _landmarkModelItems(self):
+        return list(self.panel._argWidgets["landmark_models"]._items)
+
+    def test_a_model_added_after_the_panel_was_built_appears(self):
+        self.assertNotIn("CBCT_landmark_models", self._landmarkModelItems())
+
+        self.client.models.append("CBCT_landmark_models")
+        self.panel._refreshServerSelectables()
+
+        # Both widget kinds are fed by the same call: `landmark_models` is a
+        # scalar dropdown, `reference` a file input that also offers the
+        # hosted names.
+        self.assertIn("CBCT_landmark_models", self._landmarkModelItems())
+        self.assertIn("CBCT_landmark_models", self._referenceItems())
+
+    def test_the_upload_entry_stays_first_on_a_file_input(self):
+        """Refilling must not cost `reference` its "upload my own" entry, which
+        is the only way to send a bundle the server does not host."""
+        self.client.models.append("CBCT_landmark_models")
+        self.panel._refreshServerSelectables()
+        self.assertEqual(
+            self._referenceItems()[0], formgen.ServerFileInput.UPLOAD_OPTION
+        )
+
+    def test_a_chosen_model_survives_the_refresh(self):
+        """The refresh runs on every enter(), so a selection that reset itself
+        each time the user switched away and back would run the tool against
+        weights they never picked -- silently, since the panel would look the
+        same as any freshly opened one."""
+        self.client.models.append("CBCT_landmark_models")
+        self.panel._refreshServerSelectables()
+
+        combo = self.panel._argWidgets["landmark_models"]
+        combo.setCurrentIndex(self._landmarkModelItems().index("CBCT_landmark_models"))
+
+        self.client.models.append("Something_Else")
+        self.panel._refreshServerSelectables()
+
+        self.assertEqual(combo.currentText, "CBCT_landmark_models")
+
+    def test_a_chosen_reference_survives_the_refresh(self):
+        reference = self.panel._inputWidgets["reference"]
+        reference.combo.setCurrentIndex(
+            self._referenceItems().index("Frankfurt_Horizontal_Midsagittal_Plane.zip")
+        )
+
+        self.client.models.append("CBCT_landmark_models")
+        self.panel._refreshServerSelectables()
+
+        self.assertEqual(
+            reference.server_name(), "Frankfurt_Horizontal_Midsagittal_Plane.zip"
+        )
+
+    def _setMode(self, modality, automation):
+        for arg, value in (("modality", modality), ("automation", automation)):
+            widget = self.panel._argWidgets[arg]
+            widget.setCurrentIndex(list(ASO_SCHEMA["arguments"][arg]["choices"]).index(value))
+
+    def test_an_optional_model_dropdown_leads_with_the_automatic_entry(self):
+        """`landmark_models` is optional and the server picks the bundle when
+        it is absent — but a combo box selects its first item as soon as it is
+        filled, so without this entry the panel always named SOMETHING. The
+        list it is filled from holds ASO's reference bundles too, so that
+        something was routinely a reference: 'No CBCT landmark weights found in
+        CBCT_Gold_Frankfurt_Horizontal_Midsagittal_Plane'."""
+        combo = self.panel._argWidgets["landmark_models"]
+        self.assertEqual(combo._items[0], formgen.AUTOMATIC_OPTION)
+        self.assertEqual(combo.currentText, formgen.AUTOMATIC_OPTION)
+
+    def test_the_automatic_entry_reads_back_as_nothing(self):
+        combo = self.panel._argWidgets["landmark_models"]
+        self.assertEqual(formgen.collect({"landmark_models": combo})["landmark_models"], "")
+
+    def test_the_automatic_entry_keeps_the_argument_out_of_the_request(self):
+        """Reading as "" is only half of it: collectArgs must then DROP the
+        optional argument, because the server takes a present "" literally and
+        an absent one as "apply your own rule"."""
+        self._setMode("CBCT", "Fully-Automated")
+        self.assertNotIn("landmark_models", self.panel._hiddenArgs)  # the row IS shown
+
+        sent = ServerToolWidgetBase.collectArgs(self.panel)
+        self.assertNotIn("landmark_models", sent)
+
+    def test_naming_a_bundle_still_sends_it(self):
+        """The automatic entry is a default, not a lock."""
+        self._setMode("CBCT", "Fully-Automated")
+        self.client.models.append("CBCT_landmark_models")
+        self.panel._refreshServerSelectables()
+
+        combo = self.panel._argWidgets["landmark_models"]
+        combo.setCurrentIndex(combo._items.index("CBCT_landmark_models"))
+
+        sent = ServerToolWidgetBase.collectArgs(self.panel)
+        self.assertEqual(sent["landmark_models"], "CBCT_landmark_models")
+
+    def test_a_required_dropdown_gets_no_automatic_entry(self):
+        """There is nothing for the server to fall back to, so the entry would
+        only buy a 422."""
+        required = copy.deepcopy(ASO_SCHEMA)
+        required["arguments"]["landmark_models"]["required"] = True
+        self.panel._schema = required
+
+        self.panel._refreshServerSelectables()
+
+        self.assertNotIn(
+            formgen.AUTOMATIC_OPTION, self.panel._argWidgets["landmark_models"]._items
+        )
+
+    def test_a_server_that_went_away_leaves_the_dropdowns_alone(self):
+        """A failure between two visits must not empty a list that works. The
+        panel is already usable; blanking it would take away the user's
+        selection to tell them something the status badge already says."""
+        before = self._landmarkModelItems()
+        self.client.data_error = client_module.ServerToolError("connection refused")
+
+        self.panel._refreshServerSelectables()
+
+        self.assertEqual(self._landmarkModelItems(), before)
 
 
 class BuiltPanelTest(unittest.TestCase):
@@ -620,27 +802,7 @@ class BuiltPanelTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self.panel = ServerToolWidgetBase.__new__(ASOWidget)
-        # The parts of __init__ _buildAutoUI touches. Constructed by hand
-        # rather than through __init__, which reaches for get_client() and a
-        # live Slicer scene.
-        self.panel.client = _FakeClient(ASO_SCHEMA)
-        self.panel._argWidgets = {}
-        self.panel._inputWidgets = {}
-        self.panel._inputModes = {}
-        self.panel._sectionBoxes = {}
-        self.panel._sectionLayouts = {}
-        self.panel._rows = {}
-        self.panel._rowSections = {}
-        self.panel._sectionsWithOwnRows = set()
-        self.panel._hiddenArgs = set()
-        self.panel._schema = None
-        self.panel._schemaError = None
-        self.panel._outputFolderWidget = None
-        self.panel.applyButton = None
-        self.panel._loadResultsCheckBox = None
-
-        self.panel._buildAutoUI(qt.QVBoxLayout())
+        self.panel = _build_panel(_FakeClient(ASO_SCHEMA))
 
     def _boxes(self):
         return {name: box for name, box in self.panel._sectionBoxes.items()}
