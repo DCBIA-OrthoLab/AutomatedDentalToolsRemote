@@ -22,6 +22,7 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadab
 from ServerToolsCoreLib import design, get_client
 from ServerToolsCoreLib.settings_qt import save_overrides
 from ServerToolsCoreLib.worker import BackgroundJob
+from SlicerCloudLib import deploy
 from SlicerCloudLib.deploy import (
     DEFAULT_BRANCH,
     DEFAULT_INSTALL_DIR,
@@ -62,6 +63,25 @@ _ROW_LABELS = (
     ("container", _("Container")),
     ("health", _("Server")),
 )
+
+
+def useSlicerStartupEnvironment() -> None:
+    """Hand every subprocess the environment Slicer started from.
+
+    Slicer's launcher exports its own PYTHONHOME/PYTHONPATH, so the SYSTEM
+    python3 that runs `server_ctl.py` would start against SLICER's standard
+    library — measured on a fresh install as python3.10 loading Slicer's
+    python3.12 stdlib and dying on "SRE module mismatch" at `import argparse`,
+    with exit code 1 and an empty stdout. Nothing in the panel worked.
+
+    Called from the module class, so it is in force before the panel — or the
+    quit hook — can spawn anything.
+    """
+    try:
+        deploy.set_subprocess_env(slicer.util.startupEnvironment())
+    except Exception:  # noqa: BLE001 - inheriting is better than not loading
+        logger.exception("Could not read Slicer's startup environment; "
+                         "subprocesses will inherit Slicer's own instead")
 
 
 def _qt_get(obj, name):
@@ -144,6 +164,10 @@ class SlicerCloud(ScriptedLoadableModule):
         See more information in <a href="https://github.com/DCBIA-OrthoLab/SlicerAutomatedDentalTools">documentation</a>.
         """)
         self.parent.acknowledgementText = ""
+
+        # Both run once, when Slicer discovers this module at startup — before
+        # the panel exists, which is what they are for.
+        useSlicerStartupEnvironment()
 
         # Runs once, when Slicer discovers this module at startup — before the
         # panel has ever been opened, which is the point: the server may have

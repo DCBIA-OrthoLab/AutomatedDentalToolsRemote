@@ -51,6 +51,33 @@ def _emit(progress_cb, message: str) -> None:
         progress_cb(message)
 
 
+# The environment every subprocess here is given. None means "inherit", which
+# is right outside Slicer and WRONG inside it -- see set_subprocess_env().
+_SUBPROCESS_ENV = None
+
+
+def set_subprocess_env(env) -> None:
+    """Use `env` for every process this module spawns. Call it with
+    `slicer.util.startupEnvironment()` before anything else.
+
+    This is not a nicety, it is the difference between working and not. Slicer's
+    launcher exports its own PYTHONHOME/PYTHONPATH, so a subprocess running the
+    SYSTEM python3 starts up against SLICER's standard library. Measured on a
+    fresh install: python3.10 loading /opt/slicer/lib/Python/lib/python3.12/
+    dies with "AssertionError: SRE module mismatch" on `import argparse` --
+    before a single line of server_ctl.py runs, with an empty stdout and exit
+    code 1. LD_LIBRARY_PATH alone is harmless; PYTHONHOME is what kills it.
+
+    `slicer.util.startupEnvironment()` returns the environment as it was before
+    the launcher touched it, which is the same thing Slicer's own
+    `bin/exec-outside-slicer-env.sh` reconstructs for wrapped binaries.
+
+    Passing None restores plain inheritance, which is what the unit tests use.
+    """
+    global _SUBPROCESS_ENV
+    _SUBPROCESS_ENV = dict(env) if env else None
+
+
 def _no_window_kwargs() -> dict:
     """Keep Windows from flashing a console window for every subprocess."""
     if os.name != "nt":
@@ -58,6 +85,15 @@ def _no_window_kwargs() -> dict:
     startupinfo = subprocess.STARTUPINFO()
     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     return {"startupinfo": startupinfo, "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+
+
+def _subprocess_kwargs() -> dict:
+    """Everything every spawn in this module must pass. One place, because a
+    site that forgets the environment fails only inside Slicer."""
+    kwargs = _no_window_kwargs()
+    if _SUBPROCESS_ENV is not None:
+        kwargs["env"] = _SUBPROCESS_ENV
+    return kwargs
 
 
 def find_python() -> str:
@@ -88,7 +124,7 @@ def find_python() -> str:
             completed = subprocess.run(
                 [candidate, "-c", "import sys; print(sys.version_info[0])"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                timeout=30, check=False, **_no_window_kwargs()
+                timeout=30, check=False, **_subprocess_kwargs()
             )
         except (OSError, subprocess.SubprocessError):
             continue
@@ -112,7 +148,7 @@ def probe_host() -> dict:
         try:
             completed = subprocess.run(
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                timeout=30, check=False, **_no_window_kwargs()
+                timeout=30, check=False, **_subprocess_kwargs()
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return None, str(exc)
@@ -225,7 +261,7 @@ class LocalServerDeployment:
         try:
             process = subprocess.Popen(
                 command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, bufsize=1, **_no_window_kwargs()
+                text=True, bufsize=1, **_subprocess_kwargs()
             )
         except OSError as exc:
             raise DeploymentError(f"Could not run {command[0]}: {exc}") from None
@@ -470,7 +506,7 @@ class LocalServerDeployment:
         except DeploymentError:
             return False
 
-        kwargs = dict(_no_window_kwargs())
+        kwargs = dict(_subprocess_kwargs())
         if os.name == "nt":
             # DETACHED_PROCESS: survives the parent, no console window.
             kwargs["creationflags"] = kwargs.get("creationflags", 0) | 0x00000008

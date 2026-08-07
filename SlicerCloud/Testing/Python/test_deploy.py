@@ -309,6 +309,41 @@ class TestStopDetached(TempInstallDir):
         self.assertFalse(self.deployment().stop_detached())
 
 
+class TestSubprocessEnvironment(TempInstallDir):
+    """Slicer's launcher exports PYTHONHOME/PYTHONPATH, so a subprocess running
+    the system python3 starts against SLICER's stdlib and dies on "SRE module
+    mismatch" before any of our code runs. Every spawn must use the
+    launcher-free environment."""
+
+    def tearDown(self):
+        deploy.set_subprocess_env(None)
+        super().tearDown()
+
+    def test_the_configured_environment_reaches_the_subprocess(self):
+        _write_fake_ctl(self.install_dir, (
+            "import os\n"
+            "print(json.dumps({'marker': os.environ.get('SLICERCLOUD_TEST_MARKER'),\n"
+            "                  'pythonhome': os.environ.get('PYTHONHOME')}))\n"
+        ))
+        deploy.set_subprocess_env({"PATH": os.environ.get("PATH", ""),
+                                   "SLICERCLOUD_TEST_MARKER": "clean"})
+        result = self.deployment().run_ctl(["status"])
+        self.assertEqual(result["marker"], "clean")
+        self.assertIsNone(result["pythonhome"], "the polluting variable survived")
+
+    def test_none_restores_plain_inheritance(self):
+        _write_fake_ctl(self.install_dir, (
+            "import os\n"
+            "print(json.dumps({'inherited': os.environ.get('SLICERCLOUD_TEST_MARKER')}))\n"
+        ))
+        os.environ["SLICERCLOUD_TEST_MARKER"] = "inherited"
+        try:
+            deploy.set_subprocess_env(None)
+            self.assertEqual(self.deployment().run_ctl(["status"])["inherited"], "inherited")
+        finally:
+            os.environ.pop("SLICERCLOUD_TEST_MARKER", None)
+
+
 class TestListTools(TempInstallDir):
     """Read from the deployment's own URL, and never raise for a server that is
     simply not there — "unknown" is a state the panel renders, an exception is
