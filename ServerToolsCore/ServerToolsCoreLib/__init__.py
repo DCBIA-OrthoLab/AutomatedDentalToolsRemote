@@ -32,6 +32,9 @@ def get_client() -> ToolServerClient:
             token=config.API_TOKEN,
             verify_tls=config.VERIFY_TLS,
             timeout=config.TIMEOUT,
+            parallelism=config.TRANSFER_PARALLELISM,
+            chunk_bytes=config.TRANSFER_CHUNK_MB * 1024 * 1024,
+            compress_uploads=config.TRANSFER_COMPRESS,
         )
     return _client
 

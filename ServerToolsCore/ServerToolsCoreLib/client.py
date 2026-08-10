@@ -3,6 +3,12 @@
 Imports neither `slicer` nor `qt` — see ARCHITECTURE.md dependency rule. This
 makes it testable in plain CI with `requests` mocked out (see
 ServerToolsCore/Testing/Python/test_client.py).
+
+Bulk transfer is the one thing this file delegates: `transfer.py` moves a big
+input up in parallel parts and pulls a big result down in parallel ranges,
+because one file over one connection is throughput-bound by that connection's
+congestion window rather than by the link. Everything about WHICH bytes travel
+and what they mean stays here; that module only moves them.
 """
 
 import json
@@ -16,6 +22,7 @@ from typing import Callable, Optional
 
 import requests
 
+from . import transfer
 from .errors import ServerToolError, error_for_status
 
 logger = logging.getLogger("ServerToolsCore.client")
@@ -36,6 +43,24 @@ _SERVER_MESSAGE_MAX_LEN = 500
 # structure and per scan). It is streamed to disk in chunks of this size, so
 # the whole body is never held in Slicer's RAM.
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+
+# Header asking the server to hand back a POINTER to the result instead of
+# streaming it down the same connection that carried the run, so it can be
+# pulled in parallel ranges (see transfer.download_ranged). A server that
+# predates it ignores an unknown header and answers exactly as it always did,
+# which is what makes this safe to send unconditionally.
+_RESULT_DELIVERY_HEADER = {"X-Result-Delivery": "reference"}
+
+# Connections the pool keeps alive per host. Must exceed the transfer
+# parallelism, or the parallel parts queue up on each other inside urllib3 and
+# the whole point is lost.
+_CONNECTION_POOL_SIZE = 16
+
+# Form field naming the inputs that already travelled through the upload
+# endpoints, as {argument name: upload id}. Must match the server's own
+# _UPLOADS_FIELD; double-underscored so it can never collide with a tool's
+# argument name.
+_UPLOADS_FIELD = "__uploads__"
 
 
 def _download_message(received: int, expected: Optional[int], label: str = "results") -> str:
@@ -157,6 +182,31 @@ def file_extensions_for(spec: dict) -> tuple:
     return tuple(extensions)
 
 
+def _pooled_session() -> requests.Session:
+    """One Session for every call this client makes, instead of a fresh
+    connection per request.
+
+    Two reasons, and the second is the load-bearing one. A module's setup()
+    alone costs /health + /tools + /tools/{name}/data, each of which paid its
+    own TCP and TLS handshake, several round trips against a remote server,
+    every time a panel is opened. And a chunked transfer needs the pool to hand
+    out as many connections as it has parts in flight; urllib3's default
+    (10 per host, blocking above that) would quietly serialise them.
+    """
+    session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=_CONNECTION_POOL_SIZE,
+        pool_maxsize=_CONNECTION_POOL_SIZE,
+        # Retries stay with the callers: transfer.py resends the one part that
+        # failed and knows what the server is still missing, which urllib3's
+        # blind per-request retry cannot do.
+        max_retries=0,
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
 @dataclass
 class ToolResult:
     """Uniform result regardless of output_kind."""
@@ -167,12 +217,29 @@ class ToolResult:
 
 
 class ToolServerClient:
-    def __init__(self, server_url, token, verify_tls=True, timeout=600):
+    def __init__(
+        self,
+        server_url,
+        token,
+        verify_tls=True,
+        timeout=600,
+        parallelism=transfer.DEFAULT_PARALLELISM,
+        chunk_bytes=transfer.DEFAULT_CHUNK_BYTES,
+        compress_uploads=True,
+    ):
         self._server_url = server_url.rstrip("/")
         self._token = token
         self._verify_tls = verify_tls
         self._timeout = timeout
+        self._parallelism = parallelism
+        self._chunk_bytes = chunk_bytes
+        self._compress_uploads = compress_uploads
         self._tools_cache = None
+        # None until the first big upload tells us; False pins every later one
+        # to the single-request path, so an old server costs one failed probe
+        # per session rather than one per file.
+        self._chunked_uploads = None
+        self._session = _pooled_session()
 
     # ------------------------------------------------------------------
     # Live (re)configuration — e.g. from a user-facing settings panel
@@ -209,6 +276,9 @@ class ToolServerClient:
         if timeout is not None:
             self._timeout = timeout
         self._tools_cache = None
+        # Dropped for the same reason as the schema cache: "this server has no
+        # chunked upload" is a fact about the server that just changed.
+        self._chunked_uploads = None
 
     # ------------------------------------------------------------------
     # Schema discovery
@@ -216,7 +286,7 @@ class ToolServerClient:
 
     def health(self) -> bool:
         try:
-            response = requests.get(
+            response = self._session.get(
                 f"{self._server_url}/health", timeout=_HEALTH_CHECK_TIMEOUT, verify=self._verify_tls
             )
             return bool(response.ok and response.json().get("status") == "ok")
@@ -250,7 +320,7 @@ class ToolServerClient:
         server-side list can change independently of the /tools schema.
         """
         try:
-            response = requests.get(
+            response = self._session.get(
                 f"{self._server_url}/tools/{tool_name}/data",
                 headers={"Authorization": f"Bearer {self._token}"},
                 timeout=_TOOLS_FETCH_TIMEOUT,
@@ -275,7 +345,7 @@ class ToolServerClient:
 
     def _fetch_tools(self) -> dict:
         try:
-            response = requests.get(
+            response = self._session.get(
                 f"{self._server_url}/tools", timeout=_TOOLS_FETCH_TIMEOUT, verify=self._verify_tls
             )
         except requests.RequestException as exc:
@@ -315,21 +385,30 @@ class ToolServerClient:
         schema = self.get_tool_schema(tool_name)
         self._validate_against_schema(schema, args, files)
 
-        if progress_cb:
-            progress_cb(f"Sending '{tool_name}' request...")
-
         headers = {"Authorization": f"Bearer {self._token}"}
         data = self._stringify(args)
+
+        # Anything big enough to be worth it goes up FIRST, in parallel parts,
+        # and this request then only references it. What stays in `files` is
+        # what is small enough that a second and third round trip would cost
+        # more than the single-connection upload does.
+        files, upload_references = self._upload_large_inputs(files, progress_cb)
+        if upload_references:
+            data[_UPLOADS_FIELD] = json.dumps(upload_references)
+
+        if progress_cb:
+            progress_cb(f"Sending '{tool_name}' request...")
 
         # Debug visibility only: argument/file *names*, never the token or the
         # argument/file contents. Silent unless the caller has raised this
         # logger's level (see ARCHITECTURE.md "How to inspect a request").
         logger.debug(
-            "POST %s/run/%s | arg keys=%s | file args=%s",
+            "POST %s/run/%s | arg keys=%s | file args=%s | pre-uploaded=%s",
             self._server_url,
             tool_name,
             sorted(data.keys()),
             {name: os.path.basename(path) for name, path in files.items()},
+            sorted(upload_references),
         )
 
         file_handles = []
@@ -353,9 +432,9 @@ class ToolServerClient:
                 # timeout then applies between chunks, not to the whole
                 # download, so a big-but-flowing response can never time out
                 # merely for being big.
-                response = requests.post(
+                response = self._session.post(
                     f"{self._server_url}/run/{tool_name}",
-                    headers=headers,
+                    headers={**headers, **_RESULT_DELIVERY_HEADER},
                     data=data,
                     files=files_payload or None,
                     timeout=self._timeout,
@@ -380,6 +459,133 @@ class ToolServerClient:
 
         return self._build_result(tool_name, response, schema, output_dir, progress_cb)
 
+    # ------------------------------------------------------------------
+    # Bulk transfer (see transfer.py for why it is not one request)
+    # ------------------------------------------------------------------
+
+    def _upload_large_inputs(self, files: dict, progress_cb) -> tuple:
+        """Split `files` into what still travels inside the /run request and
+        what has already been sent through the upload endpoints.
+
+        Returns `(remaining_files, {argument name: upload id})`. Falls back
+        wholesale the moment a server turns out not to have the endpoints, so
+        this extension keeps working against a deployment that has not been
+        updated, that fallback is the reason the return is a pair rather than
+        an in-place mutation.
+        """
+        if self._chunked_uploads is False:
+            return files, {}
+
+        remaining = dict(files)
+        references = {}
+        for arg_name, path in files.items():
+            if not transfer.should_chunk(path, max(self._chunk_bytes * 2, 1)):
+                continue
+            try:
+                references[arg_name] = transfer.upload_file(
+                    self._session,
+                    self._server_url,
+                    {"Authorization": f"Bearer {self._token}"},
+                    path,
+                    verify_tls=self._verify_tls,
+                    parallelism=self._parallelism,
+                    chunk_bytes=self._chunk_bytes,
+                    compress=self._compress_uploads,
+                    progress_cb=progress_cb,
+                )
+            except transfer.UnsupportedByServer:
+                logger.info(
+                    "%s has no chunked-upload endpoints; falling back to a single request",
+                    self._server_url,
+                )
+                self._chunked_uploads = False
+                # Whatever went up before this file did is still valid and is
+                # still referenced; only the rest reverts to multipart.
+                break
+            self._chunked_uploads = True
+            remaining.pop(arg_name)
+        return remaining, references
+
+    def _download_reference(
+        self,
+        tool_name: str,
+        reference: dict,
+        output_dir: Optional[str],
+        progress_cb: Optional[Callable[[str], None]] = None,
+    ) -> ToolResult:
+        """Fetch a result the server kept for us, over parallel byte ranges."""
+        if not output_dir:
+            raise ServerToolError("An output directory is required to save the returned file.")
+        result_id = reference.get("result_id")
+        if not result_id:
+            raise ServerToolError(f"Malformed result reference from '{tool_name}'.")
+
+        os.makedirs(output_dir, exist_ok=True)
+        # basename, always: the name is the server's to choose, and a path
+        # separator in it would otherwise write outside the output folder.
+        filename = os.path.basename(reference.get("filename") or "") or f"{tool_name}_result.bin"
+        dest_path = os.path.join(output_dir, filename)
+        size = int(reference.get("size") or 0)
+
+        headers = {"Authorization": f"Bearer {self._token}"}
+        url = f"{self._server_url}/results/{result_id}"
+        try:
+            transfer.download_ranged(
+                self._session,
+                url,
+                dest_path,
+                size,
+                headers=headers,
+                verify_tls=self._verify_tls,
+                parallelism=self._parallelism,
+                chunk_bytes=self._chunk_bytes,
+                progress_cb=progress_cb,
+            )
+            self._verify_archive(tool_name, dest_path)
+        finally:
+            # In a `finally`, and this is the point: the server keeps the
+            # result until somebody says it can go, so every way out of this
+            # method has to say it -- a download that failed halfway and a
+            # result archive that failed its integrity check are exactly the
+            # cases where a `return`-only cleanup would leave patient data
+            # sitting on the server until the reaper got to it. Neither is
+            # retryable from here (the reference is single-use), so there is
+            # nothing to keep it for.
+            self._release_result(url, headers, result_id)
+
+        logger.info(
+            "GET %s -> %d byte(s) saved to %s (ranged, %d stream(s))",
+            url, size, dest_path, self._parallelism,
+        )
+        return ToolResult(kind="file", path=dest_path)
+
+    def _release_result(self, url: str, headers: dict, result_id: str) -> None:
+        """Tell the server it can delete the stored result.
+
+        Retried once, because this is the difference between the file going
+        away now and it lingering until the server's idle reaper collects it,
+        and a single dropped packet should not decide that. Still best effort
+        in the end: it must never turn a finished run into a failed one, and
+        the reaper is the guarantee behind it -- this is what makes that
+        guarantee almost never the thing that has to fire.
+        """
+        for attempt in range(2):
+            try:
+                response = self._session.delete(
+                    url, headers=headers, timeout=_TOOLS_FETCH_TIMEOUT, verify=self._verify_tls
+                )
+                if response.ok or response.status_code == 404:
+                    return
+                logger.debug(
+                    "server refused to release result %s: HTTP %d", result_id, response.status_code
+                )
+            except requests.RequestException as exc:
+                logger.debug("could not release result %s (attempt %d): %s", result_id, attempt, exc)
+        logger.warning(
+            "Result %s could not be released; the server will reap it after its idle timeout.",
+            result_id,
+        )
+
     def _build_result(
         self,
         tool_name: str,
@@ -402,6 +608,14 @@ class ToolServerClient:
                     payload = response.json()
                 except ValueError as exc:
                     raise ServerToolError(f"Malformed response from the tool server: {exc}") from exc
+                # A file result the server agreed to hand over by reference
+                # (see _RESULT_DELIVERY_HEADER): the bytes are still on the
+                # server and come down next, in parallel. Anything else is a
+                # "text" tool's answer, exactly as before.
+                if payload.get("result_ref"):
+                    return self._download_reference(
+                        tool_name, payload["result_ref"], output_dir, progress_cb
+                    )
                 return ToolResult(kind="text", text=payload.get("result"))
 
             if not output_dir:
@@ -473,26 +687,36 @@ class ToolServerClient:
                 f"Truncated result from '{tool_name}': received {received} of "
                 f"{expected_bytes} bytes. Nothing was kept; run the tool again."
             )
-        if dest_path.lower().endswith(".zip"):
-            # CRC-check every member: catches corruption that a matching byte
-            # count cannot (and truncation too, when the server never sent a
-            # Content-Length). Reads the archive once from local disk --
-            # seconds, next to an inference measured in minutes.
-            try:
-                with zipfile.ZipFile(dest_path) as archive:
-                    corrupt = archive.testzip()
-            except zipfile.BadZipFile as exc:
-                os.remove(dest_path)
-                raise ServerToolError(
-                    f"The result archive from '{tool_name}' is unreadable "
-                    f"(incomplete transfer?): {exc}. Nothing was kept; run the tool again."
-                ) from exc
-            if corrupt is not None:
-                os.remove(dest_path)
-                raise ServerToolError(
-                    f"The result archive from '{tool_name}' failed its integrity check "
-                    f"at '{corrupt}'. Nothing was kept; run the tool again."
-                )
+        cls._verify_archive(tool_name, dest_path)
+
+    @staticmethod
+    def _verify_archive(tool_name: str, dest_path: str) -> None:
+        """CRC-check every member of a result .zip.
+
+        Catches corruption that a matching byte count cannot (and truncation
+        too, when the server never sent a Content-Length). Reads the archive
+        once from local disk -- seconds, next to an inference measured in
+        minutes -- and it is what stands between a half-transferred archive and
+        the base widget unpacking whatever central directory survived, silently
+        delivering a SUBSET of the results.
+        """
+        if not dest_path.lower().endswith(".zip"):
+            return
+        try:
+            with zipfile.ZipFile(dest_path) as archive:
+                corrupt = archive.testzip()
+        except zipfile.BadZipFile as exc:
+            os.remove(dest_path)
+            raise ServerToolError(
+                f"The result archive from '{tool_name}' is unreadable "
+                f"(incomplete transfer?): {exc}. Nothing was kept; run the tool again."
+            ) from exc
+        if corrupt is not None:
+            os.remove(dest_path)
+            raise ServerToolError(
+                f"The result archive from '{tool_name}' failed its integrity check "
+                f"at '{corrupt}'. Nothing was kept; run the tool again."
+            )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -506,7 +730,11 @@ class ToolServerClient:
         content_disposition = response.headers.get("Content-Disposition", "")
         match = _CONTENT_DISPOSITION_FILENAME_RE.search(content_disposition)
         if match:
-            return match.group(1).strip()
+            # basename: the header is the server's to write, and a path
+            # separator in it would place the result outside output_dir.
+            name = os.path.basename(match.group(1).strip())
+            if name:
+                return name
 
         if schema.get("output_kind") == "segmentation":
             extension = ".nii.gz"
@@ -615,10 +843,29 @@ def download_file(url: str, destination: str, progress_cb: Optional[Callable] = 
     this file because client.py is the one module allowed to speak HTTP
     (ARCHITECTURE.md dependency rule); base_widget runs it on a BackgroundJob
     and owns what happens to the payload afterwards.
+
+    Pulled in parallel ranges when the host supports them, which a GitHub
+    release asset does: these archives run to hundreds of MB and the single
+    stream that used to fetch them was the same congestion-window bottleneck
+    that made uploads slow. Falls back to the plain sequential read for any
+    host that does not advertise `Accept-Ranges`.
     """
     logger.info("Downloading %s -> %s", url, destination)
     label = os.path.basename(destination)
-    with requests.get(url, stream=True, timeout=timeout) as response:
+    session = _pooled_session()
+
+    size = transfer.probe_ranged(session, url)
+    if size and size >= transfer.MIN_CHUNKED_BYTES:
+        return transfer.download_ranged(
+            session,
+            url,
+            destination,
+            size,
+            progress_cb=progress_cb,
+            label=f"Downloading {label}...",
+        )
+
+    with session.get(url, stream=True, timeout=timeout) as response:
         response.raise_for_status()
         try:
             expected = int(response.headers.get("Content-Length") or 0)
