@@ -69,6 +69,12 @@ class AMASSSWidget(ServerToolWidgetBase):
     # button — a single scan or a whole cohort, the folder being zipped before
     # upload. Nothing here names a type, an extension, or a mode.
     FILE_INPUTS = {"input": "auto"}
+    # The original module's "Download test scan" button, ported: the same
+    # MG_test_scan it pointed the browser at, now downloaded in place and
+    # set as the input.
+    TEST_DATA = {
+        "input": "https://github.com/Maxlo24/AMASSS_CBCT/releases/download/v1.0.1/MG_test_scan.nii.gz"
+    }
     # output_kind "files": one <scan>_<ID>_SegOut/ folder per scan plus
     # AMASSS_report.json, bundled into one .zip and unpacked into the output
     # folder the user picks. The model is picked server-side, hence no

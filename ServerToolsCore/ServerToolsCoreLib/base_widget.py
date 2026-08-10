@@ -10,6 +10,7 @@ See ARCHITECTURE.md, "How to add a new module in 5 minutes".
 
 import logging
 import os
+import shutil
 import time
 
 import ctk
@@ -20,6 +21,7 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModuleWidget
 from slicer.util import VTKObservationMixin
 
 from . import design, formgen, is_file_type, slicer_io
+from .client import download_file
 from .errors import ServerToolError
 from .worker import BackgroundJob
 
@@ -57,6 +59,14 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # is ambiguous: output_kind "file" says a file comes back, not whether to
     # load it into the scene ("volume"/"model") or save it ("save_as").
     RESULT_KIND = None
+    # {schema argument name: URL} of the original extension's test data, a
+    # GitHub release asset. Declaring one puts a "Test data" button at the end
+    # of that argument's input row; the payload lands in
+    # ~/Documents/<app>Downloads/<tool>/Test_Files (where the original modules
+    # downloaded) and the row is pointed at it. This complements the
+    # server-hosted dropdown (server_selectable): that one never travels,
+    # this one is for data the user wants ON THEIR OWN DISK.
+    TEST_DATA = {}
     AUTO_UI = True
 
     def __init__(self, parent=None):
@@ -91,6 +101,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._hiddenArgs = set()  # arguments whose `visible_when` is not satisfied
         self._statusBadge = None
         self._statusJob = None
+        self._downloadJob = None  # one test-data fetch at a time
+        self._sceneVolumes = {}  # {display name: vtkMRMLScalarVolumeNode}
         self._schemaError = None  # set while the panel could not be built from a schema
         self._rootLayout = None
         self._formWidget = None  # the schema-driven part, replaced wholesale on a rebuild
@@ -147,6 +159,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
+        # A volume loaded or removed while the module is open must appear in
+        # (or leave) the input dropdowns without the user having to switch
+        # modules and back; enter() alone cannot see it happen.
+        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.NodeAddedEvent, self._onSceneNodesChanged)
+        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.NodeRemovedEvent, self._onSceneNodesChanged)
 
         self._checkCanApply()
 
@@ -165,6 +182,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self._statusJob:
             self._statusJob.cancel()
             self._statusJob = None
+        if self._downloadJob:
+            self._downloadJob.cancel()
+            self._downloadJob = None
         if self._workspace:
             self._workspace.__exit__(None, None, None)
             self._workspace = None
@@ -181,6 +201,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # affordance on the panel saying so: the user sees a dropdown that is
         # simply missing the entry they were told to pick.
         self._refreshServerSelectables()
+        self._refreshSceneVolumes()
         self._refreshServerStatus()
 
     def exit(self) -> None:
@@ -190,7 +211,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         pass
 
     def onSceneEndClose(self, caller, event) -> None:
-        pass
+        # The scene is empty now: the dropdowns must stop offering volumes
+        # that no longer exist.
+        if self.uiWidget:
+            self._refreshSceneVolumes()
 
     # ------------------------------------------------------------------
     # GUI construction
@@ -335,6 +359,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             formgen.connect_changed(widget, self._checkCanApply)
 
         self._populateServerSelectables(rootLayout)
+        self._refreshSceneVolumes()
 
         if self.resultKind == "save_as":
             outputsLayout = self._sectionLayouts[_OUTPUTS_SECTION]
@@ -462,10 +487,22 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             field = widget
             widget.currentNodeChanged.connect(self._checkCanApply)
         else:
-            widget = formgen.file_widget(spec, mode)
+            widget = formgen.file_widget(spec, mode, with_download=arg_name in self.TEST_DATA)
             field = formgen.row_widget(widget)
             target.addRow(labelWidget, field)
             formgen.connect_changed(widget, self._checkCanApply)
+            button = formgen.download_button(widget)
+            if button is not None:
+                button.setToolTip(
+                    _("Download this tool's test data to your computer and use it as the input.")
+                )
+                button.clicked.connect(
+                    lambda checked=False, name=arg_name: self._onDownloadTestData(name)
+                )
+            elif arg_name in self.TEST_DATA:
+                logger.warning(
+                    "TEST_DATA declared for '%s' but its picker cannot host the button", arg_name
+                )
 
         # Recorded like a scalar row so `visible_when` can hide a file input
         # too, and so a section holding only file inputs is not mistaken for an
@@ -510,12 +547,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         if fileInput is not None:
             # A file input needs no "(automatic)" entry: it already leads with
-            # UPLOAD_OPTION, so it can express "nothing chosen here".
-            previous = fileInput.server_name()
+            # UPLOAD_OPTION, so it can express "nothing chosen here". The
+            # current selection surviving the refill lives inside the widget:
+            # its rebuild keeps the entry when the server still offers it.
             fileInput.setChoices(choices)
-            # +1: setChoices keeps ServerFileInput.UPLOAD_OPTION at index 0.
-            if previous in choices:
-                fileInput.combo.setCurrentIndex(choices.index(previous) + 1)
             return choices
 
         spec = (self._schema or {}).get("arguments", {}).get(arg_name, {})
@@ -701,6 +736,17 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if arg_name in self._hiddenArgs:
             return None
         widget = self._inputWidgets.get(arg_name)
+        # Satisfied by a volume already open in the scene: export it and send
+        # it like any local file. The node is resolved through the same map
+        # the dropdown was filled from (_refreshSceneVolumes).
+        volume = getattr(widget, "volume_name", None)
+        if volume and volume():
+            node = self._sceneVolumes.get(volume())
+            if node is None:
+                return None
+            return slicer_io.export_volume(
+                node, workspace.file(f"{self.TOOL_NAME}_{arg_name}.nii.gz")
+            )
         # Already satisfied by a file hosted on the server: nothing to upload.
         # collectArgs sends its name instead (see _serverSideSelections).
         reader = getattr(widget, "server_name", None)
@@ -796,6 +842,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # and leaves currentPath empty on purpose (see ServerFileInput).
             reader = getattr(widget, "server_name", None)
             if reader and reader():
+                continue
+            # So does a volume already open in the scene: it is exported at
+            # upload time (_prepareOneInputFile).
+            volume = getattr(widget, "volume_name", None)
+            if volume and volume():
                 continue
             if not widget.currentPath:
                 return False
@@ -925,6 +976,143 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._workspace.__exit__(None, None, None)
             self._workspace = None
         self._checkCanApply()
+
+    # ------------------------------------------------------------------
+    # Open volumes offered as input sources
+    # ------------------------------------------------------------------
+
+    def _onSceneNodesChanged(self, caller=None, event=None) -> None:
+        self._refreshSceneVolumes()
+
+    def _refreshSceneVolumes(self) -> None:
+        """Re-offer the scene's scalar volumes in every input dropdown that
+        can take one (formgen.accepts_volume).
+
+        The display names are disambiguated here and mapped back to nodes at
+        upload time through _sceneVolumes: two loaded volumes can share a
+        name, and the dropdown must not let one silently shadow the other.
+        """
+        volumes = {}
+        try:
+            nodes = slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
+        except Exception:
+            nodes = []
+        for node in nodes:
+            name = node.GetName()
+            unique, counter = name, 2
+            while unique in volumes:
+                unique = f"{name} ({counter})"
+                counter += 1
+            volumes[unique] = node
+        self._sceneVolumes = volumes
+
+        for arg_name, widget in self._inputWidgets.items():
+            setter = getattr(widget, "setVolumeChoices", None)
+            if setter is not None and formgen.accepts_volume(self._schemaArgument(arg_name)):
+                setter(list(volumes))
+        self._checkCanApply()
+
+    # ------------------------------------------------------------------
+    # Test data (the original modules' "Test Files" button, now inline)
+    # ------------------------------------------------------------------
+
+    def _testDataRoot(self) -> str:
+        """~/Documents/<app>Downloads/<tool>/Test_Files, the same place the
+        original modules downloaded into."""
+        documents = qt.QStandardPaths.writableLocation(qt.QStandardPaths.DocumentsLocation)
+        return os.path.join(
+            documents, slicer.app.applicationName + "Downloads", self.TOOL_NAME, "Test_Files"
+        )
+
+    def _onDownloadTestData(self, arg_name: str) -> None:
+        """Fetch the argument's TEST_DATA payload and point the input at it.
+
+        Idempotent by destination directory, like the original DownloadUnzip:
+        a second click reuses what is already on disk. The transfer runs on a
+        BackgroundJob so a 100 MB scan cannot freeze the panel, with the
+        progress label reporting it (same channel as a tool run).
+        """
+        url = self.TEST_DATA.get(arg_name)
+        widget = self._inputWidgets.get(arg_name)
+        if not url or widget is None or self._downloadJob is not None:
+            return
+
+        stem = os.path.basename(url.split("?")[0]).split(".")[0] or "test_data"
+        destination = os.path.join(self._testDataRoot(), stem)
+        if os.path.exists(destination):
+            self._useTestData(arg_name, destination)
+            return
+
+        button = formgen.download_button(widget)
+        if button is not None:
+            button.setEnabled(False)
+
+        def task(progress_cb):
+            return self._fetchTestData(url, destination, progress_cb)
+
+        def finish():
+            self._downloadJob = None
+            if button is not None:
+                button.setEnabled(True)
+            self._hideProgress()
+
+        def on_success(path):
+            finish()
+            self._useTestData(arg_name, path)
+
+        def on_error(exc):
+            finish()
+            slicer.util.errorDisplay(
+                _("Could not download the test data: {error}").format(error=exc)
+            )
+
+        self._downloadJob = BackgroundJob(
+            task, on_success=on_success, on_error=on_error, on_progress=self._showPhase
+        )
+        self._showPhase(_("Downloading test data..."))
+        self._downloadJob.start()
+
+    def _fetchTestData(self, url: str, destination: str, progress_cb) -> str:
+        """Worker-thread part: download, unpack if it is an archive, move into
+        place.
+
+        Staged in a sibling directory and renamed at the end, so a failed or
+        interrupted download can never leave a half-extracted folder that the
+        existence check in _onDownloadTestData would mistake for a completed
+        one (the original DownloadUnzip had exactly that failure mode). Only a
+        real .zip is extracted; a bare .nii.gz test scan (ALI's, AMASSS's) is
+        kept as the file it is, where the original blindly called ZipFile on
+        it and raised.
+        """
+        staging = destination + ".downloading"
+        shutil.rmtree(staging, ignore_errors=True)
+        os.makedirs(staging)
+        archive = os.path.join(staging, os.path.basename(url.split("?")[0]) or "test_data")
+        download_file(url, archive, progress_cb)
+        if slicer_io.is_extractable_archive(archive):
+            progress_cb(_("Unpacking the test data..."))
+            slicer_io.unzip_folder(archive, staging)
+            os.remove(archive)
+        os.rename(staging, destination)
+        return destination
+
+    def _useTestData(self, arg_name: str, destination: str) -> None:
+        """Point the input at the downloaded data: the single file it holds
+        when there is exactly one entry, the folder itself otherwise (a
+        cohort, a DICOM series, scans plus their landmarks)."""
+        path = destination
+        try:
+            entries = os.listdir(destination)
+        except OSError:
+            entries = []
+        if len(entries) == 1:
+            only = os.path.join(destination, entries[0])
+            if os.path.isfile(only):
+                path = only
+        widget = self._inputWidgets.get(arg_name)
+        if widget is not None:
+            formgen.set_local_path(widget, path)
+        slicer.util.showStatusMessage(_("Test data ready: {path}").format(path=path), 5000)
 
     # ------------------------------------------------------------------
     # Server status banner

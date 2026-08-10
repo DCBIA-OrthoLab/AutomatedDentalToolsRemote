@@ -23,16 +23,20 @@ SlicerAutomatedDentalTools/
 │   ├── ServerToolsCore.py                  # ScriptedLoadableModule shell, parent.hidden = True
 │   │                                        # (also applies saved settings on Slicer startup)
 │   ├── Testing/Python/test_client.py       # plain unittest, requests mocked, no Slicer needed
+│   ├── Testing/Python/test_transfer.py     # chunked upload / ranged download, against a real socket
 │   ├── Testing/Python/test_formgen.py      # plain unittest, qt/ctk/slicer stubbed, no Slicer needed
-│   ├── Testing/Python/qt_stubs.py          # the stand-ins test_formgen runs against
+│   ├── Testing/Python/test_joystick.py     # the 2D pad's value/geometry logic, same stubs
+│   ├── Testing/Python/qt_stubs.py          # the stand-ins test_formgen/test_joystick run against
 │   └── ServerToolsCoreLib/                 # the importable Python package
 │       ├── __init__.py                     # get_client() + ToolServerClient/ToolResult/ServerToolError
-│       ├── config.py                       # SERVER_URL, API_TOKEN, VERIFY_TLS, TIMEOUT (compiled-in defaults)
+│       ├── config.py                       # SERVER_URL, API_TOKEN, VERIFY_TLS, TIMEOUT, TRANSFER_* (compiled-in defaults)
 │       ├── client.py                       # ToolServerClient — the only class that speaks HTTP
+│       ├── transfer.py                     # parallel chunked upload / ranged download of big files
 │       ├── errors.py                       # ServerToolError + HTTP status → message mapping
 │       ├── slicer_io.py                    # TempWorkspace, node export, zip/unzip, result loading
 │       ├── design.py                       # theme tokens, dark/light detection, styled-widget factories
 │       ├── formgen.py                      # /tools schema → Qt widgets, and back
+│       ├── joystick.py                     # JoystickPad, the 2D pad behind vec2's ui:"joystick"
 │       ├── worker.py                       # off-UI-thread execution (BackgroundJob)
 │       ├── base_widget.py                  # ServerToolWidgetBase: all the Slicer boilerplate
 │       └── settings_qt.py                  # QSettings-backed override of config.py's defaults
@@ -78,7 +82,7 @@ in the repo uses.
 
 ## Dependency rule — enforced, not just documented
 
-> `client.py` and `errors.py` import neither `slicer` nor `qt`.
+> `client.py`, `transfer.py` and `errors.py` import neither `slicer` nor `qt`.
 > `base_widget.py`, `formgen.py`, `design.py`, `slicer_io.py`, `worker.py`
 > import neither `requests` nor anything HTTP.
 
@@ -101,10 +105,18 @@ Three plain-unittest suites, all registered as ctests and all runnable with
 `python3 -m unittest` from their own `Testing/Python/` folder — no Slicer
 interpreter launch:
 
-- **`test_client.py`** — `requests` mocked. HTTP behavior, local schema
+- **`test_client.py`**, `requests` mocked (on `requests.Session`, since every
+  call now goes through one pooled session). HTTP behavior, local schema
   validation, the request/response shape (including the whole `example_tool`
   round-trip: what each argument type looks like as a form field), error
-  mapping, result filenames.
+  mapping, result filenames, and which transfer path `run()` picks for a given
+  input size.
+- **`test_transfer.py`**, the one suite that is *not* mocked: it runs the real
+  chunked upload and ranged download against a real `ThreadingHTTPServer` on
+  a real socket. What that module does is concurrency and byte offsets, and a
+  mock proves nothing about either. The fake server is deliberately hostile -
+  it drops parts, corrupts checksums, cuts ranges short and refuses ranges
+  outright, because every one of those is something a real remote server does.
 - **`test_formgen.py`** — `qt`/`ctk`/`slicer` replaced by the small stand-ins
   in `qt_stubs.py`. Which widgets a schema produces, in which order, with which
   initial state, and what they read back as. That is pure Python once the
@@ -119,6 +131,10 @@ interpreter launch:
   deadlock a naive two-pipe read walks into — neither of which a mocked
   `Popen` can exhibit. One test writes 20 000 stderr lines specifically to
   push past the pipe buffer.
+- **`test_joystick.py`**: the 2D pad under the same stubs. The value/pixel
+  mapping, clamping, and the gesture handlers' arithmetic (absolute and
+  spring-back drags, wheel, arrows). Painting is not exercised, there is no
+  real Qt to paint with.
 
 ## How the pieces fit together
 
@@ -211,6 +227,15 @@ interpreter launch:
   module `setup()`, since the server-side list can change independently of
   the `/tools` schema. Uses `_TOOLS_FETCH_TIMEOUT`, same rationale as the
   schema fetch.
+- `download_file(url, destination, progress_cb=None)`, module-level and not a
+  `ToolServerClient` method on purpose: it fetches a GitHub release asset
+  (the original extension's test data, see `base_widget.TEST_DATA`), so no
+  server URL and no token are involved. It lives in this file because
+  client.py is the one module allowed to speak HTTP. Pulled over parallel
+  ranges when the host advertises `Accept-Ranges` (a GitHub release asset
+  does) and streamed sequentially otherwise, these archives run to hundreds
+  of MB and were hitting the same single-connection ceiling as everything
+  else. Same progress-message shape either way.
 - `run(tool_name, args=None, files=None, output_dir=None, progress_cb=None)`
   → `ToolResult(kind="text"|"file", text=..., path=...)`. `files` is
   `{schema_argument_name: local_file_path}` — **there is no single reserved
@@ -239,16 +264,29 @@ interpreter launch:
      options, but that spelling is for `curl` — it breaks the moment an option
      name contains a comma. A `"choice"` argument is a plain string (the
      selected option's name) and needs none of this;
-  3. opens every file in `files` in a loop, all closed in one `finally` so a
-     handle is never leaked even if a later one fails to open; each is sent as
-     `files_payload[arg_name] = (basename, handle)` — the filename (with
-     extension) has to travel with the upload since the server validates
-     extensions from it; POSTs multipart form-data with the
-     `Authorization: Bearer` header;
-  4. converts every `requests.RequestException` into `ServerToolError` — no
+  3. sends anything big enough to be worth it (`>= 2 x TRANSFER_CHUNK_MB`)
+     **ahead of this request**, in parallel parts, via `transfer.upload_file`
+    , see `transfer.py` below for why. Those arguments then travel as a
+     `{argument name: upload id}` map in the reserved `__uploads__` form field
+     instead of as bytes. A server without the endpoints raises
+     `UnsupportedByServer`, the verdict is cached on the client, and everything
+     reverts to the single-request path below;
+  4. opens every *remaining* file in `files` in a loop, all closed in one
+     `finally` so a handle is never leaked even if a later one fails to open;
+     each is sent as `files_payload[arg_name] = (basename, handle)`, the
+     filename (with extension) has to travel with the upload since the server
+     validates extensions from it; POSTs multipart form-data with the
+     `Authorization: Bearer` header and `X-Result-Delivery: reference`;
+  5. converts every `requests.RequestException` into `ServerToolError`, no
      `requests` exception is allowed to reach the GUI;
-  5. dispatches on `Content-Type`: `application/json` → text result;
-     anything else → written to `output_dir` under a filename resolved by
+  6. dispatches on `Content-Type`. `application/json` is a text result, unless
+     it carries a `result_ref`, which is a *file* result the server has kept for
+     us: `_download_reference` then pulls it over parallel `Range` requests
+     (`transfer.download_ranged`) and releases it with `DELETE /results/{id}`.
+     The reference's `filename` is run through `os.path.basename`, since the
+     name is the server's to choose and a path separator in it would place the
+     result outside `output_dir`. Anything else is a streamed body,
+     written to `output_dir` under a filename resolved by
      `_result_filename`: the response's `Content-Disposition` header if
      present (the real filename, e.g. `predictions_outputs.xlsx`); otherwise
      `.nii.gz` when the tool's schema declares `output_kind == "segmentation"`
@@ -281,9 +319,14 @@ interpreter launch:
   `_expected_length`): `Content-Length` then counts wire bytes while
   `iter_content` yields the decompressed stream, so the two differ legitimately.
 
-  **`progress_cb` is called during the download**, not only around it —
-  `"Downloading results... 8.2 / 14.1 MB (58%)"`, the total omitted whenever
-  `_expected_length` returns `None`. See "Telling the user something is
+  **`progress_cb` is called throughout**, not only around the request. The
+  upload used to be a single opaque `requests.post` that reported nothing at all
+  until the server answered, minutes of a panel saying `Sending '<tool>'
+  request...` while a 100 MB scan went up, and the chunked path fixes that at
+  the source: every part that lands moves a counter, so the panel shows
+  `"Uploading scan.nii.gz... 48.2 / 105.0 MB (46%) at 11.3 MB/s, 5s left"`.
+  Downloads read the same way (`"Downloading results... 8.2 / 14.1 MB (58%)"`,
+  the total omitted whenever `_expected_length` returns `None`). See "Telling the user something is
   happening" below for why silence here is a bug and not merely unpolished.
 - `errors.error_for_status(status_code, server_message)` maps 401/404/422/400/
   413/500 to a `ServerToolError`. The server's `detail` is shown **verbatim**
@@ -342,6 +385,7 @@ class SurgMovPredWidget(ServerToolWidgetBase):
     TOOL_NAME   = "SurgMovPred"
     FILE_INPUTS = {"input": "folder_zip"}   # schema says zip_file; we want a folder picker
     RESULT_KIND = "save_as"                 # output_kind "file" doesn't say what to do with it
+    TEST_DATA   = {"input": "https://..."}  # optional: inline "Test data" download button
     AUTO_UI     = True                      # False → override buildCustomUI()
 ```
 
@@ -356,6 +400,8 @@ What is derived, and what a module still has to say:
 | fill an input from a node in the scene (`volume_node`) | **no** — the server doesn't know a scene exists |
 | offer a folder picker for an argument the server types as a plain zip | **no** — an ergonomics choice (`SurgMovPred`) |
 | leave an optional file argument out of the panel (`"none"`) | **no** — a module's decision |
+| offer the scene's open volumes in the input dropdown | **yes**: any file argument `formgen.accepts_volume` says yes to (volume-ish type name or a published volume extension) |
+| a "Test data" download button on an input row (`TEST_DATA`) | **no**: the URL is the original extension's GitHub release, which the server knows nothing about |
 
 This is what keeps "add a field to a tool = zero client-side lines" true for
 *file* arguments too, not just scalar ones: a new file argument server-side
@@ -586,11 +632,12 @@ fields) into a `qt.QFormLayout`, using the type table below, and returns
 | Schema `type` | Qt widget |
 |---|---|
 | any non-file type with `server_selectable` set | `QComboBox` (populated by `base_widget._populateServerSelectables` from `GET /tools/{tool}/data` — `formgen` itself never talks HTTP) |
-| any **file** type with `server_selectable` set | `ServerFileInput`: the same dropdown of hosted names, wrapped around the normal local picker — the argument accepts either shape |
+| any **file** type with `server_selectable` set, or one `accepts_volume` says yes to | `ServerFileInput`: a one-line row, [sources dropdown][local picker][test data]. The dropdown offers the upload entry, then the scene's open volumes, then the server-hosted names (see "The input row" below) |
 | `str` | `QLineEdit` |
-| `int` | `QSpinBox` |
-| `float` | `QDoubleSpinBox` |
+| `int` | `QSpinBox` (range/step bounded by `min`/`max`/`step` when declared), or a `ctkSliderWidget` when the spec says `ui: "slider"` and declares both bounds |
+| `float` | `QDoubleSpinBox`, same rule, plus `decimals` |
 | `bool` | `QCheckBox` |
+| `vec2` | a `JoystickInput`: two `QDoubleSpinBox`es set together, plus the 2D `JoystickPad` when the spec says `ui: "joystick"` (see "Numbers" below) |
 | `choice` | `QComboBox` filled from `choices` |
 | `multichoice` | a `MultiChoiceGroup`: one `QCheckBox` per entry of `choices` |
 | any type where `is_file_type()` is true (`file`, `zip_file`, `nifti_file`, ...) | `ctkPathLineEdit`, or a `FileOrFolderInput` when `types` also contains `"folder"` (`file_widget`; `build()` itself never emits one — see `FILE_INPUTS` and the escape hatch below) |
@@ -620,8 +667,8 @@ did before they existed**, asserted for `example_tool` in `test_formgen.py`.
 | `label` | `formgen.label_for` | the text next to the widget. Absent → the argument name prettified (`output_suffix` → "Output suffix") |
 | `section` | `formgen.section_of` / `sections_of` | which `ctkCollapsibleButton` the row goes in. Absent → `formgen.DEFAULT_SECTION` (`"Inputs"`), the one box a panel has always had. Boxes are created in the order the schema first mentions them |
 | `visible_when` | `formgen.is_visible` | `{other_argument: value}` (a list means "any of these"); every entry must match. A row whose condition fails is hidden, label included |
-| `ui` | `formgen.MultiChoiceGroup` | how a `multichoice`'s boxes are laid out: `"tabs"`, `"grid"`, `"inline"` |
-| `groups` | same | `{group name: [option, ...]}` for the two grouped layouts |
+| `ui` | `formgen.MultiChoiceGroup` / `_make_numeric_widget` / `_make_vec2_widget` | per-type presentation: how a `multichoice`'s boxes are laid out (`"tabs"`, `"grid"`, `"inline"`), `"slider"` on a bounded int/float, `"joystick"` on a vec2 |
+| `groups` | `formgen.MultiChoiceGroup` | `{group name: [option, ...]}` for the two grouped layouts |
 
 **The layouts change where the boxes are put and nothing else.**
 `MultiChoiceGroup.boxes` is keyed and ordered by `choices` whatever the layout,
@@ -652,6 +699,92 @@ Every `multichoice` with more than one option also gets an **All / None /
 Default** row (`design.link_button`). "Default" restores the state the schema
 declared — the old ASO module's per-mode `Suggest()` button, now on every tool,
 with the suggestion living server-side where it belongs.
+
+### Numbers: `min`/`max`/`step`, `ui: "slider"`, and the `vec2` joystick
+
+`int` and `float` carry four more optional fields, all presentation-side like
+the hints above (the server's own `validate()` ignores them): `min`, `max`,
+`step`, and (float only) `decimals`.
+
+- Declared **without** `ui: "slider"`, they only constrain the spin box:
+  range, step, decimals. A bound a server adds for documentation can never
+  silently switch the widget kind.
+- With `ui: "slider"` **and both bounds**, the argument renders as a
+  `ctkSliderWidget`, the slider + spin box combination the original
+  extension's manual-alignment rows use (GreedyReg / MRI2CBCT: rotations
+  ±180°, translations ±200 mm). An integer slider sets `decimals = 0` and
+  reads back as an `int`; a float slider derives its decimals from `step`
+  (0.05 → 2) unless `decimals` says otherwise.
+- `ui: "slider"` without both bounds falls back to the spin box with a logged
+  warning: an unbounded slider has no geometry, and a presentation hint must
+  never be able to break the panel.
+
+**`vec2`** is an argument *type*, not a hint: two numbers set together,
+travelling as a JSON `[x, y]` pair (`client._stringify` encodes lists like it
+already encoded the multichoice dict). It renders as `formgen.JoystickInput`:
+two `QDoubleSpinBox`es (labeled from `x_label`/`y_label`, default "X"/"Y")
+that ARE the value, plus, when the spec says `ui: "joystick"`, the 2D pad
+ported from FlexReg's butterfly-patch corner controls
+(`joystick.JoystickPad`, the one genuine QWidget subclass in the library;
+painting and mouse handling cannot be composed from stock widgets). Optional
+fields:
+
+| Field | Meaning |
+|---|---|
+| `x_range` / `y_range` | `[left/bottom end, right/top end]` of each axis. Index 0 is drawn at the left/bottom by construction, so declaring the bounds inverted (`[15, -15]`) mirrors the axis. Absent or invalid → `(0, 1)` with a warning |
+| `initial` | the `[x, y]` the panel opens at. Absent → the centre of both axes, a joystick's natural rest position |
+| `step` | one wheel notch, arrow key, or spin-box step. Absent → a hundredth of each axis |
+| `x_label` / `y_label` | the axis names shown next to the spin boxes |
+| `x_labels` / `y_labels` | 2-element *end* labels drawn in the pad's gutters (`["R", "L"]`, `["POST", "ANT"]`), paired with the range by index |
+| `spring_back` | the pad becomes relative: each drag deals a displacement onto the boxes (clamped by their own ranges) and the knob springs home on release, so repeated pushes never saturate against the ends |
+
+The pad writes into the spin boxes and holds no state of its own: `value()`
+reads the boxes, `connect_changed` wires the boxes, so drag, wheel, arrow
+keys and typing are one code path, and a pad that is not built (no `ui`, or
+an unknown hint from a newer server) changes nothing on the wire. Gestures
+match FlexReg: absolute drag, Ctrl+drag five times finer, wheel = vertical
+axis, Shift+wheel = horizontal, arrows one step each, double-click back to
+the defaults. The geometry/value mapping is unit-tested in
+`test_joystick.py`; the schema-to-widget contract in `test_formgen.py`.
+
+### The input row: sources dropdown, open volumes, test data
+
+A file argument's row is ONE line, like the original modules. When the
+argument has more than one possible source, the local picker comes wrapped in
+`ServerFileInput` with a leading dropdown; the row is then
+[sources dropdown][path field + browse buttons][test data button].
+
+The dropdown's entries, in order:
+
+1. **"Upload my own file..."**, the default: the local picker is the value.
+2. **The scene's open scalar volumes**, for any argument
+   `formgen.accepts_volume` says yes to (a volume-ish type name, or a
+   published volume extension; a csv input never offers them). `base_widget`
+   feeds the names (`_refreshSceneVolumes`, re-run on `enter()`, on scene
+   node add/remove, and after a scene close) and keeps the name-to-node map;
+   at upload time the chosen node is exported to a temporary `.nii.gz` and
+   sent like any local file. formgen itself never touches the MRML scene.
+3. **The server-hosted names** (`GET /tools/{tool}/data`), unchanged: the
+   name travels as a plain form value, the file itself never moves.
+
+Which kind is selected is decided by index, never by parsing the entry text,
+and rebuilding either list preserves the current selection when it is still
+offered. Picking any dropdown entry clears the path field and vice versa,
+same mutual-exclusion rule as before.
+
+**The test-data button** (`TEST_DATA = {argument: url}` on the module) ports
+the original modules' "Test Files" / "Download Test file" buttons: one click
+downloads the original extension's GitHub release asset to
+`~/Documents/<app>Downloads/<tool>/Test_Files/<name>/` (the original's
+location), unpacks it when it is a real `.zip` (a bare `.nii.gz` is kept
+as-is, where the original's `DownloadUnzip` called `ZipFile` on it and
+raised), and points the row at the result: the single file it holds when
+there is exactly one, the folder otherwise. The transfer runs on a
+`BackgroundJob` with the progress label reporting it; the fetch is staged in
+a sibling directory and renamed at the end, so an interrupted download can
+never leave a half-extracted folder that the idempotence check would mistake
+for a completed one. The HTTP lives in `client.download_file`; formgen only
+builds the button so the row stays one line.
 
 **Where the words come from, and the line between the two.** Everything
 describing a *tool* is the server's: the field label (`label`), the section
@@ -725,19 +858,39 @@ not implemented.
 ## `design.py`
 
 One dict of tokens per theme (`_LIGHT`/`_DARK`: `PRIMARY`, `DANGER`, `SUCCESS`,
-`TEXT`, `TEXT_MUTED`, `BORDER`, `BACKGROUND`, `SURFACE`, `DISABLED_*`) plus a
-spacing scale. `is_dark_mode()` is the **only** place in the extension that
-inspects `slicer.app.palette()` luminance. `tokens()` re-reads it every call,
-so `apply()`/the factories always reflect the current mode — `base_widget`
-calls `design.apply(self.uiWidget)` again in `enter()`, which is when a user
+`TEXT`, `TEXT_MUTED`, `BORDER`, `BACKGROUND`, `SURFACE`, `SURFACE_HOVER`,
+`DISABLED_*`) plus a spacing scale, plus `_BUTTON_STOPS_LIGHT`/`_DARK`, the
+(top, bottom) stops of the vertical button gradient every `.ui` of the
+original SlicerAutomatedDentalTools paints its buttons with, one pair per
+role (`primary`, `danger`, `success`, `secondary`) and state. `is_dark_mode()`
+is the **only** place in the extension that inspects `slicer.app.palette()`
+luminance. `tokens()` re-reads it every call, so `apply()`/the factories
+always reflect the current mode; `base_widget` calls
+`design.apply(self.uiWidget)` again in `enter()`, which is when a user
 switching Slicer's theme and reopening the module will see it recompute.
 (A live in-place recompute while the module is already open and visible is
 not wired up — see "Known limitations".)
 
-Factories: `primary_button(text)`, `danger_button(text)`, `section_title(text)`,
-`required_label(text)`, `status_badge()` / `update_status_badge(label, ok)`.
-Changing the primary color across the whole extension is a one-line edit to
-`_LIGHT["PRIMARY"]` / `_DARK["PRIMARY"]`.
+The base stylesheet (`apply()`) covers the widget family the original
+styles: collapsible sections, labels, line edits, combo boxes, spin boxes,
+check boxes (18 px indicator, primary fill with an inline-SVG check mark when
+checked, no compiled Qt resource needed), sliders (8 px groove, 16 px round
+handle, which also styles the slider inside a `ctkSliderWidget`), progress
+bars, and **bare `QPushButton`s**: a browse button nobody styled comes out
+looking like the original's Search buttons, and the factories' own
+stylesheets win over the inherited rule where they apply.
+
+Factories: `primary_button(text)`, `danger_button(text)`,
+`success_button(text)` (the original GreedyReg's green Run/Save family),
+`secondary_button(text)` (blue-gray utility), `compact_button(text)` (the
+tight inline variant the one-line input rows use), `toggle_button(text)`
+(checkable, blue → red while checked; flat on purpose, the two-state color
+is the information), `section_title(text)`, `required_label(text)`,
+`hint_label(text)`, `link_button(text)`, `warning_label(text)`,
+`status_badge()` / `update_status_badge(label, ok)`, `progress_label()`.
+The joystick pad's paint colors live here too (`pad_palette()`, `PAD_SIZE`),
+so theme detection and color choices stay in this one file. Changing the
+primary color across the whole extension is still an edit to this file alone.
 
 ## `worker.py`
 
@@ -791,6 +944,81 @@ needs a server-side change, not a client one (see limitations).
 `unzip_folder`, and `load_result(path, kind)` (dispatch to `loadSegmentation`/
 `loadVolume`/`loadModel`/`loadTransform`) are the only functions in the
 extension that touch node I/O directly.
+
+`zip_folder` picks its compression per member. A folder argument is zipped only
+because HTTP has no notion of a folder, the archive is a container, not an
+attempt to make the data smaller, so already-compressed members (`.nii.gz`,
+`.zip`, the OOXML formats: see `_STORED_EXTENSIONS`, which mirrors the server's
+own table in `file_utils.py`) are `ZIP_STORED` and everything else is deflated
+at level 1. Measured on 105 MB of gzipped CBCT: **2.3 s to pack at the old
+default level 6, 0.16 s now, for an archive of exactly the same size**, the
+deflate was spending seconds of the user's CPU, on the main thread, before a
+single byte went out, and the server paid it again inflating them.
+
+## `transfer.py`
+
+Bulk transfer, split out of `client.py` because what it does is concurrency and
+byte offsets rather than protocol. Imports neither `slicer` nor `qt`; only
+`requests` and the stdlib.
+
+**Why it exists.** One HTTP request rides one TCP connection, and one TCP
+connection to a remote server is bound by its congestion window long before it
+is bound by anyone's bandwidth. Measured against the real server through a relay
+capping each connection at 12 MB/s (which is what a congestion-window-limited
+stream looks like from the application's side), for a 100 MB file:
+
+| | upload | download |
+|---|---|---|
+| one request, one connection (the old path) | 9.1 s | 8.7 s |
+| chunked/ranged, 4 connections (the default) | 2.5 s, **3.7x** | 2.5 s, **3.6x** |
+| chunked/ranged, 8 connections | 1.5 s, **6.2x** | 1.4 s, **6.2x** |
+
+On loopback the same change is still worth 1.5x on upload, from no longer
+buffering the file in RAM and no longer making the server write it to disk
+twice. Peak client RSS for a 100 MB upload went from **200 MB to 32 MB**:
+`requests` reads a `files=` argument entirely into memory and then builds the
+whole encoded multipart body next to it, so the old path held the scan twice
+over before the first byte left.
+
+- `upload_file(...)` → `upload_id`. Opens a session (`POST /uploads`), sends the
+  parts over a `ThreadPoolExecutor`, returns the id that `run()` then references
+  in the `__uploads__` form field. Each part carries `X-Part-SHA256` over the
+  **decompressed** bytes, so the server verifies exactly what it writes to disk;
+  since the parts tile the file, the whole upload is verified without either
+  side making a second pass over it. Parts of files that are not already
+  compressed (an uncompressed `.nii`, a `.vtk` mesh) go up `Content-Encoding:
+  gzip` at level 1, roughly a third of the bytes, so roughly a third of the
+  time on a remote link.
+- A part that fails is retried; a whole failed pass re-reads `GET /uploads/{id}`
+  for what the server is *actually* missing rather than re-sending what it
+  thinks failed, since a part whose response was lost on the way back did land.
+- `download_ranged(...)` pulls a result over concurrent `Range` requests,
+  `os.pwrite`-ing each into its offset in a pre-`ftruncate`d file. Every span
+  checks its own length before returning, `iter_content` ending early is what a
+  connection cut mid-body looks like from here and raises nothing on its own -
+  so a short range is one retried range instead of a silently truncated file.
+  On total failure the partial file is **removed**: for a `.zip`, leaving it
+  would let the caller unpack whatever central directory survived and deliver a
+  subset of the results.
+- A referenced result is released with `DELETE /results/{id}` from a `finally`
+  (`_release_result`, retried once), so a download that failed halfway or an
+  archive that failed its integrity check still tells the server the file can
+  go. Neither is retryable from here, so there is nothing to keep it for. The
+  server only offers a reference above 16 MB in the first place: below that it
+  streams the result and deletes it when the response ends, which depends on
+  nothing the client does, and parallel ranges would buy nothing at that size.
+  Releasing never fails a finished run; the server's idle reaper is the
+  backstop, and this is what keeps it from being the thing that usually fires.
+- `UnsupportedByServer` is raised (before any byte travels) when the server has
+  no `/uploads` endpoints, which is what makes this extension keep working
+  against a deployment that has not been updated. `client.py` remembers the
+  verdict per session and falls back to the single multipart request.
+- Tuned via `config.py`: `TRANSFER_PARALLELISM` (4), `TRANSFER_CHUNK_MB` (8),
+  `TRANSFER_COMPRESS` (True).
+
+`test_transfer.py` drives all of this against a real `ThreadingHTTPServer` that
+can drop parts, corrupt them, cut ranges short and refuse ranges altogether -
+mocks prove nothing about concurrency or byte offsets.
 
 ## Runtime configuration: `ServerToolsSettings` + `settings_qt.py`
 

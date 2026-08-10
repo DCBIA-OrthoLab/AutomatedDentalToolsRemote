@@ -579,12 +579,21 @@ class FileOrFolderInputTest(unittest.TestCase):
         self.assertIsInstance(field, ctk.ctkPathLineEdit)
         self.assertEqual(field.filters, ctk.ctkPathLineEdit.Dirs)
 
-    def test_a_file_only_argument_gets_a_plain_file_picker(self):
+    def test_a_volume_argument_gets_the_sources_dropdown_around_its_picker(self):
         field = formgen.file_widget({"type": "nifti_file", "types": ["nifti_file"]})
+
+        # accepts_volume: a scan input can also be satisfied by a volume open
+        # in the scene, so its picker comes wrapped in the sources dropdown.
+        self.assertIsInstance(field, formgen.ServerFileInput)
+        self.assertIsInstance(field.local, ctk.ctkPathLineEdit)
+        self.assertEqual(field.local.filters, ctk.ctkPathLineEdit.Files)
+        self.assertIn("Supported files (*.nii *.nii.gz)", field.local.nameFilters)
+
+    def test_a_non_volume_file_argument_gets_a_plain_file_picker(self):
+        field = formgen.file_widget({"type": "csv_file", "types": ["csv_file"]})
 
         self.assertIsInstance(field, ctk.ctkPathLineEdit)
         self.assertEqual(field.filters, ctk.ctkPathLineEdit.Files)
-        self.assertIn("Supported files (*.nii *.nii.gz)", field.nameFilters)
 
     def test_a_generic_file_argument_is_left_unrestricted(self):
         field = formgen.file_widget({"type": "file", "types": ["file"]})
@@ -832,6 +841,339 @@ class VisibilityTest(unittest.TestCase):
         widgets = formgen.build(schema, qt.QFormLayout())
         self.assertFalse(formgen.all_required_filled(widgets, schema))
         self.assertTrue(formgen.all_required_filled(widgets, schema, hidden={"needed"}))
+
+
+# ---------------------------------------------------------------------------
+# Input sources: open scene volumes and the inline test-data button
+# ---------------------------------------------------------------------------
+
+_VOLUME_SPEC = {
+    "type": "volume_or_zip_file", "types": ["volume_or_zip_file", "folder"],
+    "required": True, "description": "", "server_selectable": "testfile",
+    "choices": None, "initial": None,
+}
+
+
+class AcceptsVolumeTest(unittest.TestCase):
+    """Which file arguments may be satisfied by a volume open in the scene:
+    read off the schema, never off a module override."""
+
+    def test_a_volume_type_name_qualifies(self):
+        self.assertTrue(formgen.accepts_volume({"types": ["volume_or_zip_file"]}))
+        self.assertTrue(formgen.accepts_volume({"types": ["nifti_file"]}))
+
+    def test_a_volume_extension_qualifies(self):
+        spec = {"types": ["scan_file"], "extensions": {"scan_file": [".nrrd"]}}
+        self.assertTrue(formgen.accepts_volume(spec))
+
+    def test_a_csv_input_never_offers_scene_volumes(self):
+        self.assertFalse(formgen.accepts_volume(EXAMPLE_TOOL_SCHEMA["arguments"]["input"]))
+
+    def test_a_surface_only_input_does_not_qualify(self):
+        spec = {"types": ["surface_file"], "extensions": {"surface_file": [".vtk", ".stl"]}}
+        self.assertFalse(formgen.accepts_volume(spec))
+
+
+class InputSourcesTest(unittest.TestCase):
+    """The one-line input row: [sources dropdown][local picker][test data],
+    with the scene's volumes offered between the upload entry and the
+    server-hosted names."""
+
+    def setUp(self):
+        self.widget = formgen.file_widget(_VOLUME_SPEC, "file_or_folder")
+        self.widget.setVolumeChoices(["CBCT_patient1", "CBCT_patient2"])
+        self.widget.setChoices(["MG_test_scan.nii.gz"])
+
+    def test_the_whole_row_is_one_line(self):
+        # The dropdown used to sit on its own line above the picker; now the
+        # container's layout is horizontal and the combo leads it.
+        layout = self.widget.container.layout
+        self.assertIsInstance(layout, qt.QHBoxLayout)
+        self.assertIs(layout.widgets[0], self.widget.combo)
+
+    def test_entries_are_upload_then_volumes_then_server_files(self):
+        combo = self.widget.combo
+        self.assertEqual(
+            [combo.itemText(i) for i in range(combo.count)],
+            [
+                formgen.ServerFileInput.UPLOAD_OPTION,
+                formgen.OPEN_VOLUME_PREFIX + "CBCT_patient1",
+                formgen.OPEN_VOLUME_PREFIX + "CBCT_patient2",
+                "MG_test_scan.nii.gz",
+            ],
+        )
+
+    def test_choosing_a_volume_is_not_a_server_selection(self):
+        self.widget.combo.setCurrentIndex(1)
+
+        self.assertEqual(self.widget.volume_name(), "CBCT_patient1")
+        self.assertEqual(self.widget.server_name(), "")
+        # Nothing to read off disk either: the node is exported at upload time.
+        self.assertEqual(self.widget.currentPath, "")
+
+    def test_choosing_a_volume_clears_the_local_path(self):
+        self.widget.local.pathEdit.setText("/data/scan.nii.gz")
+
+        self.widget.combo.setCurrentIndex(2)
+
+        self.assertEqual(self.widget.local.currentPath, "")
+
+    def test_typing_a_local_path_resets_the_dropdown(self):
+        self.widget.combo.setCurrentIndex(1)
+
+        self.widget.local.pathEdit.setText("/data/scan.nii.gz")
+
+        self.assertEqual(self.widget.volume_name(), "")
+        self.assertEqual(self.widget.currentPath, "/data/scan.nii.gz")
+
+    def test_a_chosen_volume_survives_a_server_list_refresh(self):
+        self.widget.combo.setCurrentIndex(1)
+
+        self.widget.setChoices(["MG_test_scan.nii.gz", "cohort_10_patients.zip"])
+
+        self.assertEqual(self.widget.volume_name(), "CBCT_patient1")
+
+    def test_a_gone_volume_falls_back_to_upload(self):
+        self.widget.combo.setCurrentIndex(1)
+
+        self.widget.setVolumeChoices([])
+
+        self.assertEqual(self.widget.volume_name(), "")
+        self.assertEqual(self.widget.combo.currentText, formgen.ServerFileInput.UPLOAD_OPTION)
+
+    def test_a_server_name_looking_like_a_volume_entry_is_not_misread(self):
+        # Selection kind is decided by index, so even a hosted file named
+        # like a volume entry stays a server selection.
+        tricky = formgen.OPEN_VOLUME_PREFIX + "CBCT_patient1"
+        self.widget.setChoices([tricky])
+
+        self.widget.combo.setCurrentIndex(3)
+
+        self.assertEqual(self.widget.server_name(), tricky)
+        self.assertEqual(self.widget.volume_name(), "")
+
+
+class DownloadButtonTest(unittest.TestCase):
+    """The inline test-data button: built only when the module declared a
+    TEST_DATA URL, wherever the composite puts it."""
+
+    def test_no_declaration_means_no_button(self):
+        widget = formgen.file_widget(_VOLUME_SPEC, "file_or_folder")
+        self.assertIsNone(formgen.download_button(widget))
+
+    def test_a_wrapped_input_hosts_the_button_at_the_end_of_its_row(self):
+        widget = formgen.file_widget(_VOLUME_SPEC, "file_or_folder", with_download=True)
+
+        button = formgen.download_button(widget)
+        self.assertIsNotNone(button)
+        self.assertIs(widget.container.layout.widgets[-1], button)
+
+    def test_a_bare_file_or_folder_input_hosts_it_itself(self):
+        spec = EXAMPLE_TOOL_SCHEMA["arguments"]["input"]  # csv or folder, no wrap
+        widget = formgen.file_widget(spec, "file_or_folder", with_download=True)
+
+        self.assertIsInstance(widget, formgen.FileOrFolderInput)
+        self.assertIsNotNone(formgen.download_button(widget))
+
+    def test_set_local_path_reaches_the_path_field_of_either_shape(self):
+        wrapped = formgen.file_widget(_VOLUME_SPEC, "file_or_folder")
+        bare = formgen.file_widget(EXAMPLE_TOOL_SCHEMA["arguments"]["input"], "file_or_folder")
+
+        formgen.set_local_path(wrapped, "/downloads/scan.nii.gz")
+        formgen.set_local_path(bare, "/downloads/cohort")
+
+        self.assertEqual(wrapped.currentPath, "/downloads/scan.nii.gz")
+        self.assertEqual(bare.currentPath, "/downloads/cohort")
+
+
+# ---------------------------------------------------------------------------
+# Sliders (ArgSpec.ui = "slider" on int/float) and bounds on spin boxes
+# ---------------------------------------------------------------------------
+
+def _numeric(arg_type, **hints):
+    spec = {
+        "type": arg_type, "types": [arg_type], "required": False,
+        "description": "", "server_selectable": None, "choices": None,
+        "initial": None,
+    }
+    spec.update(hints)
+    return spec
+
+
+class SliderWidgetTest(unittest.TestCase):
+    """`ui: "slider"` on a bounded int/float renders the combined
+    slider+spinbox; everything else stays a spin box."""
+
+    def _one(self, spec):
+        return formgen.build({"k": spec}, qt.QFormLayout())["k"]
+
+    def test_bounded_float_with_the_hint_becomes_a_slider(self):
+        widget = self._one(_numeric("float", ui="slider", min=-180, max=180, step=0.5, initial=10))
+
+        self.assertIsInstance(widget, ctk.ctkSliderWidget)
+        self.assertEqual(widget.minimum, -180.0)
+        self.assertEqual(widget.maximum, 180.0)
+        self.assertEqual(widget.singleStep, 0.5)
+        self.assertEqual(widget.value, 10.0)
+
+    def test_an_int_slider_reads_back_as_an_int(self):
+        widget = self._one(_numeric("int", ui="slider", min=0, max=95, step=5, initial=5))
+
+        self.assertEqual(widget.decimals, 0)
+        value = formgen.collect({"k": widget})["k"]
+        self.assertEqual(value, 5)
+        self.assertIsInstance(value, int)
+
+    def test_float_decimals_follow_the_step(self):
+        widget = self._one(_numeric("float", ui="slider", min=0, max=1, step=0.05))
+        self.assertEqual(widget.decimals, 2)
+
+    def test_declared_decimals_win_over_the_step(self):
+        widget = self._one(_numeric("float", ui="slider", min=0, max=1, step=0.05, decimals=4))
+        self.assertEqual(widget.decimals, 4)
+
+    def test_a_slider_without_bounds_falls_back_to_a_spin_box(self):
+        # An unbounded slider has no geometry; the panel must render anyway.
+        self.assertIsInstance(self._one(_numeric("float", ui="slider")), qt.QDoubleSpinBox)
+        self.assertIsInstance(self._one(_numeric("int", ui="slider", min=0)), qt.QSpinBox)
+
+    def test_bounds_without_the_hint_constrain_the_spin_box(self):
+        # min/max alone must not switch the widget kind: a bound added
+        # server-side for validation cannot silently produce a slider.
+        widget = self._one(_numeric("int", min=1, max=10, step=2))
+
+        self.assertIsInstance(widget, qt.QSpinBox)
+        self.assertEqual((widget.minimum, widget.maximum), (1, 10))
+        self.assertEqual(widget.singleStep, 2)
+
+    def test_an_unknown_scalar_ui_falls_back_to_a_spin_box(self):
+        self.assertIsInstance(self._one(_numeric("float", ui="dial")), qt.QDoubleSpinBox)
+
+    def test_changing_the_slider_notifies(self):
+        widget = self._one(_numeric("float", ui="slider", min=0, max=10))
+        calls = []
+        formgen.connect_changed(widget, lambda *_a: calls.append(1))
+
+        widget.value = 3.5
+
+        self.assertEqual(len(calls), 1)
+
+    def test_slider_value_is_sent_in_clear(self):
+        widget = self._one(_numeric("float", ui="slider", min=0, max=10, initial=2.5))
+        data = ToolServerClient._stringify(formgen.collect({"k": widget}))
+        self.assertEqual(data["k"], "2.5")
+
+    def test_a_required_slider_at_zero_still_counts_as_filled(self):
+        schema = {"k": _numeric("float", ui="slider", min=-10, max=10, required=True)}
+        widgets = formgen.build(schema, qt.QFormLayout())
+        self.assertTrue(formgen.all_required_filled(widgets, schema))
+
+
+# ---------------------------------------------------------------------------
+# vec2 (two numbers set together, ui = "joystick" for the 2D pad)
+# ---------------------------------------------------------------------------
+
+def _vec2(**hints):
+    spec = {
+        "type": "vec2", "types": ["vec2"], "required": False,
+        "description": "", "server_selectable": None, "choices": None,
+        "initial": None,
+    }
+    spec.update(hints)
+    return spec
+
+
+class JoystickWidgetTest(unittest.TestCase):
+    def _one(self, spec):
+        return formgen.build({"k": spec}, qt.QFormLayout())["k"]
+
+    def test_vec2_with_the_hint_gets_a_pad_with_the_declared_ranges(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[-15, 15], y_range=[-5, 5]))
+
+        self.assertIsInstance(widget, formgen.JoystickInput)
+        self.assertIsNotNone(widget.pad)
+        self.assertEqual((widget.pad.x_start, widget.pad.x_end), (-15.0, 15.0))
+        self.assertEqual((widget.pad.y_start, widget.pad.y_end), (-5.0, 5.0))
+
+    def test_vec2_without_the_hint_is_two_plain_spin_boxes(self):
+        widget = self._one(_vec2(x_range=[0, 1], y_range=[0, 1]))
+        self.assertIsInstance(widget, formgen.JoystickInput)
+        self.assertIsNone(widget.pad)
+
+    def test_an_unknown_vec2_ui_falls_back_to_the_boxes_alone(self):
+        widget = self._one(_vec2(ui="trackball", x_range=[0, 1], y_range=[0, 1]))
+        self.assertIsNone(widget.pad)
+
+    def test_the_declared_initial_reaches_boxes_and_pad(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[-15, 15], y_range=[-5, 5], initial=[3, -2]))
+
+        self.assertEqual(widget.value(), [3.0, -2.0])
+        self.assertEqual((widget.pad.x, widget.pad.y), (3.0, -2.0))
+
+    def test_no_initial_opens_at_the_centre_of_both_axes(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[0, 10], y_range=[-5, 5]))
+        self.assertEqual(widget.value(), [5.0, 0.0])
+
+    def test_collect_returns_the_pair_and_it_travels_as_json(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[-15, 15], y_range=[-5, 5], initial=[3, -2]))
+
+        collected = formgen.collect({"k": widget})
+        self.assertEqual(collected["k"], [3.0, -2.0])
+        self.assertEqual(json.loads(ToolServerClient._stringify(collected)["k"]), [3.0, -2.0])
+
+    def test_editing_a_box_moves_the_pad(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[-15, 15], y_range=[-5, 5], initial=[0, 0]))
+
+        widget.xBox.setValue(7.5)
+
+        self.assertEqual(widget.pad.x, 7.5)
+
+    def test_moving_the_pad_updates_the_boxes(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[-15, 15], y_range=[-5, 5], initial=[0, 0]))
+
+        widget.pad.setValues(4.0, -1.0, notify=True)
+
+        self.assertEqual(widget.value(), [4.0, -1.0])
+
+    def test_any_input_path_notifies(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[-15, 15], y_range=[-5, 5], initial=[0, 0]))
+        calls = []
+        formgen.connect_changed(widget, lambda *_a: calls.append(1))
+
+        widget.yBox.setValue(2.0)       # typing
+        widget.pad.setValues(1.0, 2.0, notify=True)  # dragging
+
+        self.assertGreaterEqual(len(calls), 2)
+
+    def test_a_spring_back_pad_accumulates_displacements(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[-10, 10], y_range=[-10, 10],
+                                 initial=[0, 0], spring_back=True))
+        pad = widget.pad
+
+        # One push: offset (2, 1) from the rest position, then release.
+        pad.setValues(2.0, 1.0, notify=True)
+        self.assertEqual(widget.value(), [2.0, 1.0])
+        pad.mouseReleaseEvent(None)
+        self.assertEqual((pad.x, pad.y), (0.0, 0.0))  # sprang home
+
+        # A second push adds to the committed base instead of replacing it.
+        pad.setValues(1.0, 1.0, notify=True)
+        self.assertEqual(widget.value(), [3.0, 2.0])
+
+    def test_the_description_is_shown_above_the_widgets(self):
+        widget = formgen._make_widget("k", _vec2(ui="joystick", description="Move the landmark"))
+        laid_out = widget.container.layout.widgets
+        self.assertIsInstance(laid_out[0], qt.QLabel)
+        self.assertEqual(laid_out[0].text, "Move the landmark")
+
+    def test_an_invalid_range_falls_back_to_the_unit_axis(self):
+        widget = self._one(_vec2(ui="joystick", x_range=[3], y_range=[0, 1]))
+        self.assertEqual((widget.pad.x_start, widget.pad.x_end), (0.0, 1.0))
+
+    def test_a_required_vec2_always_counts_as_filled(self):
+        schema = {"k": _vec2(ui="joystick", x_range=[0, 1], y_range=[0, 1], required=True)}
+        widgets = formgen.build(schema, qt.QFormLayout())
+        self.assertTrue(formgen.all_required_filled(widgets, schema))
 
 
 if __name__ == "__main__":

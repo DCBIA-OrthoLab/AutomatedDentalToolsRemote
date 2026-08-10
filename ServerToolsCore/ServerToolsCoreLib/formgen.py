@@ -15,10 +15,12 @@ on — `file_input_modes`, `auto_file_mode`, `result_kind_for` — for the same
 reason: it is all "what does the schema say this panel should be". A module
 then declares only what the schema *cannot* say (see file_input_modes).
 
-Two schema types render as several widgets rather than one, so they get a small
-Python holder class each (`MultiChoiceGroup`, `FileOrFolderInput`) instead of a
-QWidget subclass — PythonQt makes subclassing awkward, and everything the rest
-of this module needs fits in a plain object exposing `container` for layout.
+Some schema types render as several widgets rather than one, so they get a
+small Python holder class each (`MultiChoiceGroup`, `FileOrFolderInput`,
+`JoystickInput`) instead of a QWidget subclass: PythonQt makes subclassing
+awkward, and everything the rest of this module needs fits in a plain object
+exposing `container` for layout. The one genuine QWidget subclass, the
+joystick pad itself, lives in joystick.py.
 
 Escape hatch: a hand-written .ui can still be used by giving its widgets a Qt
 dynamic property named "serverArgName" matching the schema argument name —
@@ -33,6 +35,7 @@ import ctk
 import qt
 
 from . import accepts_folder, argument_types, design, file_extensions_for, is_file_type
+from .joystick import JoystickPad
 
 logger = logging.getLogger("ServerToolsCore.formgen")
 
@@ -78,6 +81,41 @@ AUTOMATIC_OPTION = "(automatic — the server chooses)"
 BROWSE_FILE_LABEL = "File..."
 BROWSE_FOLDER_LABEL = "Folder..."
 PATH_PLACEHOLDER = "Select a file or a folder"
+
+# The one-click test-data button at the end of an input row (the original
+# extension's "Test Files" / "Download Test file" buttons, now inline). The
+# button is only built when the module declares a URL for the argument
+# (base_widget.TEST_DATA); the download itself lives in base_widget, this
+# module never talks HTTP.
+DOWNLOAD_LABEL = "Test data"
+
+# How a volume already open in the scene appears in the input dropdown, next
+# to the server-hosted names. Selection kind is decided by index, never by
+# parsing this prefix back (see ServerFileInput._selection).
+OPEN_VOLUME_PREFIX = "Open volume: "
+
+# Extensions Slicer holds as a scalar volume in the scene. A file argument
+# accepting one of these can equally be satisfied by a volume the user already
+# has open, exported at upload time (base_widget._prepareOneInputFile).
+_VOLUME_EXTENSIONS = {".nii", ".nii.gz", ".nrrd", ".gipl", ".gipl.gz", ".mha", ".mhd"}
+
+
+def accepts_volume(spec: dict) -> bool:
+    """Whether this file argument can be satisfied by a scalar volume loaded
+    in the MRML scene. Read off the schema, like every other widget decision:
+    a type whose name says volume/nifti, or whose published extensions
+    include a volume format. A csv input must never offer scene volumes."""
+    if any("volume" in name or "nifti" in name for name in argument_types(spec)):
+        return True
+    return any(extension in _VOLUME_EXTENSIONS for extension in file_extensions_for(spec))
+
+# `ArgSpec.ui` values on the scalar types (the multichoice ones are LAYOUTS
+# below). "slider" turns a bounded int/float into a ctkSliderWidget; "joystick"
+# gives a vec2 the 2D pad. Like every presentation hint, an unknown one falls
+# back to the plain rendering with a warning: a newer server must never be
+# able to break an older client's panel.
+SLIDER_UI = "slider"
+JOYSTICK_UI = "joystick"
 
 
 class MultiChoiceGroup:
@@ -312,6 +350,146 @@ _LAYOUT_BUILDERS = {
 LAYOUTS = tuple(name for name in _LAYOUT_BUILDERS if name)
 
 
+class JoystickInput:
+    """The widgets rendered for a `"vec2"` argument: two numbers set together.
+
+    The two spin boxes ARE the value: `value()` reads them and nothing else.
+    The pad (built only when the schema says `ui: "joystick"`) is a second way
+    of writing into them (a drag sets both at once) while the boxes remain
+    for typing an exact number, the same pairing FlexReg keeps between its
+    pads and line edits. Change notification hangs off the boxes alone, so
+    every input path (drag, wheel, keys, typing) is one code path.
+
+    A `spring_back` pad is relative: the knob deals out displacements from its
+    rest position and the boxes accumulate them (clamped by their own ranges),
+    the running total becoming the new base when the gesture ends. Without it
+    the pad is absolute and simply mirrors the boxes.
+    """
+
+    def __init__(self, x_range=(0.0, 1.0), y_range=(0.0, 1.0), initial=None, step=None,
+                 x_axis="X", y_axis="Y", x_labels=None, y_labels=None,
+                 spring_back=False, description="", with_pad=True):
+        self._syncing = False
+
+        self.container = qt.QWidget()
+        column = qt.QVBoxLayout(self.container)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(design.SPACING_XS)
+        if description:
+            column.addWidget(design.hint_label(description))
+
+        row_container = qt.QWidget()
+        row = qt.QHBoxLayout(row_container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(design.SPACING_MD)
+
+        x0, y0 = _vec2_initial(initial, x_range, y_range)
+        self._base = (x0, y0)
+
+        self.xBox = _axis_spinbox(x_range, step)
+        self.yBox = _axis_spinbox(y_range, step)
+        self.xBox.setValue(x0)
+        self.yBox.setValue(y0)
+
+        self.pad = None
+        if with_pad:
+            self.pad = JoystickPad(
+                x_range=x_range, y_range=y_range, x_step=step, y_step=step,
+                x_labels=x_labels, y_labels=y_labels, spring_back=spring_back,
+            )
+            self.pad.setDefaults(x0, y0)
+            self.pad.setValues(x0, y0)
+            self.pad.onChanged = self._onPadMoved
+            self.pad.onReleased = self._onPadReleased
+            row.addWidget(self.pad)
+
+        boxes_container = qt.QWidget()
+        boxes = qt.QFormLayout(boxes_container)
+        boxes.addRow(design.section_title(x_axis), self.xBox)
+        boxes.addRow(design.section_title(y_axis), self.yBox)
+        row.addWidget(boxes_container, 1)
+        column.addWidget(row_container)
+
+        self.xBox.valueChanged.connect(self._onBoxEdited)
+        self.yBox.valueChanged.connect(self._onBoxEdited)
+
+    def value(self) -> list:
+        return [self.xBox.value, self.yBox.value]
+
+    def _onPadMoved(self, pad) -> None:
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            if pad.spring_back:
+                # The knob's offset from its rest position is a displacement
+                # dealt onto the committed base, not a value of its own.
+                self.xBox.setValue(self._base[0] + (pad.x - pad.default_x))
+                self.yBox.setValue(self._base[1] + (pad.y - pad.default_y))
+            else:
+                self.xBox.setValue(pad.x)
+                self.yBox.setValue(pad.y)
+        finally:
+            self._syncing = False
+
+    def _onPadReleased(self, _pad) -> None:
+        # The gesture's running total becomes the new base; the pad has
+        # already sprung home silently.
+        self._base = (self.xBox.value, self.yBox.value)
+
+    def _onBoxEdited(self, *_args) -> None:
+        if self._syncing:
+            return
+        self._base = (self.xBox.value, self.yBox.value)
+        if self.pad is not None and not self.pad.spring_back:
+            self._syncing = True
+            try:
+                self.pad.setValues(self.xBox.value, self.yBox.value)
+            finally:
+                self._syncing = False
+
+    # -- the slice of the QWidget API build()/base_widget use on a field ----
+
+    def setProperty(self, name, value) -> None:
+        self.container.setProperty(name, value)
+
+    def setToolTip(self, text) -> None:
+        self.container.setToolTip(text)
+
+
+def _axis_spinbox(bounds, step) -> qt.QDoubleSpinBox:
+    box = qt.QDoubleSpinBox()
+    low, high = sorted((float(bounds[0]), float(bounds[1])))
+    box.setRange(low, high)
+    box.setDecimals(_decimals_for_step(step))
+    if step:
+        box.setSingleStep(float(step))
+    return box
+
+
+def _vec2_initial(initial, x_range, y_range):
+    """The pair the panel opens at: the declared `initial`, or the centre of
+    both axes (a joystick's rest position, and where a spring_back pad deals
+    its displacements from)."""
+    if isinstance(initial, (list, tuple)) and len(initial) == 2:
+        return float(initial[0]), float(initial[1])
+    return ((float(x_range[0]) + float(x_range[1])) / 2.0,
+            (float(y_range[0]) + float(y_range[1])) / 2.0)
+
+
+def _decimals_for_step(step, maximum=6) -> int:
+    """Decimal places that make `step` representable (0.05 needs 2), with 2
+    (the ctk default) when no step is declared."""
+    if not step:
+        return 2
+    step = abs(float(step))
+    decimals = 0
+    while decimals < maximum and abs(round(step) - step) > 1e-9:
+        step *= 10.0
+        decimals += 1
+    return decimals
+
+
 class FileOrFolderInput:
     """One input row for a file argument that also accepts a whole folder —
     `types` containing "folder", e.g. example_tool's `input`:
@@ -341,7 +519,7 @@ class FileOrFolderInput:
     observable.
     """
 
-    def __init__(self, extensions=()):
+    def __init__(self, extensions=(), with_download=False):
         self._extensions = tuple(extensions)
 
         self.container = qt.QWidget()
@@ -351,11 +529,18 @@ class FileOrFolderInput:
 
         self.pathEdit = qt.QLineEdit()
         self.pathEdit.setPlaceholderText(PATH_PLACEHOLDER)
-        self.fileButton = qt.QPushButton(BROWSE_FILE_LABEL)
-        self.folderButton = qt.QPushButton(BROWSE_FOLDER_LABEL)
+        self.fileButton = design.compact_button(BROWSE_FILE_LABEL)
+        self.folderButton = design.compact_button(BROWSE_FOLDER_LABEL)
         row_layout.addWidget(self.pathEdit, 1)
         row_layout.addWidget(self.fileButton)
         row_layout.addWidget(self.folderButton)
+
+        # Built here so the whole input, test-data button included, stays one
+        # line; base_widget connects it (the download itself is HTTP).
+        self.downloadButton = None
+        if with_download:
+            self.downloadButton = design.compact_button(DOWNLOAD_LABEL)
+            row_layout.addWidget(self.downloadButton)
 
         self.fileButton.clicked.connect(self._onBrowseFile)
         self.folderButton.clicked.connect(self._onBrowseFolder)
@@ -394,71 +579,143 @@ class FileOrFolderInput:
 
 
 class ServerFileInput:
-    """One input row for a file argument the SERVER can also provide by name —
-    `server_selectable` on a file type, e.g. ALI's and AMASSS's `input`.
+    """One input row for a file argument that can be satisfied three ways: a
+    local file or folder to upload, a file the SERVER already hosts by name
+    (`server_selectable`, e.g. ALI's and AMASSS's `input`), or a scalar
+    volume already OPEN in the scene (any argument `accepts_volume` says yes
+    to).
 
-    Such an argument accepts either shape: the caller uploads its own file, or
-    it sends the *name* of one the server already hosts (`GET
-    /tools/<tool>/data`), which the server resolves against its read-only data
-    store. The named file never travels, in either direction — which is the
-    whole point for a test cohort of confidential scans.
+    Everything sits on ONE line, [sources dropdown][local picker][test data],
+    matching the original modules where each input is a single row.
 
-    On the wire the two are genuinely different: an upload is a multipart file
-    part, a server-side selection is a plain form value under the argument's
-    own name. So this holder keeps the local picker it wraps, and answers which
-    of the two the user actually chose (`server_name`).
+    The dropdown's entries, in order: the upload entry, the open volumes
+    (fed by base_widget; formgen never touches the MRML scene), then the
+    server-hosted names (`GET /tools/<tool>/data`). Which kind is selected is
+    decided by INDEX (`_selection`), never by parsing the text back, so a
+    hosted file whose name happens to start with the volume prefix cannot be
+    misread.
 
-    The two are kept mutually exclusive by clearing the other one, not by
-    letting one silently win: picking a server file empties the path field, and
-    typing/browsing a path resets the dropdown. A precedence rule the user
-    cannot see is how you end up uploading a file you thought you had replaced.
+    On the wire the three are genuinely different: an upload is a multipart
+    file part, a server-side selection is a plain form value under the
+    argument's own name (the named file never travels in either direction,
+    which is the whole point for a test cohort of confidential scans), and an
+    open volume is exported to disk at upload time and sent like a local file
+    (base_widget._prepareOneInputFile).
+
+    The sources are kept mutually exclusive by clearing the other one, not by
+    letting one silently win: picking a dropdown entry empties the path
+    field, and typing/browsing a path resets the dropdown. A precedence rule
+    the user cannot see is how you end up uploading a file you thought you
+    had replaced.
+
+    Rebuilding the dropdown (`setChoices`/`setVolumeChoices`) preserves the
+    current selection by text when it is still offered: both lists are
+    refreshed on every `enter()`, and a refresh must not silently reset a
+    chosen entry to the first one in the list.
     """
 
-    # First entry, and the one that means "no server-side file": a combo box
+    # First entry, and the one that means "nothing chosen here": a combo box
     # cannot express "nothing selected" in a way a user reads as deliberate.
     UPLOAD_OPTION = "Upload my own file..."
 
-    def __init__(self, local):
+    def __init__(self, local, with_download=False):
         self.local = local
         self._syncing = False
+        self._server_names = []
+        self._volume_names = []
 
         self.container = qt.QWidget()
-        column = qt.QVBoxLayout(self.container)
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(design.SPACING_XS)
+        row = qt.QHBoxLayout(self.container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(design.SPACING_XS)
 
         self.combo = qt.QComboBox()
+        # Without this a long hosted name (cohort_10_patients.zip) widens the
+        # dropdown until the path field has no room left on the line.
+        self.combo.sizeAdjustPolicy = qt.QComboBox.AdjustToMinimumContentsLengthWithIcon
+        self.combo.minimumContentsLength = 14
         self.combo.addItems([self.UPLOAD_OPTION])
-        column.addWidget(self.combo)
-        column.addWidget(row_widget(local))
+        row.addWidget(self.combo)
+        row.addWidget(row_widget(local), 1)
 
-        self.combo.currentTextChanged.connect(self._onServerChoice)
+        # Built here so the whole input, test-data button included, stays one
+        # line; base_widget connects it (the download itself is HTTP).
+        self.downloadButton = None
+        if with_download:
+            self.downloadButton = design.compact_button(DOWNLOAD_LABEL)
+            row.addWidget(self.downloadButton)
+
+        self.combo.currentTextChanged.connect(self._onComboChoice)
         connect_changed(local, self._onLocalChoice)
 
     def setChoices(self, names) -> None:
-        """Fill the dropdown with the server-side names, keeping the upload
-        entry first. Called once the schema is known — formgen never talks
-        HTTP (see ARCHITECTURE.md dependency rule)."""
-        self.combo.clear()
-        self.combo.addItems([self.UPLOAD_OPTION] + list(names))
+        """Fill the dropdown with the server-hosted names. Called once the
+        schema is known and again on every enter(); formgen never talks HTTP
+        (see ARCHITECTURE.md dependency rule)."""
+        self._server_names = list(names)
+        self._rebuild()
+
+    def setVolumeChoices(self, names) -> None:
+        """The scalar volumes currently open in the scene, as display names.
+        base_widget owns the name-to-node mapping and the refresh triggers;
+        this widget only offers the entries."""
+        self._volume_names = list(names)
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        previous = self.combo.currentText
+        # Guarded: clear()+addItems reselects index 0, which would otherwise
+        # run the mutual-exclusion sync for a choice the user never made.
+        self._syncing = True
+        try:
+            self.combo.clear()
+            entries = [self.UPLOAD_OPTION]
+            entries += [OPEN_VOLUME_PREFIX + name for name in self._volume_names]
+            entries += self._server_names
+            self.combo.addItems(entries)
+            if previous in entries:
+                self.combo.setCurrentIndex(entries.index(previous))
+        finally:
+            self._syncing = False
+
+    def _selection(self):
+        """("upload" | "volume" | "server", name) for the current entry,
+        decided by index so no name can be misparsed."""
+        index = self.combo.currentIndex
+        if index <= 0:
+            return "upload", ""
+        if index <= len(self._volume_names):
+            return "volume", self._volume_names[index - 1]
+        server_index = index - 1 - len(self._volume_names)
+        if server_index < len(self._server_names):
+            return "server", self._server_names[server_index]
+        return "upload", ""
 
     def server_name(self) -> str:
-        """The chosen server-side file name, or "" when uploading."""
-        text = self.combo.currentText
-        return "" if text in ("", self.UPLOAD_OPTION) else text
+        """The chosen server-side file name, or "" otherwise."""
+        kind, name = self._selection()
+        return name if kind == "server" else ""
+
+    def volume_name(self) -> str:
+        """The chosen open volume's display name, or "" otherwise."""
+        kind, name = self._selection()
+        return name if kind == "volume" else ""
 
     @property
     def currentPath(self) -> str:
-        """The LOCAL path to upload — empty while a server-side file is chosen,
-        so nothing is uploaded for an argument that is already satisfied."""
-        return "" if self.server_name() else _local_path(self.local)
+        """The LOCAL path to upload: empty while a server file or an open
+        volume is chosen, so nothing is read off disk for an argument that is
+        already satisfied another way."""
+        if self.server_name() or self.volume_name():
+            return ""
+        return _local_path(self.local)
 
     def is_folder(self) -> bool:
         checker = getattr(self.local, "is_folder", None)
         return bool(checker()) if checker else False
 
-    def _onServerChoice(self, _text=None) -> None:
-        if self._syncing or not self.server_name():
+    def _onComboChoice(self, _text=None) -> None:
+        if self._syncing or self.combo.currentIndex <= 0:
             return
         self._syncing = True
         try:
@@ -482,6 +739,22 @@ class ServerFileInput:
 
     def setToolTip(self, text) -> None:
         self.container.setToolTip(text)
+
+
+def download_button(widget):
+    """The row's test-data button, wherever the composite put it, or None."""
+    button = getattr(widget, "downloadButton", None)
+    if button is not None:
+        return button
+    return getattr(getattr(widget, "local", None), "downloadButton", None)
+
+
+def set_local_path(widget, value: str) -> None:
+    """Write a local path into any input-row kind: what base_widget fills in
+    once the test data has been downloaded. Writing the local half of a
+    ServerFileInput also resets its dropdown, through its own sync."""
+    target = widget.local if isinstance(widget, ServerFileInput) else widget
+    _set_local_path(target, value)
 
 
 def _local_path(widget) -> str:
@@ -650,23 +923,16 @@ def _make_widget(name: str, spec: dict):
             widget.setText(str(initial))
         return widget
     if arg_type == "int":
-        widget = qt.QSpinBox()
-        widget.setRange(-2147483648, 2147483647)
-        if initial is not None:
-            widget.setValue(int(initial))
-        return widget
+        return _make_numeric_widget(name, spec, integer=True, initial=initial)
     if arg_type == "float":
-        widget = qt.QDoubleSpinBox()
-        widget.setRange(-1e12, 1e12)
-        widget.setDecimals(6)
-        if initial is not None:
-            widget.setValue(float(initial))
-        return widget
+        return _make_numeric_widget(name, spec, integer=False, initial=initial)
     if arg_type == "bool":
         widget = qt.QCheckBox()
         if initial is not None:
             widget.setChecked(bool(initial))
         return widget
+    if arg_type == "vec2":
+        return _make_vec2_widget(name, spec)
     if arg_type == "choice":
         return _make_choice_widget(name, spec)
     if arg_type == "multichoice":
@@ -681,6 +947,121 @@ def _make_widget(name: str, spec: dict):
 
     logger.warning("Unknown argument type '%s' for '%s', falling back to QLineEdit", arg_type, name)
     return qt.QLineEdit()
+
+
+def _make_numeric_widget(name: str, spec: dict, integer: bool, initial):
+    """An int/float argument. `ui: "slider"` (with min/max declared) renders
+    the combined slider+spinbox; otherwise a spin box whose range and step
+    still honour any declared bounds. min/max alone constrain the field, they
+    never switch the widget kind, so a bound added server-side for validation
+    cannot silently turn a spin box into a slider."""
+    ui = spec.get("ui")
+    if ui == SLIDER_UI:
+        slider = _make_slider_widget(name, spec, integer)
+        if slider is not None:
+            return slider
+    elif ui is not None:
+        logger.warning(
+            "Unknown %s ui '%s' for '%s', falling back to a spin box",
+            "int" if integer else "float", ui, name,
+        )
+
+    if integer:
+        widget = qt.QSpinBox()
+        widget.setRange(
+            -2147483648 if spec.get("min") is None else int(spec["min"]),
+            2147483647 if spec.get("max") is None else int(spec["max"]),
+        )
+        if spec.get("step") is not None:
+            widget.setSingleStep(int(spec["step"]))
+        if initial is not None:
+            widget.setValue(int(initial))
+        return widget
+
+    widget = qt.QDoubleSpinBox()
+    widget.setRange(
+        -1e12 if spec.get("min") is None else float(spec["min"]),
+        1e12 if spec.get("max") is None else float(spec["max"]),
+    )
+    declared = spec.get("decimals")
+    widget.setDecimals(int(declared) if declared is not None else 6)
+    if spec.get("step") is not None:
+        widget.setSingleStep(float(spec["step"]))
+    if initial is not None:
+        widget.setValue(float(initial))
+    return widget
+
+
+def _make_slider_widget(name: str, spec: dict, integer: bool):
+    """A bounded int/float rendered as a ctkSliderWidget, the slider + spin
+    box combination GreedyReg's manual-alignment rows use. Returns None when
+    the schema asked for a slider without both bounds: an unbounded slider has
+    no geometry, so the argument falls back to a plain spin box rather than
+    failing the panel."""
+    minimum, maximum = spec.get("min"), spec.get("max")
+    if minimum is None or maximum is None:
+        logger.warning(
+            "Argument '%s' asks for ui \"slider\" but declares no min/max bounds, "
+            "falling back to a spin box", name,
+        )
+        return None
+
+    widget = ctk.ctkSliderWidget()
+    widget.minimum = float(minimum)
+    widget.maximum = float(maximum)
+    step = spec.get("step")
+    if integer:
+        widget.decimals = 0
+        widget.singleStep = float(step) if step is not None else 1.0
+    else:
+        declared = spec.get("decimals")
+        widget.decimals = int(declared) if declared is not None else _decimals_for_step(step)
+        if step is not None:
+            widget.singleStep = float(step)
+    initial = spec.get("initial")
+    if initial is not None:
+        widget.value = float(initial)
+    return widget
+
+
+def _make_vec2_widget(name: str, spec: dict):
+    """A `"vec2"` argument: two numbers set together. `ui: "joystick"` adds
+    the 2D pad next to the boxes; any other hint falls back to the boxes
+    alone, same rule as the multichoice layouts: a newer server's presentation
+    hint must never break an older client."""
+    ui = spec.get("ui")
+    if ui is not None and ui != JOYSTICK_UI:
+        logger.warning("Unknown vec2 ui '%s' for '%s', falling back to two spin boxes", ui, name)
+    return JoystickInput(
+        x_range=_axis_range(name, spec, "x_range"),
+        y_range=_axis_range(name, spec, "y_range"),
+        initial=spec.get("initial"),
+        step=spec.get("step"),
+        x_axis=spec.get("x_label") or "X",
+        y_axis=spec.get("y_label") or "Y",
+        x_labels=_axis_labels(spec.get("x_labels")),
+        y_labels=_axis_labels(spec.get("y_labels")),
+        spring_back=bool(spec.get("spring_back")),
+        description=spec.get("description", ""),
+        with_pad=ui == JOYSTICK_UI,
+    )
+
+
+def _axis_range(name: str, spec: dict, key: str):
+    """One vec2 axis. Index 0 is the left/bottom end, index 1 the right/top,
+    so declaring the bounds inverted mirrors the axis (see JoystickPad)."""
+    declared = spec.get(key)
+    if isinstance(declared, (list, tuple)) and len(declared) == 2 and declared[0] != declared[1]:
+        return float(declared[0]), float(declared[1])
+    if declared is not None:
+        logger.warning("Argument '%s' declares an invalid %s %r, using (0, 1)", name, key, declared)
+    return (0.0, 1.0)
+
+
+def _axis_labels(declared):
+    if isinstance(declared, (list, tuple)) and len(declared) == 2:
+        return tuple(str(label) for label in declared)
+    return None
 
 
 def _make_choice_widget(name: str, spec: dict):
@@ -800,30 +1181,42 @@ def result_kind_for(output_kind, declared=None) -> str:
     return declared or _RESULT_KIND_FOR_OUTPUT.get(output_kind, "text")
 
 
-def file_widget(spec: dict, mode: str = "auto"):
+def file_widget(spec: dict, mode: str = "auto", with_download: bool = False):
     """The picker for a file argument. `mode` defaults to the schema-driven
     rule above; base_widget passes an explicit one for what the schema cannot
     express (or to force a single selection kind).
 
-    Kept here (rather than in base_widget) so every "schema shape -> Qt widget"
-    decision lives in one file; `build()` itself never emits one — see the
-    module docstring and FILE_INPUTS.
+    `with_download` adds the inline test-data button: the module declared a
+    TEST_DATA URL for this argument. The button is created here so the row
+    stays one line; base_widget wires it (the download itself is HTTP).
+
+    Kept here (rather than in base_widget) so every "schema shape -> Qt
+    widget" decision lives in one file; `build()` itself never emits one (see
+    the module docstring and FILE_INPUTS).
     """
     if mode == "auto":
         mode = auto_file_mode(spec)
 
+    # One dropdown serves both extra sources: a file the server can provide
+    # by name (server_selectable), and a volume already open in the scene
+    # (accepts_volume). Only file-typed arguments reach here: a SCALAR
+    # server_selectable argument (a model, which must never leave the server)
+    # is a plain combo box built by _make_widget, with no local picker at all.
+    wrap = bool(spec.get("server_selectable")) or accepts_volume(spec)
+
     extensions = file_extensions_for(spec)
     if mode == "file_or_folder":
-        local = FileOrFolderInput(extensions)
+        local = FileOrFolderInput(extensions, with_download=with_download and not wrap)
     else:
         local = path_widget(extensions, mode)
+        if with_download and not wrap:
+            logger.warning(
+                "Test data declared for an argument whose bare path picker "
+                "cannot host the button; ignoring"
+            )
 
-    # A file argument the server can also provide by name gets the dropdown
-    # too. Only file-typed ones reach here: a SCALAR server_selectable argument
-    # (a model, which must never leave the server) is a plain combo box built
-    # by _make_widget, with no local picker at all.
-    if spec.get("server_selectable"):
-        return ServerFileInput(local)
+    if wrap:
+        return ServerFileInput(local, with_download=with_download)
     return local
 
 
@@ -856,6 +1249,14 @@ def _read_widget(widget):
         # server reads what it receives as the selection itself. Encoding it
         # for the wire is client.py's job (JSON, never the `a,b` shortcut).
         return widget.value()
+    if isinstance(widget, JoystickInput):
+        # Both numbers, as a two-element list; client.py sends it as JSON.
+        return widget.value()
+    if isinstance(widget, ctk.ctkSliderWidget):
+        # ctk reports a double whatever `decimals` says; an integer slider
+        # (decimals == 0) reads back as the int the server declared.
+        value = widget.value
+        return int(round(value)) if widget.decimals == 0 else value
     if isinstance(widget, qt.QCheckBox):
         return widget.isChecked()
     if isinstance(widget, qt.QComboBox):
@@ -915,6 +1316,13 @@ def connect_changed(widget, callback) -> None:
         # Both buttons write into the same field, so one connection covers
         # browsing either kind as well as typing or pasting a path.
         widget.pathEdit.textChanged.connect(callback)
+    elif isinstance(widget, JoystickInput):
+        # The pad writes into the spin boxes (see JoystickInput), so the two
+        # boxes cover every input path: drag, wheel, keys and typing.
+        widget.xBox.valueChanged.connect(callback)
+        widget.yBox.valueChanged.connect(callback)
+    elif isinstance(widget, ctk.ctkSliderWidget):
+        widget.valueChanged.connect(callback)
     elif isinstance(widget, qt.QCheckBox):
         widget.toggled.connect(callback)
     elif isinstance(widget, qt.QComboBox):
