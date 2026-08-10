@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 import requests
 
+from ServerToolsCoreLib import transfer
 from ServerToolsCoreLib.client import (
     ToolResult,
     ToolServerClient,
@@ -96,7 +97,7 @@ class ToolServerClientTest(unittest.TestCase):
         self.assertTrue(self.client.verify_tls)
         self.assertEqual(self.client.timeout, 600)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_configure_drops_cached_tools(self, mock_get):
         mock_get.return_value = _response(json_data=TOOLS_RESPONSE)
         self.client.list_tools()
@@ -116,7 +117,7 @@ class ToolServerClientTest(unittest.TestCase):
 
     # -- list_tools / get_tool_schema ---------------------------------
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_list_tools_caches(self, mock_get):
         mock_get.return_value = _response(json_data=TOOLS_RESPONSE)
 
@@ -127,7 +128,7 @@ class ToolServerClientTest(unittest.TestCase):
         self.assertIn("example_tool", tools)
         self.assertIs(tools, tools_again)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_list_tools_force_refresh(self, mock_get):
         mock_get.return_value = _response(json_data=TOOLS_RESPONSE)
 
@@ -136,7 +137,7 @@ class ToolServerClientTest(unittest.TestCase):
 
         self.assertEqual(mock_get.call_count, 2)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_get_tool_schema_unknown_tool_lists_available(self, mock_get):
         mock_get.return_value = _response(
             json_data=[
@@ -151,7 +152,7 @@ class ToolServerClientTest(unittest.TestCase):
         self.assertIn("does_not_exist", str(ctx.exception))
         self.assertIn("alpha_tool, beta_tool", str(ctx.exception))
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_get_tool_schema_can_bypass_the_cache(self, mock_get):
         # What a panel retrying after a failure needs: the cached list may be
         # the very reason the tool wasn't found.
@@ -164,7 +165,7 @@ class ToolServerClientTest(unittest.TestCase):
         self.assertIn("label", self.client.get_tool_schema("example_tool", force_refresh=True)["arguments"])
         self.assertEqual(mock_get.call_count, 2)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_get_tool_schema_uses_the_cache_by_default(self, mock_get):
         mock_get.return_value = _response(json_data=TOOLS_RESPONSE)
         self.client.get_tool_schema("example_tool")
@@ -172,7 +173,7 @@ class ToolServerClientTest(unittest.TestCase):
 
         self.assertEqual(mock_get.call_count, 1)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_list_tools_uses_short_timeout(self, mock_get):
         # get_tool_schema() runs synchronously from a module's setup(); it must
         # not be able to freeze Slicer for up to self._timeout (600s).
@@ -183,7 +184,7 @@ class ToolServerClientTest(unittest.TestCase):
         self.assertEqual(kwargs["timeout"], _TOOLS_FETCH_TIMEOUT)
         self.assertLess(_TOOLS_FETCH_TIMEOUT, self.client._timeout)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_fetch_tools_network_error_wrapped(self, mock_get):
         mock_get.side_effect = requests.RequestException("boom")
         with self.assertRaises(ServerToolError):
@@ -191,7 +192,7 @@ class ToolServerClientTest(unittest.TestCase):
 
     # -- list_tool_data (server-side models/testfiles) -----------------
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_list_tool_data_request_shape_and_result(self, mock_get):
         mock_get.return_value = _response(
             json_data={"models": ["stacking_v1.zip", "stacking_v2.zip"], "testfiles": ["demo.zip"]}
@@ -208,19 +209,19 @@ class ToolServerClientTest(unittest.TestCase):
         # must use the short timeout, never the 600s tool-execution one.
         self.assertEqual(kwargs["timeout"], _TOOLS_FETCH_TIMEOUT)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_list_tool_data_tolerates_missing_keys(self, mock_get):
         mock_get.return_value = _response(json_data={})
 
         self.assertEqual(self.client.list_tool_data("SurgMovPred"), {"models": [], "testfiles": []})
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_list_tool_data_network_error_wrapped(self, mock_get):
         mock_get.side_effect = requests.RequestException("boom")
         with self.assertRaises(ServerToolError):
             self.client.list_tool_data("SurgMovPred")
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_list_tool_data_maps_error_status(self, mock_get):
         mock_get.return_value = _response(status_code=401, json_data={})
         with self.assertRaises(ServerToolError) as ctx:
@@ -229,28 +230,28 @@ class ToolServerClientTest(unittest.TestCase):
 
     # -- local validation ----------------------------------------------
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_run_rejects_unexpected_argument_locally(self, mock_get):
         mock_get.return_value = _response(json_data=TOOLS_RESPONSE)
 
         with self.assertRaises(ServerToolError):
             self.client.run("example_tool", args={"typo": "x"}, files={"file": __file__}, output_dir="/tmp")
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_run_rejects_missing_required_argument_locally(self, mock_get):
         mock_get.return_value = _response(json_data=TOOLS_RESPONSE)
 
         with self.assertRaises(ServerToolError):
             self.client.run("example_tool", args={}, files={"file": __file__}, output_dir="/tmp")
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_run_rejects_missing_required_file_locally(self, mock_get):
         mock_get.return_value = _response(json_data=TOOLS_RESPONSE)
 
         with self.assertRaises(ServerToolError):
             self.client.run("example_tool", args={"label": "x"}, files={}, output_dir="/tmp")
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_run_allows_missing_optional_file_locally(self, mock_get):
         mock_get.return_value = _response(
             json_data=[
@@ -272,7 +273,7 @@ class ToolServerClientTest(unittest.TestCase):
         except ServerToolError as exc:
             self.fail(f"Optional file argument should not be required: {exc}")
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_run_rejects_file_when_tool_has_no_file_argument_locally(self, mock_get):
         mock_get.return_value = _response(
             json_data=[{"name": "no_file_tool", "arguments": {}, "output_kind": "text"}]
@@ -281,7 +282,7 @@ class ToolServerClientTest(unittest.TestCase):
         with self.assertRaises(ServerToolError):
             self.client.run("no_file_tool", args={}, files={"file": __file__}, output_dir="/tmp")
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_run_rejects_file_argument_name_not_declared_as_file_locally(self, mock_get):
         # "label" exists in the schema but is type "str", not "file".
         mock_get.return_value = _response(json_data=TOOLS_RESPONSE)
@@ -291,7 +292,7 @@ class ToolServerClientTest(unittest.TestCase):
 
     # -- multi-file tools (e.g. real SurgMovPred: "model" + "input") ------
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_run_rejects_when_only_one_of_two_required_files_given(self, mock_get):
         mock_get.return_value = _response(
             json_data=[
@@ -311,8 +312,8 @@ class ToolServerClientTest(unittest.TestCase):
 
         self.assertIn("model", str(ctx.exception))
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_run_sends_each_file_under_its_own_argument_name(self, mock_get, mock_post):
         mock_get.return_value = _response(
             json_data=[
@@ -348,8 +349,8 @@ class ToolServerClientTest(unittest.TestCase):
 
     # -- request shape ----------------------------------------------------
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_run_sends_filename_with_upload(self, mock_get, mock_post):
         mock_get.return_value = _response(json_data=TOOLS_RESPONSE)
         mock_post.return_value = _response(json_data={"result": "hello"})
@@ -361,8 +362,8 @@ class ToolServerClientTest(unittest.TestCase):
         self.assertEqual(filename, os.path.basename(__file__))
         self.assertTrue(file_handle.closed)  # closed after the call
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_run_text_result_and_request_shape(self, mock_get, mock_post):
         mock_get.return_value = _response(json_data=TOOLS_RESPONSE)
         mock_post.return_value = _response(json_data={"result": "hello"})
@@ -379,8 +380,8 @@ class ToolServerClientTest(unittest.TestCase):
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer secret-token")
         self.assertEqual(kwargs["data"], {"label": "x"})
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_run_stringifies_bool(self, mock_get, mock_post):
         mock_get.return_value = _response(
             json_data=[
@@ -400,8 +401,8 @@ class ToolServerClientTest(unittest.TestCase):
 
     # -- error mapping ----------------------------------------------------
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_run_maps_422_to_server_message(self, mock_get, mock_post):
         mock_get.return_value = _response(
             json_data=[{"name": "no_args_tool", "arguments": {}, "output_kind": "text"}]
@@ -416,8 +417,8 @@ class ToolServerClientTest(unittest.TestCase):
         self.assertIn("Missing required argument", str(ctx.exception))
         self.assertEqual(ctx.exception.status_code, 422)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_run_maps_401(self, mock_get, mock_post):
         mock_get.return_value = _response(
             json_data=[{"name": "no_args_tool", "arguments": {}, "output_kind": "text"}]
@@ -429,8 +430,8 @@ class ToolServerClientTest(unittest.TestCase):
 
         self.assertEqual(ctx.exception.status_code, 401)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_error_message_falls_back_to_plain_text_body(self, mock_get, mock_post):
         mock_get.return_value = _response(
             json_data=[{"name": "no_args_tool", "arguments": {}, "output_kind": "text"}]
@@ -446,8 +447,8 @@ class ToolServerClientTest(unittest.TestCase):
 
     # -- result filename / extension ---------------------------------------
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_segmentation_result_gets_nii_gz_extension(self, mock_get, mock_post):
         mock_get.return_value = _response(
             json_data=[{"name": "seg_tool", "arguments": {}, "output_kind": "segmentation"}]
@@ -463,8 +464,8 @@ class ToolServerClientTest(unittest.TestCase):
 
         self.assertTrue(result.path.endswith(".nii.gz"), result.path)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_result_filename_prefers_content_disposition(self, mock_get, mock_post):
         mock_get.return_value = _response(
             json_data=[{"name": "seg_tool", "arguments": {}, "output_kind": "segmentation"}]
@@ -484,8 +485,8 @@ class ToolServerClientTest(unittest.TestCase):
 
         self.assertEqual(os.path.basename(result.path), "custom_name.nrrd")
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_xlsx_result_keeps_its_own_extension_not_zip(self, mock_get, mock_post):
         # Regression: an .xlsx is a zip container internally (OOXML). The
         # resolved result filename must never end in .zip, or downstream code
@@ -511,8 +512,8 @@ class ToolServerClientTest(unittest.TestCase):
         self.assertEqual(os.path.basename(result.path), "predictions_outputs.xlsx")
         self.assertFalse(result.path.lower().endswith(".zip"))
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_result_filename_falls_back_to_mimetype_extension_without_content_disposition(self, mock_get, mock_post):
         # No Content-Disposition this time: the extension must still come from
         # a real MIME lookup (mirroring the server's own mimetypes.guess_type),
@@ -532,8 +533,8 @@ class ToolServerClientTest(unittest.TestCase):
 
         self.assertTrue(result.path.endswith(".csv"), result.path)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_run_writes_binary_result_to_output_dir(self, mock_get, mock_post):
         import tempfile
 
@@ -554,8 +555,8 @@ class ToolServerClientTest(unittest.TestCase):
 
     # -- download integrity ------------------------------------------------
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_run_streams_the_response(self, mock_get, mock_post):
         # stream=True is what keeps a multi-hundred-MB result archive out of
         # Slicer's RAM: the body must be consumed by iter_content, not
@@ -568,8 +569,8 @@ class ToolServerClientTest(unittest.TestCase):
         _, kwargs = mock_post.call_args
         self.assertIs(kwargs["stream"], True)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_truncated_download_is_rejected_and_removed(self, mock_get, mock_post):
         import tempfile
 
@@ -589,8 +590,8 @@ class ToolServerClientTest(unittest.TestCase):
             # finding it would mistake it for a real result.
             self.assertEqual(os.listdir(out_dir), [])
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_corrupt_zip_result_is_rejected_and_removed(self, mock_get, mock_post):
         import tempfile
 
@@ -613,8 +614,8 @@ class ToolServerClientTest(unittest.TestCase):
             self.assertIn("unreadable", str(ctx.exception))
             self.assertEqual(os.listdir(out_dir), [])
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_intact_zip_result_passes_verification(self, mock_get, mock_post):
         import tempfile
 
@@ -638,8 +639,8 @@ class ToolServerClientTest(unittest.TestCase):
             with open(result.path, "rb") as fh:
                 self.assertEqual(fh.read(), content)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_length_check_skipped_when_body_travels_compressed(self, mock_get, mock_post):
         import tempfile
 
@@ -663,8 +664,8 @@ class ToolServerClientTest(unittest.TestCase):
             result = self.client.run("no_args_tool", args={}, output_dir=out_dir)
             self.assertEqual(result.kind, "file")
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_download_reports_progress_with_a_total(self, mock_get, mock_post):
         # A silent multi-minute run is what made a user cancel a job that was
         # working; the download phase must report bytes as they land.
@@ -694,8 +695,8 @@ class ToolServerClientTest(unittest.TestCase):
         self.assertIn("MB", downloads[-1])
         self.assertIn("100%", downloads[-1])
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_download_progress_omits_the_total_when_unusable(self, mock_get, mock_post):
         # Content-Encoding makes Content-Length count wire bytes, so a
         # percentage computed from it would run past 100.
@@ -726,12 +727,12 @@ class ToolServerClientTest(unittest.TestCase):
 
     # -- health --------------------------------------------------------
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_health_true(self, mock_get):
         mock_get.return_value = _response(json_data={"status": "ok"})
         self.assertTrue(self.client.health())
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_health_uses_short_timeout(self, mock_get):
         mock_get.return_value = _response(json_data={"status": "ok"})
         self.client.health()
@@ -740,12 +741,12 @@ class ToolServerClientTest(unittest.TestCase):
         self.assertEqual(kwargs["timeout"], _HEALTH_CHECK_TIMEOUT)
         self.assertLess(_HEALTH_CHECK_TIMEOUT, self.client._timeout)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_health_false_on_network_error(self, mock_get):
         mock_get.side_effect = requests.RequestException("boom")
         self.assertFalse(self.client.health())
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_health_does_not_swallow_unrelated_errors(self, mock_get):
         response = _response(json_data={"status": "ok"})
         response.json.side_effect = KeyError("programming error, not a network/parse issue")
@@ -887,7 +888,7 @@ class RealServerSchemaTest(unittest.TestCase):
     def setUp(self):
         self.client = ToolServerClient("http://localhost:8000", "dev-token")
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_example_tool_nifti_file_argument_is_recognized(self, mock_get):
         mock_get.return_value = _response(
             json_data=[
@@ -926,8 +927,8 @@ class RealServerSchemaTest(unittest.TestCase):
         }
     ]
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_surg_mov_pred_sends_model_name_as_form_value(self, mock_get, mock_post):
         mock_get.return_value = _response(json_data=self._SURG_MOV_PRED_SCHEMA)
         mock_post.return_value = _response(content=_zip_bytes(), headers={"Content-Type": "application/zip"})
@@ -948,7 +949,7 @@ class RealServerSchemaTest(unittest.TestCase):
         # ...and only "input" is uploaded as a file.
         self.assertEqual(set(kwargs["files"].keys()), {"input"})
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_surg_mov_pred_missing_model_name_fails_locally(self, mock_get):
         mock_get.return_value = _response(json_data=self._SURG_MOV_PRED_SCHEMA)
 
@@ -958,7 +959,7 @@ class RealServerSchemaTest(unittest.TestCase):
             )
         self.assertIn("model", str(ctx.exception))
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_surg_mov_pred_model_is_not_a_file_argument(self, mock_get):
         # Uploading a local model package is no longer supported: "model" is a
         # scalar, so passing it under `files` must be rejected before any
@@ -1033,8 +1034,8 @@ class ExampleToolRequestTest(unittest.TestCase):
         args.update(overrides)
         return args
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_form_fields_match_the_contract(self, mock_get, mock_post):
         mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
         mock_post.return_value = _response(
@@ -1056,8 +1057,8 @@ class ExampleToolRequestTest(unittest.TestCase):
         # Only the file argument is uploaded.
         self.assertEqual(set(kwargs["files"]), {"input"})
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_a_zipped_folder_is_uploaded_under_the_same_argument_name(self, mock_get, mock_post):
         # The client zips a folder selection before sending; the server sees an
         # ordinary .zip under "input" and unpacks it.
@@ -1076,8 +1077,8 @@ class ExampleToolRequestTest(unittest.TestCase):
         filename, _handle = kwargs["files"]["input"]
         self.assertEqual(filename, "example_tool_input.zip")
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_files_output_kind_is_saved_under_its_real_name(self, mock_get, mock_post):
         import tempfile
 
@@ -1100,8 +1101,8 @@ class ExampleToolRequestTest(unittest.TestCase):
         # it into the output folder (see slicer_io.is_extractable_archive).
         self.assertEqual(os.path.basename(result.path), "example_tool_results.zip")
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_unknown_option_422_is_shown_verbatim(self, mock_get, mock_post):
         # No client-side fallback for an out-of-list value: the server's own
         # message names the offending option and lists the valid ones.
@@ -1120,8 +1121,8 @@ class ExampleToolRequestTest(unittest.TestCase):
         self.assertEqual(str(ctx.exception), detail)
         self.assertEqual(ctx.exception.status_code, 422)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_413_reports_the_server_s_actual_limit(self, mock_get, mock_post):
         mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
         mock_post.return_value = _response(
@@ -1134,8 +1135,8 @@ class ExampleToolRequestTest(unittest.TestCase):
         self.assertEqual(str(ctx.exception), "File exceeds the 500 MB limit.")
         self.assertEqual(ctx.exception.status_code, 413)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_400_reports_the_allowed_extensions(self, mock_get, mock_post):
         mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
         detail = "Unsupported file extension for 'input'. Allowed: ('.csv', '.zip')"
@@ -1147,8 +1148,8 @@ class ExampleToolRequestTest(unittest.TestCase):
         self.assertEqual(str(ctx.exception), detail)
         self.assertEqual(ctx.exception.status_code, 400)
 
-    @mock.patch("ServerToolsCoreLib.client.requests.post")
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
     def test_401_reports_the_server_message(self, mock_get, mock_post):
         mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
         mock_post.return_value = _response(status_code=401, json_data={"detail": "Invalid token."})
@@ -1158,7 +1159,7 @@ class ExampleToolRequestTest(unittest.TestCase):
 
         self.assertEqual(str(ctx.exception), "Invalid token.")
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_missing_input_file_fails_locally(self, mock_get):
         mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
 
@@ -1167,7 +1168,7 @@ class ExampleToolRequestTest(unittest.TestCase):
 
         self.assertIn("input", str(ctx.exception))
 
-    @mock.patch("ServerToolsCoreLib.client.requests.get")
+    @mock.patch("requests.Session.get")
     def test_optional_choice_arguments_may_be_omitted(self, mock_get):
         # Omitting a multichoice entirely is what applies the server's declared
         # defaults — it must not be forced into the payload.
@@ -1178,6 +1179,251 @@ class ExampleToolRequestTest(unittest.TestCase):
             {"label": "test", "threshold": 1.0},
             {"input": __file__},
         )
+
+
+class BulkTransferWiringTest(unittest.TestCase):
+    """Which transfer path `run()` picks, and what it does with a result the
+    server hands back by reference. The transfer machinery itself is covered
+    against a real socket in test_transfer.py; what is tested here is the
+    decision and the plumbing around it."""
+
+    TOOL = {
+        "name": "big_tool",
+        "output_kind": "files",
+        "arguments": {
+            "input": {"type": "nifti_file", "types": ["nifti_file"], "required": True},
+        },
+    }
+
+    def setUp(self):
+        self.client = ToolServerClient("http://server", "tok", chunk_bytes=1024)
+        self.work = tempfile.mkdtemp(prefix="wiring_test_")
+        self.addCleanup(shutil.rmtree, self.work, True)
+
+    def _input(self, size):
+        path = os.path.join(self.work, "scan.nii.gz")
+        with open(path, "wb") as handle:
+            handle.write(b"x" * size)
+        return path
+
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_a_big_input_goes_up_through_the_upload_endpoints(self, mock_get, mock_post):
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = _response(json_data={"result": "done"})
+
+        with mock.patch.object(transfer, "upload_file", return_value="up123") as upload:
+            self.client.run("big_tool", files={"input": self._input(8192)}, output_dir=self.work)
+
+        upload.assert_called_once()
+        # The run request then carries a REFERENCE, not the bytes.
+        sent = mock_post.call_args.kwargs
+        self.assertIsNone(sent["files"])
+        self.assertEqual(json.loads(sent["data"]["__uploads__"]), {"input": "up123"})
+
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_a_small_input_stays_on_the_single_request_path(self, mock_get, mock_post):
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = _response(json_data={"result": "done"})
+
+        with mock.patch.object(transfer, "upload_file") as upload:
+            self.client.run("big_tool", files={"input": self._input(100)}, output_dir=self.work)
+
+        upload.assert_not_called()
+        sent = mock_post.call_args.kwargs
+        self.assertIn("input", sent["files"])
+        self.assertNotIn("__uploads__", sent["data"])
+
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_a_server_without_the_endpoints_falls_back_silently(self, mock_get, mock_post):
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = _response(json_data={"result": "done"})
+
+        with mock.patch.object(
+            transfer, "upload_file", side_effect=transfer.UnsupportedByServer
+        ) as upload:
+            self.client.run("big_tool", files={"input": self._input(8192)}, output_dir=self.work)
+
+        upload.assert_called_once()
+        # The file still travelled, the old way, and the run still worked.
+        self.assertIn("input", mock_post.call_args.kwargs["files"])
+
+        # And the verdict sticks: a second run does not probe again.
+        with mock.patch.object(transfer, "upload_file") as second:
+            self.client.run("big_tool", files={"input": self._input(8192)}, output_dir=self.work)
+        second.assert_not_called()
+
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_the_run_request_asks_for_reference_delivery(self, mock_get, mock_post):
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = _response(json_data={"result": "done"})
+
+        self.client.run("big_tool", files={"input": self._input(100)}, output_dir=self.work)
+
+        self.assertEqual(
+            mock_post.call_args.kwargs["headers"].get("X-Result-Delivery"), "reference"
+        )
+
+    @mock.patch("requests.Session.delete")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_a_referenced_result_is_pulled_in_ranges_and_then_released(
+        self, mock_get, mock_post, mock_delete
+    ):
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = _response(
+            json_data={
+                "result_ref": {
+                    "result_id": "res123",
+                    "filename": "big_tool_output.zip",
+                    "size": 4096,
+                    "media_type": "application/zip",
+                }
+            }
+        )
+
+        def fake_download(_session, _url, destination, *_a, **_kw):
+            with open(destination, "wb") as handle:
+                handle.write(_zip_bytes())
+            return destination
+
+        with mock.patch.object(transfer, "download_ranged", side_effect=fake_download) as ranged:
+            result = self.client.run(
+                "big_tool", files={"input": self._input(100)}, output_dir=self.work
+            )
+
+        self.assertEqual(result.kind, "file")
+        self.assertEqual(result.path, os.path.join(self.work, "big_tool_output.zip"))
+        self.assertEqual(ranged.call_args.args[1], "http://server/results/res123")
+        # Released once it is safely on disk, so TEMP_DIR does not hold every
+        # result for the full server-side TTL.
+        self.assertEqual(mock_delete.call_args.args[0], "http://server/results/res123")
+
+    def _reference_response(self, filename="big_tool_output.zip", size=4096):
+        return _response(
+            json_data={
+                "result_ref": {
+                    "result_id": "res123",
+                    "filename": filename,
+                    "size": size,
+                    "media_type": "application/zip",
+                }
+            }
+        )
+
+    @mock.patch("requests.Session.delete")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_a_failed_download_still_releases_the_result(self, mock_get, mock_post, mock_delete):
+        """The server holds the result until it is told it can go. A download
+        that died halfway is exactly when a return-only cleanup would leave
+        patient data sitting there until the idle reaper got to it."""
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = self._reference_response()
+
+        with mock.patch.object(
+            transfer, "download_ranged", side_effect=ServerToolError("connection lost")
+        ):
+            with self.assertRaises(ServerToolError):
+                self.client.run(
+                    "big_tool", files={"input": self._input(100)}, output_dir=self.work
+                )
+
+        self.assertEqual(mock_delete.call_args.args[0], "http://server/results/res123")
+
+    @mock.patch("requests.Session.delete")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_a_corrupt_archive_still_releases_the_result(self, mock_get, mock_post, mock_delete):
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = self._reference_response()
+
+        def truncated(_session, _url, destination, *_a, **_kw):
+            with open(destination, "wb") as handle:
+                handle.write(_zip_bytes()[:20])   # a .zip that cannot be read
+            return destination
+
+        with mock.patch.object(transfer, "download_ranged", side_effect=truncated):
+            with self.assertRaises(ServerToolError):
+                self.client.run(
+                    "big_tool", files={"input": self._input(100)}, output_dir=self.work
+                )
+
+        self.assertEqual(mock_delete.call_args.args[0], "http://server/results/res123")
+
+    @mock.patch("requests.Session.delete")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_releasing_is_retried_and_never_fails_a_finished_run(
+        self, mock_get, mock_post, mock_delete
+    ):
+        """A dropped packet should not decide whether the file goes away now or
+        waits for the reaper. But a run that produced a good result must not be
+        reported as failed because the tidy-up call did not get through."""
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = self._reference_response()
+        mock_delete.side_effect = requests.RequestException("nope")
+
+        def fake_download(_session, _url, destination, *_a, **_kw):
+            with open(destination, "wb") as handle:
+                handle.write(_zip_bytes())
+            return destination
+
+        with mock.patch.object(transfer, "download_ranged", side_effect=fake_download):
+            result = self.client.run(
+                "big_tool", files={"input": self._input(100)}, output_dir=self.work
+            )
+
+        self.assertEqual(result.kind, "file")
+        self.assertEqual(mock_delete.call_count, 2)
+
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_a_result_filename_can_never_escape_the_output_folder(self, mock_get, mock_post):
+        """The name is the server's to choose, so it is treated as untrusted:
+        a path separator in it must not place the file outside output_dir."""
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = _response(
+            json_data={
+                "result_ref": {
+                    "result_id": "res123",
+                    "filename": "../../../../etc/cron.d/pwned",
+                    "size": 10,
+                }
+            }
+        )
+
+        def fake_download(_session, _url, destination, *_a, **_kw):
+            with open(destination, "wb") as handle:
+                handle.write(b"0123456789")
+            return destination
+
+        with mock.patch.object(transfer, "download_ranged", side_effect=fake_download):
+            with mock.patch("requests.Session.delete"):
+                result = self.client.run(
+                    "big_tool", files={"input": self._input(100)}, output_dir=self.work
+                )
+
+        self.assertEqual(os.path.dirname(result.path), self.work)
+        self.assertEqual(os.path.basename(result.path), "pwned")
+
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_a_plain_text_result_is_still_a_text_result(self, mock_get, mock_post):
+        """Reference delivery only ever applies to file results; a "text"
+        tool's JSON must keep being read exactly as before."""
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = _response(json_data={"result": "42"})
+
+        result = self.client.run(
+            "big_tool", files={"input": self._input(100)}, output_dir=self.work
+        )
+
+        self.assertEqual(result.kind, "text")
+        self.assertEqual(result.text, "42")
 
 
 class DownloadFileTest(unittest.TestCase):
@@ -1191,6 +1437,24 @@ class DownloadFileTest(unittest.TestCase):
         self.work = tempfile.mkdtemp(prefix="download_test_")
         self.addCleanup(shutil.rmtree, self.work, True)
         self.destination = os.path.join(self.work, "MG_test_scan.nii.gz")
+        # download_file probes for range support before choosing how to fetch.
+        # Stubbed to "no ranges" by default so these tests keep covering the
+        # sequential path -- and, more importantly, so none of them can reach
+        # the network. The ranged path has its own tests below.
+        self._head = mock.patch.object(
+            requests.Session, "head", return_value=self._head_response(None)
+        )
+        self._head.start()
+        self.addCleanup(self._head.stop)
+
+    @staticmethod
+    def _head_response(size, accept_ranges="bytes"):
+        response = mock.MagicMock()
+        response.ok = True
+        response.headers = {}
+        if size is not None:
+            response.headers = {"Accept-Ranges": accept_ranges, "Content-Length": str(size)}
+        return response
 
     def _streaming_response(self, chunks, headers=None, status=200):
         response = mock.MagicMock()
@@ -1208,7 +1472,7 @@ class DownloadFileTest(unittest.TestCase):
     def test_streams_the_body_to_the_destination(self):
         response = self._streaming_response([b"abc", b"def"])
 
-        with mock.patch.object(requests, "get", return_value=response) as get:
+        with mock.patch.object(requests.Session, "get", return_value=response) as get:
             result = download_file(self.URL, self.destination)
 
         self.assertEqual(result, self.destination)
@@ -1224,7 +1488,7 @@ class DownloadFileTest(unittest.TestCase):
         )
         messages = []
 
-        with mock.patch.object(requests, "get", return_value=response):
+        with mock.patch.object(requests.Session, "get", return_value=response):
             download_file(self.URL, self.destination, progress_cb=messages.append)
 
         self.assertEqual(len(messages), 2)
@@ -1236,7 +1500,7 @@ class DownloadFileTest(unittest.TestCase):
     def test_an_http_error_raises_and_writes_nothing(self):
         response = self._streaming_response([], status=404)
 
-        with mock.patch.object(requests, "get", return_value=response):
+        with mock.patch.object(requests.Session, "get", return_value=response):
             with self.assertRaises(requests.HTTPError):
                 download_file(self.URL, self.destination)
 

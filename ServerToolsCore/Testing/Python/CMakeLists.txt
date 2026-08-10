@@ -11,6 +11,17 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
 
+# test_transfer.py drives the real chunked upload / ranged download against a
+# stdlib ThreadingHTTPServer on a loopback socket, no mocks, because what that
+# module does is concurrency and byte offsets. Same reasoning as above: requests
+# + stdlib only, so no Slicer interpreter is needed. It binds an ephemeral
+# 127.0.0.1 port and never reaches the network.
+add_test(
+  NAME ServerToolsCore_test_transfer
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_transfer
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+
 # test_formgen.py does need qt/ctk/slicer, but only as the small stand-ins in
 # qt_stubs.py: it checks which widgets a schema produces and what they read
 # back as, which is pure Python once the widget classes are stubbed. Same

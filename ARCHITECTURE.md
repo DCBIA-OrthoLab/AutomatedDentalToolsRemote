@@ -23,13 +23,15 @@ SlicerAutomatedDentalTools/
 │   ├── ServerToolsCore.py                  # ScriptedLoadableModule shell, parent.hidden = True
 │   │                                        # (also applies saved settings on Slicer startup)
 │   ├── Testing/Python/test_client.py       # plain unittest, requests mocked, no Slicer needed
+│   ├── Testing/Python/test_transfer.py     # chunked upload / ranged download, against a real socket
 │   ├── Testing/Python/test_formgen.py      # plain unittest, qt/ctk/slicer stubbed, no Slicer needed
 │   ├── Testing/Python/test_joystick.py     # the 2D pad's value/geometry logic, same stubs
 │   ├── Testing/Python/qt_stubs.py          # the stand-ins test_formgen/test_joystick run against
 │   └── ServerToolsCoreLib/                 # the importable Python package
 │       ├── __init__.py                     # get_client() + ToolServerClient/ToolResult/ServerToolError
-│       ├── config.py                       # SERVER_URL, API_TOKEN, VERIFY_TLS, TIMEOUT (compiled-in defaults)
+│       ├── config.py                       # SERVER_URL, API_TOKEN, VERIFY_TLS, TIMEOUT, TRANSFER_* (compiled-in defaults)
 │       ├── client.py                       # ToolServerClient — the only class that speaks HTTP
+│       ├── transfer.py                     # parallel chunked upload / ranged download of big files
 │       ├── errors.py                       # ServerToolError + HTTP status → message mapping
 │       ├── slicer_io.py                    # TempWorkspace, node export, zip/unzip, result loading
 │       ├── design.py                       # theme tokens, dark/light detection, styled-widget factories
@@ -73,7 +75,7 @@ in the repo uses.
 
 ## Dependency rule — enforced, not just documented
 
-> `client.py` and `errors.py` import neither `slicer` nor `qt`.
+> `client.py`, `transfer.py` and `errors.py` import neither `slicer` nor `qt`.
 > `base_widget.py`, `formgen.py`, `design.py`, `slicer_io.py`, `worker.py`
 > import neither `requests` nor anything HTTP.
 
@@ -92,14 +94,22 @@ since `client.py` has no Slicer dependency to avoid).
 
 ## Tests
 
-Three plain-unittest suites, all registered as ctests and all runnable with
+Four plain-unittest suites, all registered as ctests and all runnable with
 `python3 -m unittest` from `ServerToolsCore/Testing/Python/` — no Slicer
 interpreter launch:
 
-- **`test_client.py`** — `requests` mocked. HTTP behavior, local schema
+- **`test_client.py`**, `requests` mocked (on `requests.Session`, since every
+  call now goes through one pooled session). HTTP behavior, local schema
   validation, the request/response shape (including the whole `example_tool`
   round-trip: what each argument type looks like as a form field), error
-  mapping, result filenames.
+  mapping, result filenames, and which transfer path `run()` picks for a given
+  input size.
+- **`test_transfer.py`**, the one suite that is *not* mocked: it runs the real
+  chunked upload and ranged download against a real `ThreadingHTTPServer` on
+  a real socket. What that module does is concurrency and byte offsets, and a
+  mock proves nothing about either. The fake server is deliberately hostile -
+  it drops parts, corrupts checksums, cuts ranges short and refuses ranges
+  outright, because every one of those is something a real remote server does.
 - **`test_formgen.py`** — `qt`/`ctk`/`slicer` replaced by the small stand-ins
   in `qt_stubs.py`. Which widgets a schema produces, in which order, with which
   initial state, and what they read back as. That is pure Python once the
@@ -207,8 +217,11 @@ interpreter launch:
   `ToolServerClient` method on purpose: it fetches a GitHub release asset
   (the original extension's test data, see `base_widget.TEST_DATA`), so no
   server URL and no token are involved. It lives in this file because
-  client.py is the one module allowed to speak HTTP; streamed in chunks like
-  a result download, with the same progress-message shape.
+  client.py is the one module allowed to speak HTTP. Pulled over parallel
+  ranges when the host advertises `Accept-Ranges` (a GitHub release asset
+  does) and streamed sequentially otherwise, these archives run to hundreds
+  of MB and were hitting the same single-connection ceiling as everything
+  else. Same progress-message shape either way.
 - `run(tool_name, args=None, files=None, output_dir=None, progress_cb=None)`
   → `ToolResult(kind="text"|"file", text=..., path=...)`. `files` is
   `{schema_argument_name: local_file_path}` — **there is no single reserved
@@ -237,16 +250,29 @@ interpreter launch:
      options, but that spelling is for `curl` — it breaks the moment an option
      name contains a comma. A `"choice"` argument is a plain string (the
      selected option's name) and needs none of this;
-  3. opens every file in `files` in a loop, all closed in one `finally` so a
-     handle is never leaked even if a later one fails to open; each is sent as
-     `files_payload[arg_name] = (basename, handle)` — the filename (with
-     extension) has to travel with the upload since the server validates
-     extensions from it; POSTs multipart form-data with the
-     `Authorization: Bearer` header;
-  4. converts every `requests.RequestException` into `ServerToolError` — no
+  3. sends anything big enough to be worth it (`>= 2 x TRANSFER_CHUNK_MB`)
+     **ahead of this request**, in parallel parts, via `transfer.upload_file`
+    , see `transfer.py` below for why. Those arguments then travel as a
+     `{argument name: upload id}` map in the reserved `__uploads__` form field
+     instead of as bytes. A server without the endpoints raises
+     `UnsupportedByServer`, the verdict is cached on the client, and everything
+     reverts to the single-request path below;
+  4. opens every *remaining* file in `files` in a loop, all closed in one
+     `finally` so a handle is never leaked even if a later one fails to open;
+     each is sent as `files_payload[arg_name] = (basename, handle)`, the
+     filename (with extension) has to travel with the upload since the server
+     validates extensions from it; POSTs multipart form-data with the
+     `Authorization: Bearer` header and `X-Result-Delivery: reference`;
+  5. converts every `requests.RequestException` into `ServerToolError`, no
      `requests` exception is allowed to reach the GUI;
-  5. dispatches on `Content-Type`: `application/json` → text result;
-     anything else → written to `output_dir` under a filename resolved by
+  6. dispatches on `Content-Type`. `application/json` is a text result, unless
+     it carries a `result_ref`, which is a *file* result the server has kept for
+     us: `_download_reference` then pulls it over parallel `Range` requests
+     (`transfer.download_ranged`) and releases it with `DELETE /results/{id}`.
+     The reference's `filename` is run through `os.path.basename`, since the
+     name is the server's to choose and a path separator in it would place the
+     result outside `output_dir`. Anything else is a streamed body,
+     written to `output_dir` under a filename resolved by
      `_result_filename`: the response's `Content-Disposition` header if
      present (the real filename, e.g. `predictions_outputs.xlsx`); otherwise
      `.nii.gz` when the tool's schema declares `output_kind == "segmentation"`
@@ -279,9 +305,14 @@ interpreter launch:
   `_expected_length`): `Content-Length` then counts wire bytes while
   `iter_content` yields the decompressed stream, so the two differ legitimately.
 
-  **`progress_cb` is called during the download**, not only around it —
-  `"Downloading results... 8.2 / 14.1 MB (58%)"`, the total omitted whenever
-  `_expected_length` returns `None`. See "Telling the user something is
+  **`progress_cb` is called throughout**, not only around the request. The
+  upload used to be a single opaque `requests.post` that reported nothing at all
+  until the server answered, minutes of a panel saying `Sending '<tool>'
+  request...` while a 100 MB scan went up, and the chunked path fixes that at
+  the source: every part that lands moves a counter, so the panel shows
+  `"Uploading scan.nii.gz... 48.2 / 105.0 MB (46%) at 11.3 MB/s, 5s left"`.
+  Downloads read the same way (`"Downloading results... 8.2 / 14.1 MB (58%)"`,
+  the total omitted whenever `_expected_length` returns `None`). See "Telling the user something is
   happening" below for why silence here is a bug and not merely unpolished.
 - `errors.error_for_status(status_code, server_message)` maps 401/404/422/400/
   413/500 to a `ServerToolError`. The server's `detail` is shown **verbatim**
@@ -899,6 +930,81 @@ needs a server-side change, not a client one (see limitations).
 `unzip_folder`, and `load_result(path, kind)` (dispatch to `loadSegmentation`/
 `loadVolume`/`loadModel`/`loadTransform`) are the only functions in the
 extension that touch node I/O directly.
+
+`zip_folder` picks its compression per member. A folder argument is zipped only
+because HTTP has no notion of a folder, the archive is a container, not an
+attempt to make the data smaller, so already-compressed members (`.nii.gz`,
+`.zip`, the OOXML formats: see `_STORED_EXTENSIONS`, which mirrors the server's
+own table in `file_utils.py`) are `ZIP_STORED` and everything else is deflated
+at level 1. Measured on 105 MB of gzipped CBCT: **2.3 s to pack at the old
+default level 6, 0.16 s now, for an archive of exactly the same size**, the
+deflate was spending seconds of the user's CPU, on the main thread, before a
+single byte went out, and the server paid it again inflating them.
+
+## `transfer.py`
+
+Bulk transfer, split out of `client.py` because what it does is concurrency and
+byte offsets rather than protocol. Imports neither `slicer` nor `qt`; only
+`requests` and the stdlib.
+
+**Why it exists.** One HTTP request rides one TCP connection, and one TCP
+connection to a remote server is bound by its congestion window long before it
+is bound by anyone's bandwidth. Measured against the real server through a relay
+capping each connection at 12 MB/s (which is what a congestion-window-limited
+stream looks like from the application's side), for a 100 MB file:
+
+| | upload | download |
+|---|---|---|
+| one request, one connection (the old path) | 9.1 s | 8.7 s |
+| chunked/ranged, 4 connections (the default) | 2.5 s, **3.7x** | 2.5 s, **3.6x** |
+| chunked/ranged, 8 connections | 1.5 s, **6.2x** | 1.4 s, **6.2x** |
+
+On loopback the same change is still worth 1.5x on upload, from no longer
+buffering the file in RAM and no longer making the server write it to disk
+twice. Peak client RSS for a 100 MB upload went from **200 MB to 32 MB**:
+`requests` reads a `files=` argument entirely into memory and then builds the
+whole encoded multipart body next to it, so the old path held the scan twice
+over before the first byte left.
+
+- `upload_file(...)` → `upload_id`. Opens a session (`POST /uploads`), sends the
+  parts over a `ThreadPoolExecutor`, returns the id that `run()` then references
+  in the `__uploads__` form field. Each part carries `X-Part-SHA256` over the
+  **decompressed** bytes, so the server verifies exactly what it writes to disk;
+  since the parts tile the file, the whole upload is verified without either
+  side making a second pass over it. Parts of files that are not already
+  compressed (an uncompressed `.nii`, a `.vtk` mesh) go up `Content-Encoding:
+  gzip` at level 1, roughly a third of the bytes, so roughly a third of the
+  time on a remote link.
+- A part that fails is retried; a whole failed pass re-reads `GET /uploads/{id}`
+  for what the server is *actually* missing rather than re-sending what it
+  thinks failed, since a part whose response was lost on the way back did land.
+- `download_ranged(...)` pulls a result over concurrent `Range` requests,
+  `os.pwrite`-ing each into its offset in a pre-`ftruncate`d file. Every span
+  checks its own length before returning, `iter_content` ending early is what a
+  connection cut mid-body looks like from here and raises nothing on its own -
+  so a short range is one retried range instead of a silently truncated file.
+  On total failure the partial file is **removed**: for a `.zip`, leaving it
+  would let the caller unpack whatever central directory survived and deliver a
+  subset of the results.
+- A referenced result is released with `DELETE /results/{id}` from a `finally`
+  (`_release_result`, retried once), so a download that failed halfway or an
+  archive that failed its integrity check still tells the server the file can
+  go. Neither is retryable from here, so there is nothing to keep it for. The
+  server only offers a reference above 16 MB in the first place: below that it
+  streams the result and deletes it when the response ends, which depends on
+  nothing the client does, and parallel ranges would buy nothing at that size.
+  Releasing never fails a finished run; the server's idle reaper is the
+  backstop, and this is what keeps it from being the thing that usually fires.
+- `UnsupportedByServer` is raised (before any byte travels) when the server has
+  no `/uploads` endpoints, which is what makes this extension keep working
+  against a deployment that has not been updated. `client.py` remembers the
+  verdict per session and falls back to the single multipart request.
+- Tuned via `config.py`: `TRANSFER_PARALLELISM` (4), `TRANSFER_CHUNK_MB` (8),
+  `TRANSFER_COMPRESS` (True).
+
+`test_transfer.py` drives all of this against a real `ThreadingHTTPServer` that
+can drop parts, corrupt them, cut ranges short and refuse ranges altogether -
+mocks prove nothing about concurrency or byte offsets.
 
 ## Runtime configuration: `ServerToolsSettings` + `settings_qt.py`
 
