@@ -209,6 +209,12 @@ def probe_host() -> dict:
             "version": docker_version,
             "daemon": bool(daemon),
             "error": None if daemon else daemon_error,
+            # Same flag scripts/server_ctl.py reports, for the same reason: the
+            # panel answers "you are not in the docker group" with a set of
+            # instructions and "the daemon is down" with an installer, and it
+            # must not have to match on English error text to tell them apart.
+            "needs_group": bool(
+                not daemon and "permission denied" in (daemon_error or "").lower()),
         },
         "compose": {"available": bool(compose_version), "version": compose_version},
         "gpu": {

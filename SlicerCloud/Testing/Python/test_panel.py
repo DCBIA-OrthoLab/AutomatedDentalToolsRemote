@@ -23,6 +23,7 @@ one where a test needs to look at the panel mid-job.
 import os
 import sys
 import types
+import getpass
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -494,6 +495,71 @@ class TestDockerMissing(PanelTestCase):
         widget.onInstall()
         self.assertEqual(len(DIALOGS["error"]), 1)
         self.assertIn("install-docker.sh", DIALOGS["error"][0])
+
+
+class TestDockerGroup(PanelTestCase):
+    """Docker is installed and running; the account is just not in the group.
+    The most common way a first install stops, and the one the panel can only
+    answer with instructions — the fix needs root AND a new session."""
+
+    def _panelOutsideTheGroup(self):
+        class OutsideGroup(FakeDeployment):
+            def status(self, check_remote=False, progress_cb=None):
+                status = FakeDeployment.status(self, check_remote, progress_cb)
+                status["docker"] = {
+                    "available": True, "version": "Docker 29", "daemon": False,
+                    "error": "permission denied while trying to connect", "needs_group": True,
+                }
+                return status
+
+        SlicerCloud.LocalServerDeployment = OutsideGroup
+        return self.panel()
+
+    def test_it_does_not_offer_to_reinstall_docker(self):
+        """What it used to do: ask for a password, run the installer for
+        minutes, add the user to a group they are already in, change nothing."""
+        widget = self._panelOutsideTheGroup()
+        widget.onInstall()
+        self.assertEqual(DIALOGS["confirm"], [], "the panel offered to install Docker again")
+        self.assertEqual(len(DIALOGS["info"]), 1)
+
+    def test_the_instructions_are_numbered_steps_not_a_paragraph(self):
+        widget = self._panelOutsideTheGroup()
+        widget.onInstall()
+        shown = DIALOGS["info"][0]
+        for step in ("1.", "2.", "3.", "4.", "5.", "6."):
+            self.assertIn(step, shown)
+
+    def test_every_step_someone_was_watched_to_fail_is_spelled_out(self):
+        """Each of these was a real dead end, not a hypothetical: no terminal
+        open, Ctrl+V losing the command, and a password prompt that echoes
+        nothing reading as a frozen terminal."""
+        widget = self._panelOutsideTheGroup()
+        widget.onInstall()
+        shown = DIALOGS["info"][0]
+        self.assertIn("Ctrl+Alt+T", shown)
+        self.assertIn("Ctrl+Shift+V", shown)
+        self.assertIn("Nothing appears", shown)
+        self.assertIn("usermod -aG docker", shown)
+        self.assertIn("Log out", shown)
+
+    def test_the_command_names_the_real_account(self):
+        """`$USER` in a dialog is a shell variable someone has to know expands —
+        and it does not, if they paste into a root shell."""
+        widget = self._panelOutsideTheGroup()
+        widget.onInstall()
+        self.assertIn(getpass.getuser(), DIALOGS["info"][0])
+        self.assertNotIn("$USER", DIALOGS["info"][0])
+
+    def test_the_status_grid_stays_a_one_liner(self):
+        """Six numbered steps belong in the dialog. A status cell that grows to
+        twenty lines pushes every row below it off the panel."""
+        widget = self._panelOutsideTheGroup()
+        self.assertNotIn("\n", widget._statusRows["docker"].text)
+
+    def test_the_hint_points_at_the_button_that_explains(self):
+        widget = self._panelOutsideTheGroup()
+        self.assertIn("Install and start", widget.hintLabel.text)
 
 
 def _withGpu(**gpu):

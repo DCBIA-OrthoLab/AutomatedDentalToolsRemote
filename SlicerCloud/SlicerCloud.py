@@ -11,6 +11,7 @@ through `SlicerCloudLib.deploy`. This file is the panel: widgets, threading,
 and turning a status dict into something readable. See ARCHITECTURE.md.
 """
 
+import getpass
 import logging
 
 import ctk
@@ -127,6 +128,50 @@ def stopServerOnExit() -> None:
             logger.info("Slicer is quitting: asked docker to stop the server in %s", install_dir)
     except Exception:  # noqa: BLE001 - see the docstring: never break the quit path
         logger.exception("Could not stop the server on exit")
+
+
+def _dockerGroupInstructions(installed_just_now: bool = False) -> str:
+    """The screen a first-time user is most likely to be stopped by.
+
+    Docker is installed and its daemon is running; this account is simply not in
+    the `docker` group. Nothing the panel can do fixes it: adding a user to a
+    group needs root, and the new session has to be the user's own — so the
+    panel's entire job here is to be followable without a second window open.
+
+    Numbered steps rather than prose, because that is what people act on, and
+    because each of these three was watched to fail on its own: the terminal
+    shortcut is named (nobody should have to go hunting for a terminal), the
+    PASTE shortcut is named (Ctrl+V does not paste into a terminal, so a copied
+    command silently goes nowhere), and the invisible sudo password is called
+    out (a prompt that echoes nothing reads as a frozen terminal).
+    """
+    opening = _(
+        "Docker was installed successfully. One step is left, and it cannot be done from "
+        "here: your account has to join the 'docker' group, which only takes effect in a "
+        "new login session."
+    ) if installed_just_now else _(
+        "Docker is installed and running, but this account is not allowed to use it yet."
+    )
+    return opening + "\n\n" + _(
+        "Do this once:\n"
+        "\n"
+        "1. Open a terminal — press Ctrl+Alt+T.\n"
+        "\n"
+        "2. Copy this command, exactly:\n"
+        "\n"
+        "       sudo usermod -aG docker {0}\n"
+        "\n"
+        "3. Paste it into the terminal with Ctrl+Shift+V, then press Enter.\n"
+        "   (Ctrl+V does NOT paste into a terminal.)\n"
+        "\n"
+        "4. Type your password and press Enter. Nothing appears on screen while\n"
+        "   you type — that is normal, keep typing.\n"
+        "\n"
+        "5. Log out and log back in, or restart the computer. This step cannot be\n"
+        "   skipped: a group only applies to a NEW session.\n"
+        "\n"
+        "6. Start Slicer again, open this panel, and press 'Install and start'."
+    ).format(getpass.getuser())
 
 
 def _human(size) -> str:
@@ -692,6 +737,15 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         deployment = self.deployment()
         reason = docker.get("error") or _("Docker is not installed on this machine.")
 
+        # Checked FIRST, because the remedy is not the one below. Docker is
+        # installed and running here — the account simply is not in the
+        # `docker` group — so re-running the installer would ask for a password,
+        # take minutes, add the user to a group they are already in, and change
+        # nothing. That is what this branch used to do.
+        if docker.get("needs_group"):
+            slicer.util.infoDisplay(_dockerGroupInstructions())
+            return
+
         if not deployment.can_install_docker():
             slicer.util.errorDisplay(_(
                 "{0}\n\nDocker has to be installed before the server can run.\n\n"
@@ -723,11 +777,11 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                     "server up."
                 ))
             else:
-                slicer.util.infoDisplay(_(
-                    "Docker is installed, but this account cannot use it yet: {0}\n\n"
-                    "Group membership only applies to a NEW login session — log out and back "
-                    "in (or reboot), restart Slicer, and press Install again."
-                ).format(status.get("docker", {}).get("error") or ""))
+                # The expected ending of a SUCCESSFUL install, not a failure:
+                # the script adds the user to the `docker` group, and a group
+                # only exists in a new session. Same instructions as above, so
+                # someone who meets this twice reads the same steps twice.
+                slicer.util.infoDisplay(_dockerGroupInstructions(installed_just_now=True))
             self.onRefresh()
 
         self._startJob(_("Installing Docker"), task, done)
@@ -906,6 +960,10 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         docker = status.get("docker", {})
         if docker.get("daemon"):
             paint("docker", True, docker.get("version") or _("running"))
+        elif docker.get("needs_group"):
+            # Deliberately short: this is a cell in a status grid, and the full
+            # remedy is six numbered steps. The dialog carries those.
+            paint("docker", False, _("installed, but this account may not use it yet"))
         elif docker.get("available"):
             paint("docker", False, _("installed, but: {0}").format(docker.get("error") or "?"))
         else:
@@ -974,6 +1032,9 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         if not docker.get("available"):
             return _("Docker is missing. Press 'Install and start' — it will tell you the exact "
                      "command to run in a terminal.")
+        if docker.get("needs_group"):
+            return _("Docker is installed, but this account may not use it yet. Press "
+                     "'Install and start' — it shows the one command to run, step by step.")
         if not docker.get("daemon"):
             return _("Docker is installed but not usable by this account: {0}").format(docker.get("error") or "")
         if not status.get("cloned"):
