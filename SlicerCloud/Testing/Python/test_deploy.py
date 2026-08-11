@@ -248,6 +248,41 @@ class TestStatusBeforeInstalling(TempInstallDir):
         self.assertFalse(status["server"]["healthy"])
         self.assertEqual(status["repo_root"], self.install_dir)
 
+    def test_the_gpu_is_probed_rather_than_assumed_absent(self):
+        """The pre-install screen is the ONLY one a new user sees before
+        pressing Install, and it used to pin nvidia_runtime to False — so a
+        machine with a perfectly working card was told it had none, and the
+        panel offered to repair something that was not broken.
+
+        Probed for real here, so this asserts the shape and the honesty of the
+        answer rather than a value: what it must never do again is hardcode.
+        """
+        status = self.deployment().status()
+        gpu = status["gpu"]
+        self.assertIn("nvidia_runtime", gpu)
+        self.assertIn("nvidia_smi", gpu)
+        self.assertIn("gpu_access", gpu)
+        # The two fields have to agree: a mechanism was named if and only if
+        # docker can reach a card.
+        self.assertEqual(bool(gpu["nvidia_runtime"]), gpu["gpu_access"] is not None)
+        self.assertIn(gpu["gpu_access"], (None, "runtime", "cdi"))
+
+    def test_a_cdi_device_counts_as_a_reachable_gpu(self):
+        """The bug this came from: docker >= 25 reaches the card through a CDI
+        device with no 'nvidia' runtime registered anywhere, which the old check
+        read as 'no GPU' and silently answered with the CPU service."""
+        self.assertTrue(deploy._has_nvidia_cdi_device(
+            '[{"Source":"cdi","ID":"nvidia.com/gpu=all"}]'))
+        self.assertFalse(deploy._has_nvidia_cdi_device(
+            '[{"Source":"cdi","ID":"othervendor.com/fpga=all"}]'))
+
+    def test_an_older_docker_reads_as_no_cdi_not_as_an_error(self):
+        """`.DiscoveredDevices` does not exist before docker 28, where an
+        unknown field fails the whole template. That must mean 'no CDI', never
+        'could not check' — otherwise every older host becomes an error."""
+        for absent in (None, "", "null", "<no value>", "[]", '{"Source":"cdi"}'):
+            self.assertFalse(deploy._has_nvidia_cdi_device(absent), absent)
+
 
 class TestClone(TempInstallDir):
     def test_a_non_empty_destination_is_refused_with_advice(self):

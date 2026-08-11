@@ -214,7 +214,23 @@ sys.modules["slicer.i18n"] = slicer.i18n
 
 # ServerToolsCoreLib.design/worker are real; only the HTTP client and the
 # settings writer are stubbed, since neither belongs in a widget test.
-sys.modules.setdefault("requests", types.ModuleType("requests"))
+#
+# The stub is a FALLBACK, not the default. `setdefault` used to install an empty
+# module unconditionally — `requests` is not imported before this line, so it was
+# never already in sys.modules and the real library was always shadowed. That
+# broke the whole suite at import: ServerToolsCoreLib.transfer annotates a
+# parameter `requests.Session`, evaluated when the module is read, so every test
+# here died on AttributeError before a single one ran. Nothing in a widget test
+# makes an HTTP call, so either module does; only the names touched at import
+# time have to exist.
+try:
+    import requests  # noqa: F401
+except ImportError:
+    _requests = types.ModuleType("requests")
+    _requests.Session = object
+    _requests.RequestException = Exception
+    _requests.adapters = types.SimpleNamespace(HTTPAdapter=object)
+    sys.modules["requests"] = _requests
 
 import SlicerCloud  # noqa: E402
 from SlicerCloudLib.deploy import DeploymentError  # noqa: E402
@@ -261,6 +277,7 @@ class FakeDeployment:
         self.repo_url = repo_url
         self.branch = branch
         self.status_calls = 0
+        self.calls = []          # ordered, so a test can pin what runs before what
         self.is_cloned = False
 
     def status(self, check_remote=False, progress_cb=None):
@@ -285,10 +302,25 @@ class FakeDeployment:
         return None
 
     def down(self, progress_cb=None):
+        self.calls.append("down")
         return {"service": "inference-cpu", "stopped": True}
 
     def cancel(self):
         pass
+
+    def can_install_docker(self):
+        return True
+
+    @property
+    def install_docker_script(self):
+        return "/somewhere/scripts/install-docker.sh"
+
+    def clone(self, progress_cb=None):
+        self.calls.append("clone")
+        return {"cloned": True}
+
+    def enable_gpu_runtime(self, progress_cb=None):
+        self.calls.append("enable_gpu_runtime")
 
 
 class PanelTestCase(unittest.TestCase):
@@ -462,6 +494,94 @@ class TestDockerMissing(PanelTestCase):
         widget.onInstall()
         self.assertEqual(len(DIALOGS["error"]), 1)
         self.assertIn("install-docker.sh", DIALOGS["error"][0])
+
+
+def _withGpu(**gpu):
+    """A deployment whose status reports `gpu` as given."""
+    class WithGpu(FakeDeployment):
+        def status(self, check_remote=False, progress_cb=None):
+            status = FakeDeployment.status(self, check_remote, progress_cb)
+            status["gpu"] = gpu
+            return status
+    return WithGpu
+
+
+class TestGpuSetup(PanelTestCase):
+    """The card is present, docker cannot reach it, and nobody should have to
+    open a terminal to fix that."""
+
+    def test_no_card_means_no_button(self):
+        """The default fixture has no GPU at all. Offering to set one up there
+        is one more thing to understand before pressing Install."""
+        widget = self.panel()
+        self.assertFalse(widget.gpuButton.isVisible())
+
+    def test_a_card_docker_cannot_reach_offers_the_button(self):
+        SlicerCloud.LocalServerDeployment = _withGpu(nvidia_runtime=False, nvidia_smi=True)
+        widget = self.panel()
+        self.assertTrue(widget.gpuButton.isVisible())
+
+    def test_a_gpu_reached_through_cdi_is_not_a_problem_to_fix(self):
+        """The bug this whole change came from: docker reaches the card through
+        CDI with no 'nvidia' runtime registered anywhere. That host must read as
+        working — not be offered a repair for something that is not broken."""
+        SlicerCloud.LocalServerDeployment = _withGpu(
+            nvidia_runtime=True, nvidia_smi=True, gpu_access="cdi")
+        widget = self.panel()
+        self.assertFalse(widget.gpuButton.isVisible())
+        self.assertIn("CDI", widget._statusRows["gpu"].text)
+
+    def test_a_clone_that_predates_gpu_access_still_reads_correctly(self):
+        """`gpu_access` comes from the CLONE's server_ctl.py, which can be older
+        than this panel. Its absence must not turn a working GPU into unknown."""
+        SlicerCloud.LocalServerDeployment = _withGpu(nvidia_runtime=True, nvidia_smi=True)
+        widget = self.panel()
+        self.assertFalse(widget.gpuButton.isVisible())
+        self.assertIn("nvidia runtime", widget._statusRows["gpu"].text)
+
+    def test_the_server_is_stopped_before_docker_is_restarted(self):
+        """Ordering, and it is the whole correctness of the feature. The compose
+        services carry `restart: unless-stopped`, so a container still running
+        when the daemon restarts comes back and holds port 8000 against the GPU
+        service that replaces it — a different compose service, same port."""
+        SlicerCloud.LocalServerDeployment = _withGpu(nvidia_runtime=False, nvidia_smi=True)
+        widget = self.panel()
+        widget._offerGpuSetup()
+        calls = widget.deployment().calls
+        self.assertIn("enable_gpu_runtime", calls)
+        self.assertLess(calls.index("down"), calls.index("enable_gpu_runtime"))
+
+    def test_the_password_prompt_is_announced_with_its_consequence(self):
+        SlicerCloud.LocalServerDeployment = _withGpu(nvidia_runtime=False, nvidia_smi=True)
+        widget = self.panel()
+        widget._offerGpuSetup()
+        self.assertEqual(len(DIALOGS["confirm"]), 1)
+        asked = DIALOGS["confirm"][0]
+        self.assertIn("password", asked)
+        self.assertIn("RESTARTS DOCKER", asked)
+
+    def test_a_host_with_no_graphical_helper_is_told_what_to_run(self):
+        """No pkexec, no DISPLAY: the button must not start a job that cannot
+        possibly get root — it names the terminal command instead."""
+        base = _withGpu(nvidia_runtime=False, nvidia_smi=True)
+
+        class NoPkexec(base):
+            def can_install_docker(self):
+                return False
+
+        SlicerCloud.LocalServerDeployment = NoPkexec
+        widget = self.panel()
+        widget._offerGpuSetup()
+        self.assertEqual(len(DIALOGS["error"]), 1)
+        self.assertIn("--nvidia", DIALOGS["error"][0])
+        self.assertNotIn("enable_gpu_runtime", widget.deployment().calls)
+
+    def test_the_gpu_hint_never_displaces_a_blocking_step(self):
+        """The server WORKS on the CPU. A card docker cannot reach is an
+        improvement, so it must not push aside 'press Install and start'."""
+        SlicerCloud.LocalServerDeployment = _withGpu(nvidia_runtime=False, nvidia_smi=True)
+        widget = self.panel()
+        self.assertIn("Install and start", widget.hintLabel.text)
 
 
 if __name__ == "__main__":

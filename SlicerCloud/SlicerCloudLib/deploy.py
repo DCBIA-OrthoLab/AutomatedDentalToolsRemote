@@ -137,6 +137,28 @@ def find_python() -> str:
     )
 
 
+def _has_nvidia_cdi_device(raw) -> bool:
+    """True when docker has discovered a CDI device for an nvidia GPU.
+
+    The entries look like `{"Source": "cdi", "ID": "nvidia.com/gpu=all"}`. The
+    vendor prefix is what identifies them: the same list carries every other CDI
+    vendor registered on the host. Mirrors the function of the same name in
+    scripts/server_ctl.py — see probe_host() for why it is duplicated here.
+    """
+    try:
+        devices = json.loads(raw or "null")
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(devices, list):
+        return False
+    return any(
+        isinstance(device, dict)
+        and device.get("Source") == "cdi"
+        and str(device.get("ID", "")).startswith("nvidia.com/gpu")
+        for device in devices
+    )
+
+
 def probe_host() -> dict:
     """The prerequisites, answered without a clone.
 
@@ -163,6 +185,23 @@ def probe_host() -> dict:
         daemon, daemon_error = version(["docker", "info", "--format", "{{.ServerVersion}}"])
     compose_version, _ = version(["docker", "compose", "version"]) if docker_version else (None, None)
 
+    # Both mechanisms, exactly as scripts/server_ctl.py's gpu_info() decides it
+    # — see its docstring for why an "nvidia" runtime is no longer the only
+    # answer. Duplicated here for the same reason every other probe above is:
+    # this runs BEFORE the clone exists, so there is no server_ctl.py to ask.
+    # It used to be hardcoded False, which made the panel tell every user with
+    # a working card that they had none, on the one screen they see before
+    # pressing Install.
+    runtime, cdi = False, False
+    if daemon:
+        runtimes, _err = version(["docker", "info", "--format", "{{json .Runtimes}}"])
+        runtime = "nvidia" in (runtimes or "")
+        # `.DiscoveredDevices` does not exist before docker 28, where an unknown
+        # field fails the whole template. A `None` here means "no CDI", never
+        # "could not check" — same tolerance as server_ctl.py.
+        devices, _err = version(["docker", "info", "--format", "{{json .DiscoveredDevices}}"])
+        cdi = _has_nvidia_cdi_device(devices)
+
     return {
         "git": {"available": bool(git_version), "version": git_version},
         "docker": {
@@ -172,6 +211,11 @@ def probe_host() -> dict:
             "error": None if daemon else daemon_error,
         },
         "compose": {"available": bool(compose_version), "version": compose_version},
+        "gpu": {
+            "nvidia_runtime": runtime or cdi,
+            "nvidia_smi": bool(shutil.which("nvidia-smi")),
+            "gpu_access": "runtime" if runtime else ("cdi" if cdi else None),
+        },
     }
 
 
@@ -378,11 +422,16 @@ class LocalServerDeployment:
             )
 
     def can_install_docker(self) -> bool:
-        """Whether Docker can be installed from here, without a terminal.
+        """Whether a root helper can be run from here, without a terminal.
 
         Linux with a graphical `pkexec` only. Everywhere else the answer is a
         GUI installer (Docker Desktop) or a root shell, and offering a button
         that cannot deliver either is worse than saying so.
+
+        Named for Docker because that was its first caller; it is really the
+        predicate for *any* administrator action this panel offers, and
+        `enable_gpu_runtime` gates on it too. Kept under one name rather than
+        two so there is a single answer to "can this panel ask for a password".
         """
         if sys.platform.startswith("linux") and os.geteuid() == 0:
             return True
@@ -392,12 +441,17 @@ class LocalServerDeployment:
             and bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
         )
 
-    def install_docker(self, progress_cb=None, with_nvidia: bool = False) -> None:
+    def _run_install_script(self, extra_args, failed_what: str, progress_cb=None) -> None:
         """Run the repository's install-docker.sh with administrator rights.
 
         The clone has to exist first — the script is in it. Deliberately not a
         curl-pipe-to-root from the GUI: what runs as root is a file the user
         already has on disk and can read.
+
+        Shared by the two things the panel can ask root for, so the pkexec
+        handling, the "no graphical helper" fallback and the terminal command
+        printed on failure cannot drift between them. `failed_what` is the only
+        difference: an error has to name the action that failed, not the script.
         """
         if not os.path.isfile(self.install_docker_script):
             raise DeploymentError(
@@ -410,33 +464,59 @@ class LocalServerDeployment:
                 "Desktop from https://docs.docker.com/get-docker/, start it, and come back here."
             )
 
-        command = ["sh", self.install_docker_script]
-        if with_nvidia:
-            command.append("--nvidia")
+        command = ["sh", self.install_docker_script] + list(extra_args)
+        by_hand = " ".join(["sudo", "sh", self.install_docker_script] + list(extra_args))
         if os.geteuid() != 0:
             if not shutil.which("pkexec"):
                 raise DeploymentError(
                     "Administrator rights are needed and no graphical helper (pkexec) is "
-                    f"available. Run this in a terminal instead:\n\n    sudo sh {self.install_docker_script}"
+                    f"available. Run this in a terminal instead:\n\n    {by_hand}"
                 )
             command = ["pkexec"] + command
 
-        _emit(progress_cb, "A password prompt will appear — the installer needs root.")
+        _emit(progress_cb, "A password prompt will appear — this needs root.")
         returncode, _out = self._spawn(command, progress_cb)
         if returncode != 0:
             raise DeploymentError(
-                "Installing Docker failed or was refused. The log has the installer's own "
-                f"output. You can also run it by hand:\n\n    sudo sh {self.install_docker_script}"
+                f"{failed_what} failed or was refused. The log has the script's own "
+                f"output. You can also run it by hand:\n\n    {by_hand}"
             )
+
+    def install_docker(self, progress_cb=None, with_nvidia: bool = False) -> None:
+        """Install Docker Engine, and optionally the NVIDIA Container Toolkit."""
+        self._run_install_script(
+            ["--nvidia"] if with_nvidia else [],
+            "Installing Docker",
+            progress_cb,
+        )
+
+    def enable_gpu_runtime(self, progress_cb=None) -> None:
+        """Let docker reach the GPU, from the panel rather than from a terminal.
+
+        The same script under `--nvidia`, which installs the container toolkit
+        if it is absent and then registers the `nvidia` runtime with docker.
+        On a host that already has the toolkit — the common case now that it
+        generates CDI specs by itself — it skips straight to the registration.
+
+        **This restarts the docker daemon**, so every running container stops,
+        the tool server included. Unlike installing Docker, which happens on a
+        machine where nothing is up yet, that is a real consequence and the
+        caller has to have said so before the password prompt appears.
+        """
+        self._run_install_script(["--nvidia"], "Enabling GPU support", progress_cb)
 
     def status(self, check_remote: bool = False, progress_cb=None) -> dict:
         """Everything the panel shows, in one shape whether or not it is cloned."""
         if not self.is_cloned:
             probed = probe_host()
+            # `gpu` is deliberately NOT overridden here: probe_host() answers it
+            # for real. It used to be pinned to nvidia_runtime=False right on
+            # this line, so the pre-install screen — the only one a new user
+            # sees before pressing Install — told everyone their card was
+            # unusable, whatever the machine actually had.
             probed.update({
                 "cloned": False,
                 "repo_root": self.install_dir,
-                "gpu": {"nvidia_runtime": False, "nvidia_smi": bool(shutil.which("nvidia-smi"))},
                 "clone": {"is_git_repo": False, "behind": 0, "error": "not installed yet"},
                 "container": {"running": False, "state": None},
                 "server": {"url": DEFAULT_SERVER_URL, "healthy": False},

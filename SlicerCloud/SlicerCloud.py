@@ -339,9 +339,20 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self.checkUpdateButton = design.link_button(_("Check for updates"))
         self.checkUpdateButton.setToolTip(_("Fetch the remote to see whether the clone is behind."))
         self.showLogsButton = design.link_button(_("Server logs"))
+        # Shown by _renderStatus only when this machine has a card docker cannot
+        # reach — a permanently visible button for a problem almost nobody has
+        # reads as one more thing to understand before pressing Install.
+        self.gpuButton = design.link_button(_("Enable GPU support"))
+        self.gpuButton.setToolTip(_(
+            "This machine has an NVIDIA card that Docker cannot reach, so the server would "
+            "run on the CPU. Installs the NVIDIA Container Toolkit if needed and registers it "
+            "with Docker. Needs your password, and restarts Docker."
+        ))
+        self.gpuButton.setVisible(False)
         secondary.addWidget(self.refreshButton)
         secondary.addWidget(self.checkUpdateButton)
         secondary.addWidget(self.showLogsButton)
+        secondary.addWidget(self.gpuButton)
         secondary.addStretch(1)
 
         self.useServerCheck = qt.QCheckBox(
@@ -377,6 +388,9 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self.refreshButton.clicked.connect(lambda: self.onRefresh())
         self.checkUpdateButton.clicked.connect(lambda: self.onRefresh(check_remote=True))
         self.showLogsButton.clicked.connect(self.onShowLogs)
+        # Wrapped for the same reason as refreshButton above: `clicked` carries a
+        # `checked` bool, and _offerGpuSetup takes no argument.
+        self.gpuButton.clicked.connect(lambda: self._offerGpuSetup())
         self.installDirEdit.currentPathChanged.connect(self._onInstallDirChanged)
         return box
 
@@ -525,7 +539,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         if disable:
             for button in (self.installButton, self.updateButton, self.stopButton,
                            self.downloadButton, self.refreshButton, self.checkUpdateButton,
-                           self.showLogsButton):
+                           self.showLogsButton, self.gpuButton):
                 button.setEnabled(not busy)
             self.cancelButton.setVisible(busy)
         self._progressLabel.setVisible(busy or bool(what))
@@ -718,6 +732,72 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
         self._startJob(_("Installing Docker"), task, done)
 
+    def _offerGpuSetup(self) -> None:
+        """A card is present but docker cannot reach it. Offer to fix it.
+
+        The same shape as _offerDockerInstall — a script from the clone, run
+        through `pkexec` — with one difference that has to be on screen BEFORE
+        the password prompt: registering the runtime restarts the docker daemon,
+        which stops every running container, this server included. Installing
+        Docker happens on a machine where nothing is up yet; this does not.
+
+        Never offered as a blocking step. The server runs perfectly on the CPU,
+        so this is an improvement someone chooses, not a prerequisite.
+        """
+        deployment = self.deployment()
+
+        if not deployment.can_install_docker():
+            slicer.util.errorDisplay(_(
+                "This machine has an NVIDIA card that Docker cannot reach, and the panel "
+                "cannot set that up from here — it needs administrator rights through a "
+                "graphical password prompt.\n\n"
+                "Run this in a terminal instead:\n"
+                "    sudo sh {0} --nvidia\n\n"
+                "Then press Refresh. The server runs on the CPU in the meantime."
+            ).format(deployment.install_docker_script))
+            return
+
+        if not slicer.util.confirmOkCancelDisplay(
+            _("This machine has an NVIDIA card, but Docker cannot reach it — so the server "
+              "would run on the CPU.\n\n"
+              "Setting this up needs administrator rights, so you will be asked for your "
+              "password. It also RESTARTS DOCKER, which stops every running container, "
+              "including this server if it is up. Starting it again takes a few seconds.\n\n"
+              "Set up GPU support now?"),
+            _("Enable GPU support"),
+        ):
+            return
+
+        def task(progress_cb):
+            # The script lives in the repository, so the clone comes first.
+            deployment.clone(progress_cb=progress_cb)
+            # Stopped BEFORE the daemon restart, and that ordering is the whole
+            # point. The compose services carry `restart: unless-stopped`, so a
+            # container left running comes back up with docker — and once the
+            # runtime is registered the panel drives the GPU service, a
+            # DIFFERENT compose service publishing the same port. The resurrected
+            # CPU container would hold 8000 against it and the next start would
+            # fail the port preflight. A container stopped on purpose stays
+            # stopped across a daemon restart, which is what makes this work.
+            deployment.down(progress_cb=progress_cb)
+            deployment.enable_gpu_runtime(progress_cb=progress_cb)
+            return deployment.status(progress_cb=progress_cb)
+
+        def done(status):
+            if status.get("gpu", {}).get("nvidia_runtime"):
+                slicer.util.infoDisplay(_(
+                    "Docker can now reach the GPU. The server was stopped to do this — press "
+                    "'Start server' to bring it back up, this time on the card."
+                ))
+            else:
+                slicer.util.warningDisplay(_(
+                    "The setup ran, but Docker still cannot reach the GPU. The Log has the "
+                    "script's own output. The server keeps working on the CPU."
+                ))
+            self.onRefresh()
+
+        self._startJob(_("Enabling GPU support"), task, done)
+
     def onUpdate(self) -> None:
         deployment = self.deployment()
 
@@ -835,12 +915,21 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         paint("compose", compose.get("available"), compose.get("version") or _("not installed"))
 
         gpu = status.get("gpu", {})
+        # `gpu_access` names WHICH mechanism answered — an nvidia runtime, or a
+        # CDI device. Absent when the clone predates it, which is why the text
+        # falls back to the runtime wording rather than to "unknown".
         if gpu.get("nvidia_runtime"):
-            paint("gpu", True, _("nvidia runtime available — the GPU service will be used"))
+            paint("gpu", True, _("reachable through CDI — the GPU service will be used")
+                  if gpu.get("gpu_access") == "cdi"
+                  else _("nvidia runtime available — the GPU service will be used"))
         elif gpu.get("nvidia_smi"):
-            paint("gpu", False, _("a card is present but docker has no nvidia runtime — running on CPU"))
+            paint("gpu", False, _("a card is present but docker cannot reach it — running on CPU"))
         else:
             paint("gpu", False, _("no GPU — running on CPU (everything works, slowly)"))
+        # Offered whenever there is a card docker cannot reach. Whether it can
+        # actually be done from here is _offerGpuSetup's business: it either does
+        # it or prints the terminal command, exactly as _offerDockerInstall does.
+        self.gpuButton.setVisible(bool(gpu.get("nvidia_smi")) and not gpu.get("nvidia_runtime"))
 
         clone = status.get("clone", {})
         if not status.get("cloned"):
@@ -902,6 +991,12 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         if not status.get("server", {}).get("healthy"):
             return _("The container is running but not answering yet — it may still be installing "
                      "dependencies. Check the Log.")
+        # Last, and only once everything else is right: the server WORKS on the
+        # CPU, so this must never displace a step that is actually blocking.
+        gpu = status.get("gpu") or {}
+        if gpu.get("nvidia_smi") and not gpu.get("nvidia_runtime"):
+            return _("The server is up, but on the CPU: this machine has a GPU that Docker "
+                     "cannot reach. Press 'Enable GPU support' to set that up.")
         return _("The server is up. Pick the tools you need under 'Tool data'.")
 
     def _renderCatalog(self, catalog: dict) -> None:
