@@ -270,21 +270,38 @@ class QComboBox(QObject):
     def __init__(self):
         QObject.__init__(self)
         self._items = []
+        self._data = []
         self._index = -1
         self.sizeAdjustPolicy = 0
         self.minimumContentsLength = 0
         self.currentTextChanged = Signal()
+        self.currentIndexChanged = Signal()
 
     def addItems(self, items):
         self._items.extend(items)
+        self._data.extend([None] * len(items))
         if self._index < 0 and self._items:
             self.setCurrentIndex(0)
 
-    def addItem(self, item):
+    def addItem(self, item, userData=None):
+        """`userData` is what a combo carries besides its label.
+
+        Real Qt has always had it; this stub did not, so a panel storing the
+        value behind each entry — an address, an id, anything not fit to show
+        — could not be tested at all. Optional, so every existing caller is
+        unaffected.
+        """
         self.addItems([item])
+        self._data[-1] = userData
+
+    def itemData(self, index):
+        if 0 <= index < len(self._data):
+            return self._data[index]
+        return None
 
     def clear(self):
         self._items = []
+        self._data = []
         self._index = -1
 
     @property
@@ -303,6 +320,10 @@ class QComboBox(QObject):
 
     def setCurrentIndex(self, index):
         self._index = index
+        # Both, as Qt does. A panel that reacts to the SELECTION rather than to
+        # the label has to connect currentIndexChanged — two entries can show
+        # the same text, and currentTextChanged does not fire between them.
+        self.currentIndexChanged.emit(index)
         self.currentTextChanged.emit(self.currentText)
 
     @property
