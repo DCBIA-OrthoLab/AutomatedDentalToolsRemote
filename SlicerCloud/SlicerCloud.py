@@ -41,6 +41,7 @@ _KEY_REPO_URL = f"{_SETTINGS_GROUP}/RepoUrl"
 _KEY_BRANCH = f"{_SETTINGS_GROUP}/Branch"
 _KEY_SELECTED_TOOLS = f"{_SETTINGS_GROUP}/SelectedTools"
 _KEY_PORT = f"{_SETTINGS_GROUP}/Port"
+_KEY_BIND = f"{_SETTINGS_GROUP}/BindAddress"
 _KEY_STOP_ON_EXIT = f"{_SETTINGS_GROUP}/StopOnExit"
 
 _DEFAULT_PORT = 8000
@@ -345,6 +346,29 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
               "holds 8000 — it is remembered, so it only has to be set once.")
         )
         advancedForm.addRow(design.section_title(_("Port")), self.portSpin)
+
+        # Populated from the machine's real interfaces rather than typed: an
+        # address is exactly the kind of thing nobody remembers and everybody
+        # mistypes, and a wrong one makes the container fail to start with a
+        # docker error about a bind, not a sentence anyone can act on.
+        self.bindCombo = qt.QComboBox()
+        # The risk level is kept beside the combo rather than in Qt item data:
+        # one lookup either way, and it does not depend on which item-data roles
+        # a given Qt binding exposes.
+        self._bindKinds = {}
+        for address, label, kind in deploy.host_addresses():
+            self.bindCombo.addItem(_("{0}  ({1})").format(label, address or _("all addresses")),
+                                   address)
+            self._bindKinds[address] = kind
+        self.bindCombo.setToolTip(_(
+            "Which machines can reach this server. 'This computer only' is the default and "
+            "keeps it off the network entirely.\n\n"
+            "This server speaks plain HTTP: on a private encrypted network (Tailscale, "
+            "WireGuard) the traffic is protected by that network, on an ordinary local "
+            "network it is not, and neither is the API key."
+        ))
+        advancedForm.addRow(design.section_title(_("Network access")), self.bindCombo)
+        self.bindCombo.currentIndexChanged.connect(self._onBindChanged)
         layout.addWidget(advanced)
 
         checks = qt.QGridLayout()
@@ -522,6 +546,11 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         self.repoUrlEdit.text = str(settings.value(_KEY_REPO_URL) or DEFAULT_REPO_URL)
         self.branchEdit.text = str(settings.value(_KEY_BRANCH) or DEFAULT_BRANCH)
         self.portSpin.value = int(settings.value(_KEY_PORT) or _DEFAULT_PORT)
+        # `is None` rather than a falsy test: BIND_EVERYWHERE is the empty
+        # string, so a saved "publish on every interface" must not read as
+        # "never chosen" and silently fall back to loopback.
+        saved = settings.value(_KEY_BIND)
+        self._selectBind(deploy.BIND_LOCALHOST if saved is None else str(saved))
         raw = settings.value(_KEY_STOP_ON_EXIT)
         # `is None` rather than a falsy test: the setting is a BOOLEAN whose
         # default is True, so an unset value and a saved False must not
@@ -536,6 +565,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         settings.setValue(_KEY_REPO_URL, self.repoUrlEdit.text.strip())
         settings.setValue(_KEY_BRANCH, self.branchEdit.text.strip())
         settings.setValue(_KEY_PORT, self.portSpin.value)
+        settings.setValue(_KEY_BIND, self.selectedBind())
         settings.setValue(_KEY_STOP_ON_EXIT, self.stopOnExitCheck.checked)
         settings.setValue(_KEY_SELECTED_TOOLS, ",".join(sorted(self._selectedTools())))
         settings.sync()
@@ -556,6 +586,59 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                 or self._deployment.branch != branch):
             self._deployment = LocalServerDeployment(install_dir, repo_url, branch)
         return self._deployment
+
+    def selectedBind(self) -> str:
+        """The address the server should publish on. Never None — the combo
+        always has loopback selected at worst."""
+        data = self.bindCombo.itemData(self.bindCombo.currentIndex)
+        return deploy.BIND_LOCALHOST if data is None else str(data)
+
+    def _selectBind(self, address: str) -> None:
+        """Select a saved address, falling back to loopback when it is gone.
+
+        An address CAN disappear between two sessions — a VPN that is down, a
+        cable unplugged, DHCP handing out a different one. Falling back to
+        loopback is the safe direction: the alternative is silently keeping a
+        stale address, which docker refuses to bind, so the server would stop
+        starting with an error about an address nobody recognises.
+        """
+        for index in range(self.bindCombo.count):
+            if str(self.bindCombo.itemData(index)) == address:
+                self.bindCombo.setCurrentIndex(index)
+                return
+        self.bindCombo.setCurrentIndex(0)
+
+    def _onBindChanged(self, _index=None) -> None:
+        """Warn on the way OUT of loopback, once, before anything is started.
+
+        Said here rather than at Install time because this is where the decision
+        is made, and because a warning attached to the button someone presses
+        five minutes later reads as an obstacle rather than as information.
+        """
+        if self._loadingSettings:
+            return
+        self._saveSettings()
+        address = self.selectedBind()
+        kind = self._bindKinds.get(address, "lan")
+        if kind == "loopback":
+            return
+        if kind == "vpn":
+            slicer.util.infoDisplay(_(
+                "The server will be reachable at {0} — from the machines on that private "
+                "network only.\n\n"
+                "It speaks plain HTTP, so what protects the images and the API key here is "
+                "the network's own encryption. That is the safest way to share this server."
+            ).format(address))
+        else:
+            shown = address or _("every address on this machine")
+            slicer.util.warningDisplay(_(
+                "The server will be reachable at {0}.\n\n"
+                "It speaks PLAIN HTTP: on an ordinary network, anyone able to watch the "
+                "traffic can read the images being sent and the API key that protects them. "
+                "Medical images should not travel this way.\n\n"
+                "Prefer a private encrypted network (Tailscale, WireGuard) if one is listed, "
+                "or put a TLS terminator in front — see SECURITY.md in the server repository."
+            ).format(shown))
 
     def _onInstallDirChanged(self, _path=None) -> None:
         if self._loadingSettings:
@@ -690,6 +773,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
         deployment = self.deployment()
         configure = self.useServerCheck.checked
         port = self.portSpin.value
+        bind = self.selectedBind()
         self._saveSettings()
 
         # Handled before the job starts, not inside it: installing Docker needs
@@ -710,7 +794,7 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
                     "    sudo sh {1}"
                 ).format(status.get("docker", {}).get("error") or _("the daemon did not answer"),
                          deployment.install_docker_script))
-            return deployment.up(progress_cb=progress_cb, port=port)
+            return deployment.up(progress_cb=progress_cb, port=port, bind=bind)
 
         def done(result):
             if configure and result.get("token"):
@@ -854,9 +938,14 @@ class SlicerCloudWidget(ScriptedLoadableModuleWidget):
 
     def onUpdate(self) -> None:
         deployment = self.deployment()
+        # Passed on every update, for the same reason the branch is: `update`
+        # recreates the container, so anything not restated here goes back to
+        # its default — and the default is loopback. Without this, updating a
+        # server published on a VPN address quietly took it off the network.
+        bind = self.selectedBind()
 
         def task(progress_cb):
-            return deployment.update(progress_cb=progress_cb)
+            return deployment.update(progress_cb=progress_cb, bind=bind)
 
         def done(result):
             clone = result.get("clone") or {}

@@ -497,6 +497,123 @@ class TestDockerMissing(PanelTestCase):
         self.assertIn("install-docker.sh", DIALOGS["error"][0])
 
 
+class TestNetworkAccess(PanelTestCase):
+    """Who can reach the server. The default has to stay loopback, the choice
+    has to survive an update, and leaving loopback has to be said out loud --
+    this deployment carries medical images over plain HTTP."""
+
+    def setUp(self):
+        PanelTestCase.setUp(self)
+        # A fixed set of addresses, so the tests do not depend on whatever
+        # interfaces the machine running them happens to have.
+        self._realAddresses = SlicerCloud.deploy.host_addresses
+        SlicerCloud.deploy.host_addresses = lambda: [
+            ("127.0.0.1", "This computer only", "loopback"),
+            ("100.94.102.62", "tailscale0 — private network, encrypted", "vpn"),
+            ("192.168.1.20", "eth0 — local network", "lan"),
+            ("", "Every network on this machine", "all"),
+        ]
+
+    def tearDown(self):
+        SlicerCloud.deploy.host_addresses = self._realAddresses
+        PanelTestCase.tearDown(self)
+
+    def _select(self, widget, address):
+        for index in range(widget.bindCombo.count):
+            if str(widget.bindCombo.itemData(index)) == address:
+                widget.bindCombo.setCurrentIndex(index)
+                return
+        raise AssertionError(f"{address!r} is not offered")
+
+    def test_it_defaults_to_this_computer_only(self):
+        """A server holding patient data must never become network-reachable
+        because someone pressed Install without reading a combo box."""
+        widget = self.panel()
+        self.assertEqual(widget.selectedBind(), "127.0.0.1")
+
+    def test_docker_bridges_are_not_offered(self):
+        """Binding to docker0 publishes the server to containers and nothing
+        else -- an entry that can only ever be a mistake."""
+        SlicerCloud.deploy.host_addresses = self._realAddresses
+        offered = [address for address, _label, _kind in SlicerCloud.deploy.host_addresses()]
+        for address in offered:
+            self.assertFalse(address.startswith(("172.17.", "172.18.", "172.19.")),
+                             f"{address} is a docker bridge")
+
+    def test_choosing_a_lan_address_warns_about_plain_http(self):
+        widget = self.panel()
+        self._select(widget, "192.168.1.20")
+        self.assertEqual(len(DIALOGS["warning"]), 1)
+        self.assertIn("PLAIN HTTP", DIALOGS["warning"][0])
+
+    def test_a_vpn_address_is_not_presented_as_the_same_risk(self):
+        """Tailscale/WireGuard encrypt the link, so this one is informative
+        rather than a warning -- and lumping the two together would train
+        people to dismiss both."""
+        widget = self.panel()
+        self._select(widget, "100.94.102.62")
+        self.assertEqual(DIALOGS["warning"], [])
+        self.assertEqual(len(DIALOGS["info"]), 1)
+        self.assertIn("100.94.102.62", DIALOGS["info"][0])
+
+    def test_publishing_everywhere_is_a_warning_too(self):
+        widget = self.panel()
+        self._select(widget, "")
+        self.assertEqual(len(DIALOGS["warning"]), 1)
+
+    def test_the_choice_reaches_the_container(self):
+        widget = self.panel()
+        self._select(widget, "100.94.102.62")
+
+        captured = {}
+
+        class Recording(FakeDeployment):
+            def up(self, progress_cb=None, force_recreate=False, port=None, bind=None):
+                captured["bind"] = bind
+                return {"url": "http://100.94.102.62:8000", "token": "t", "healthy": True}
+
+        SlicerCloud.LocalServerDeployment = Recording
+        widget._deployment = None          # rebuild against the recording class
+        widget.onInstall()
+        self.assertEqual(captured.get("bind"), "100.94.102.62")
+
+    def test_an_update_does_not_quietly_take_the_server_off_the_network(self):
+        """`update` recreates the container, so anything not restated goes back
+        to its default -- and the default is loopback. This is the same trap the
+        Branch field fell into, one field over."""
+        widget = self.panel()
+        self._select(widget, "100.94.102.62")
+
+        captured = {}
+
+        class Recording(FakeDeployment):
+            def update(self, progress_cb=None, force=False, bind=None):
+                captured["bind"] = bind
+                return {"clone": {}, "pulled": False, "recreated": True, "healthy": True}
+
+        SlicerCloud.LocalServerDeployment = Recording
+        widget._deployment = None
+        widget.onUpdate()
+        self.assertEqual(captured.get("bind"), "100.94.102.62")
+
+    def test_an_address_that_disappeared_falls_back_to_loopback(self):
+        """A VPN goes down, DHCP hands out a different address. Keeping the
+        stale one means docker refuses to bind and the server stops starting;
+        falling back to loopback is the safe direction."""
+        _QSettings.store[SlicerCloud._KEY_BIND] = "10.99.99.99"
+        widget = self.panel()
+        self.assertEqual(widget.selectedBind(), "127.0.0.1")
+
+    def test_publishing_everywhere_survives_a_reload(self):
+        """BIND_EVERYWHERE is the empty string, so a falsy test would read a
+        saved 'every interface' as 'never chosen' and silently re-lock it."""
+        widget = self.panel()
+        self._select(widget, "")
+        self.assertEqual(_QSettings.store.get(SlicerCloud._KEY_BIND), "")
+        reopened = self.panel()
+        self.assertEqual(reopened.selectedBind(), "")
+
+
 class TestDockerGroup(PanelTestCase):
     """Docker is installed and running; the account is just not in the group.
     The most common way a first install stops, and the one the panel can only

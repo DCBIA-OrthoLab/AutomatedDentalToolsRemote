@@ -137,6 +137,60 @@ def find_python() -> str:
     )
 
 
+#: What `bind` means when nothing has been chosen. Loopback, because this
+#: deployment speaks plain HTTP and it carries medical images.
+BIND_LOCALHOST = "127.0.0.1"
+#: The empty string is not "unset" here — it is how the compose file is told to
+#: publish on every interface, IPv4 and IPv6 both. See its own comment.
+BIND_EVERYWHERE = ""
+
+
+def host_addresses():
+    """Addresses this machine could publish the server on, worst risk last.
+
+    Returned as `(address, label, kind)` with `kind` in "loopback" / "vpn" /
+    "lan" / "all", so the panel can both label an entry and warn about it
+    without knowing anything about networking.
+
+    A VPN address is singled out rather than lumped in with the rest because it
+    is a genuinely different risk: publishing on a Tailscale/WireGuard address
+    reaches only the machines in that private mesh, over an encrypted link,
+    while the same server on a LAN address is plain HTTP anyone on the wire can
+    read. The two must not look like the same choice in a list.
+
+    Docker's own bridges are skipped: binding the server to `docker0` publishes
+    it to containers and nothing else, which is never what anyone means.
+    """
+    found = [(BIND_LOCALHOST, "This computer only", "loopback")]
+    try:
+        completed = subprocess.run(
+            ["ip", "-o", "-4", "addr", "show"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            timeout=10, check=False, **_subprocess_kwargs()
+        )
+        lines = completed.stdout.splitlines() if completed.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError):
+        lines = []
+
+    for line in lines:
+        parts = line.split()
+        # "2: eth0    inet 192.168.1.10/24 brd ... scope global eth0"
+        if len(parts) < 4 or parts[2] != "inet":
+            continue
+        interface, address = parts[1], parts[3].split("/")[0]
+        if address.startswith("127.") or interface == "lo":
+            continue
+        if interface.startswith(("docker", "br-", "veth", "virbr")):
+            continue
+        if interface.startswith(("tailscale", "wg", "tun", "zt")):
+            found.append((address, f"{interface} — private network, encrypted", "vpn"))
+        else:
+            found.append((address, f"{interface} — local network", "lan"))
+
+    found.append((BIND_EVERYWHERE, "Every network on this machine", "all"))
+    return found
+
+
 def _has_nvidia_cdi_device(raw) -> bool:
     """True when docker has discovered a CDI device for an nvidia GPU.
 
@@ -537,21 +591,28 @@ class LocalServerDeployment:
         result["cloned"] = True
         return result
 
-    def up(self, progress_cb=None, force_recreate: bool = False, port=None) -> dict:
+    def up(self, progress_cb=None, force_recreate: bool = False, port=None, bind=None) -> dict:
         """Start the server. The result carries the URL and the API token.
 
         `port` is only needed when something else already holds the default —
         it is remembered in the deployment's `.env`, so it has to be passed
         once, not on every start.
+
+        `bind` is which address the port is published on: None keeps whatever
+        the deployment already uses (BIND_LOCALHOST on a first install), and
+        BIND_EVERYWHERE — the empty string — is a real value, not "unset", so
+        this tests it with `is not None`.
         """
         args = ["up"]
         if port:
             args += ["--port", str(port)]
+        if bind is not None:
+            args += ["--bind", bind]
         if force_recreate:
             args.append("--force-recreate")
         return self.run_ctl(args, progress_cb)
 
-    def update(self, progress_cb=None, force: bool = False) -> dict:
+    def update(self, progress_cb=None, force: bool = False, bind=None) -> dict:
         """Fetch, fast-forward, relaunch — and put the clone on `self.branch`.
 
         The branch is passed on every update, not only when it changed: a
@@ -561,6 +622,8 @@ class LocalServerDeployment:
         first install.
         """
         args = ["update", "--branch", self.branch]
+        if bind is not None:
+            args += ["--bind", bind]
         if force:
             args.append("--force")
         return self.run_ctl(args, progress_cb)
