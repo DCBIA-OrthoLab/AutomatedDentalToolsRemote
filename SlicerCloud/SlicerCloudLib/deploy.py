@@ -32,7 +32,7 @@ import urllib.request
 _ERROR_TAIL_LINES = 12
 
 DEFAULT_REPO_URL = "https://github.com/Jules-GP/slicer-remote-tool-server.git"
-DEFAULT_BRANCH = "docker"
+DEFAULT_BRANCH = "main"
 DEFAULT_SERVER_URL = "http://localhost:8000"
 
 # Where a clone goes when the user has not said. The home directory, not
