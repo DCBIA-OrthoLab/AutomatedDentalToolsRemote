@@ -61,6 +61,30 @@ TARGET_USER="$(id -un)"
 
 say() { printf '\n=== %s ===\n' "$1"; }
 
+# Is there an executable of this name on PATH, right now, on disk?
+#
+# Deliberately NOT `command -v`: the shell remembers where it found a command
+# and keeps answering from that memory after the file is gone. This script RUNS
+# docker early on (to list what it is about to delete), which is exactly what
+# puts /usr/bin/docker into that cache -- so the final check reported "docker
+# removed FAIL (still in PATH)" on a machine where docker had been purged
+# correctly and `command -v docker` in any new shell found nothing. Measured,
+# after reporting a failure that was not one.
+in_path() {
+    _name="$1"
+    _saved_ifs="$IFS"
+    IFS=:
+    for _dir in $PATH; do
+        # An empty PATH entry means the current directory, per POSIX.
+        if [ -x "${_dir:-.}/$_name" ]; then
+            IFS="$_saved_ifs"
+            return 0
+        fi
+    done
+    IFS="$_saved_ifs"
+    return 1
+}
+
 run() {
     if [ "$DRY_RUN" -eq 1 ]; then
         printf '  [dry-run] %s\n' "$*"
@@ -272,25 +296,51 @@ check() {  # check <label> <ok|bad> [detail]
     fi
 }
 
-command -v docker >/dev/null 2>&1 && check "docker removed" bad "(still in PATH)" \
-                                  || check "docker removed" ok
-command -v docker-compose >/dev/null 2>&1 && check "docker-compose removed" bad \
-                                          || check "docker-compose removed" ok
-[ -d /var/lib/docker ] && check "docker data removed" bad "(/var/lib/docker still there)" \
-                       || check "docker data removed" ok
-id -nG "$TARGET_USER" | tr ' ' '\n' | grep -qx docker \
-    && check "out of the docker group" bad "(log out and back in)" \
-    || check "out of the docker group" ok
-[ -e "$CLONE_DIR" ] && check "clone removed" bad || check "clone removed" ok
+# Written as plain if/else rather than `test && check bad || check ok`: in that
+# form the `||` fires whenever the middle command reports failure, so the same
+# line can print both verdicts. Not worth the cleverness in the one block whose
+# entire job is to be believed.
+if in_path docker; then
+    check "docker removed" bad "(still in PATH)"
+else
+    check "docker removed" ok
+fi
+
+if in_path docker-compose; then
+    check "docker-compose removed" bad
+else
+    check "docker-compose removed" ok
+fi
+
+if [ -d /var/lib/docker ]; then
+    check "docker data removed" bad "(/var/lib/docker still there)"
+else
+    check "docker data removed" ok
+fi
+
+if id -nG "$TARGET_USER" | tr ' ' '\n' | grep -qx docker; then
+    check "out of the docker group" bad "(log out and back in)"
+else
+    check "out of the docker group" ok
+fi
+
+if [ -e "$CLONE_DIR" ]; then
+    check "clone removed" bad
+else
+    check "clone removed" ok
+fi
 
 if [ "$KEEP_NVIDIA" -eq 0 ]; then
-    command -v nvidia-ctk >/dev/null 2>&1 && check "container toolkit removed" bad \
-                                          || check "container toolkit removed" ok
+    if in_path nvidia-ctk; then
+        check "container toolkit removed" bad
+    else
+        check "container toolkit removed" ok
+    fi
 fi
 
 # The one thing that must have SURVIVED. Checked last and loudly: without it,
 # `install-docker.sh --nvidia` refuses to run and the GPU path cannot be tested.
-if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+if in_path nvidia-smi && nvidia-smi -L >/dev/null 2>&1; then
     check "GPU DRIVER still working" ok
 else
     check "GPU DRIVER still working" bad "(it should NOT have been removed)"
