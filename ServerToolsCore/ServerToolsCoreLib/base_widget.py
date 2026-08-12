@@ -931,8 +931,61 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def _onJobSuccess(self, result) -> None:
         self._teardownJob()
+        # Between the teardown and handleResult, and deliberately: this is the
+        # one moment where the run is over, no timer is ticking, no thread is
+        # transferring, and the main thread has the interpreter to itself. It
+        # is the condition AMASSS's (blocking) path always unpacked in, and the
+        # streamed path had lost it by unpacking as it went.
+        if getattr(result, "kind", None) == "stream":
+            with slicer.util.tryWithErrorDisplay(_("Failed to unpack the results."), waitCursor=False):
+                self._unpackStreamedBundles(result.path)
         with slicer.util.tryWithErrorDisplay(_("Failed to handle the tool result."), waitCursor=False):
             self.handleResult(result)
+
+    def _unpackStreamedBundles(self, outputDir) -> None:
+        """Unpack the per-item archives a streamed run left in `outputDir`.
+
+        A streamed run downloads each item's bundle as it is produced -- so a
+        failure on scan 27 never costs the twenty-six before it -- but leaves
+        it ARCHIVED, because unpacking on the transfer thread while the run
+        continues was measured at minutes per bundle for work that takes a
+        twentieth of a second here.
+
+        Each archive is unpacked where it sits, so the per-item directory the
+        server chose is preserved, and removed once its contents are out.
+        """
+        if not outputDir or not os.path.isdir(outputDir):
+            return
+        bundles = []
+        for root, _dirs, names in os.walk(outputDir):
+            bundles.extend(
+                os.path.join(root, name) for name in sorted(names) if name.lower().endswith(".zip")
+            )
+        if not bundles:
+            return
+
+        self._showPhase(_("Extracting {count} result bundle(s)...").format(count=len(bundles)))
+        # processEvents is what actually paints that: without it Qt repaints
+        # only once the blocking extraction has finished, which is too late to
+        # be useful.
+        slicer.app.processEvents()
+        failed = []
+        try:
+            for bundle in bundles:
+                try:
+                    slicer_io.unzip_folder(bundle, os.path.dirname(bundle))
+                    os.remove(bundle)
+                except Exception as exc:  # noqa: BLE001 - one bad bundle must not lose the rest
+                    logger.warning("Could not unpack %s: %s", bundle, exc)
+                    failed.append(f"{os.path.basename(bundle)}: {exc}")
+        finally:
+            self._hideProgress()
+        if failed:
+            slicer.util.errorDisplay(
+                _("Some result bundles could not be unpacked:\n{details}").format(
+                    details="\n".join(failed)
+                )
+            )
 
     def _onJobError(self, exc) -> None:
         self._teardownJob()

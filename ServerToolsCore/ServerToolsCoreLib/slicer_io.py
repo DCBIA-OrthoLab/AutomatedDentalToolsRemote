@@ -104,9 +104,29 @@ def zip_folder(folder: str, dest_path: str) -> str:
     return dest_path
 
 
+class UnsafeArchiveError(Exception):
+    """An archive member that would be written outside its destination."""
+
+
 def unzip_folder(zip_path: str, dest_dir: str) -> str:
+    """Unpack an archive, refusing any member that escapes `dest_dir`.
+
+    The archive comes from our own server, and "we trust the server" is
+    exactly the assumption a zip-slip check exists to remove -- the server
+    applies the same check to every archive a client uploads to it. This is
+    the single function both result paths unpack through (the blocking one and
+    the streamed one), so the guard lives here rather than beside either.
+    """
     os.makedirs(dest_dir, exist_ok=True)
+    root = os.path.abspath(dest_dir)
     with zipfile.ZipFile(zip_path, "r") as archive:
+        for member in archive.infolist():
+            target = os.path.abspath(os.path.join(dest_dir, member.filename))
+            if os.path.commonpath([root, target]) != root:
+                raise UnsafeArchiveError(
+                    f"Refusing an archive entry that would be written outside "
+                    f"{dest_dir}: {member.filename!r}"
+                )
         archive.extractall(dest_dir)
     return dest_dir
 

@@ -207,14 +207,17 @@ class StreamedRunTest(unittest.TestCase):
             {"event": "done"},
         ]
         self._run()
+        # The bundle lands in the directory the event named, and is left
+        # ARCHIVED: unpacking happens once the run is over, on the main thread
+        # (base_widget._unpackStreamedBundles). Unpacking it here means
+        # unpacking it while the run continues, which was measured at minutes
+        # per bundle for work that takes 0.05s with nothing else running.
         self.assertEqual(sorted(os.listdir(self.output)), ["subjectA", "subjectB"])
         for subject, expected in (("subjectA", "A"), ("subjectB", "B")):
-            path = os.path.join(self.output, subject, "scan_Seg.nii.gz")
-            self.assertTrue(os.path.isfile(path))
-            with open(path) as handle:
-                self.assertEqual(handle.read(), expected)
-        # The archive itself is not left behind next to what it held.
-        self.assertNotIn("case.zip", os.listdir(os.path.join(self.output, "subjectA")))
+            bundle = os.path.join(self.output, subject, "case.zip")
+            self.assertTrue(os.path.isfile(bundle))
+            with zipfile.ZipFile(bundle) as archive:
+                self.assertEqual(archive.read("scan_Seg.nii.gz").decode(), expected)
 
     def test_the_files_survive_a_run_that_fails_afterwards(self):
         """The whole reason for the feature: 26 patients segmented and the 27th
@@ -246,18 +249,18 @@ class StreamedRunTest(unittest.TestCase):
         self.assertEqual(os.listdir(self.output), ["escaped.txt"])
         self.assertFalse(os.path.exists(os.path.join(self.output, "..", "..", "elsewhere")))
 
-    def test_a_zip_member_that_escapes_is_refused(self):
-        _Handler.script = [
-            {"event": "start"},
-            self._artifact("r1", "evil.zip", _zip_bytes({"../escaped.txt": "nope"})),
-            {"event": "done"},
-        ]
-        # A result that could not be brought back is a real failure and is
-        # raised as one, at the END so everything else is saved first. Silently
-        # continuing would leave a hole in the results with only a log line.
-        with self.assertRaises(ServerToolError) as raised:
-            self._run()
-        self.assertIn("could not be downloaded", str(raised.exception))
+    def test_a_zip_member_that_escapes_is_refused_when_it_is_unpacked(self):
+        """The guard moved with the unpacking, and had to: leaving it behind
+        would have shipped a streamed run that extracts whatever the archive
+        says. It now lives in the one function BOTH result paths unpack
+        through, so the blocking path gained it too."""
+        from ServerToolsCoreLib import slicer_io
+
+        bundle = os.path.join(self.output, "evil.zip")
+        with open(bundle, "wb") as handle:
+            handle.write(_zip_bytes({"../escaped.txt": "nope"}))
+        with self.assertRaises(slicer_io.UnsafeArchiveError):
+            slicer_io.unzip_folder(bundle, self.output)
         self.assertFalse(
             os.path.exists(os.path.join(os.path.dirname(self.output), "escaped.txt"))
         )

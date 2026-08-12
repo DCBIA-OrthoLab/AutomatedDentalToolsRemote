@@ -775,20 +775,14 @@ class ToolServerClient:
         )
         downloaded = time.monotonic()
 
-        # A per-item bundle is unpacked where it belongs; a single file is
-        # already in place. Decided from the extension, never by sniffing the
-        # bytes -- .xlsx and friends are zip containers (see slicer_io).
-        if result.path and result.path.lower().endswith(".zip"):
-            try:
-                with zipfile.ZipFile(result.path) as archive:
-                    _extract_safely(archive, destination)
-            except zipfile.BadZipFile as exc:
-                os.remove(result.path)
-                raise ServerToolError(
-                    f"A result bundle from '{tool_name}' is unreadable "
-                    f"(incomplete transfer?): {exc}"
-                ) from exc
-            os.remove(result.path)
+        # **The bundle is left archived on purpose.** Unpacking it here means
+        # unpacking it on this thread WHILE the run continues, and the same
+        # `extractall` that takes 0.05s with nothing else running was measured
+        # at over two minutes under those conditions. AMASSS never had the
+        # problem because its (blocking) path unpacks after `_teardownJob`,
+        # with the run finished and nothing competing -- so the streamed path
+        # now does the same: download as results appear, unpack at the end.
+        # See base_widget._unpackStreamedBundles.
 
         # Logged per artifact because the two halves have very different
         # remedies: a slow download is the link, a slow unpack is what the run
