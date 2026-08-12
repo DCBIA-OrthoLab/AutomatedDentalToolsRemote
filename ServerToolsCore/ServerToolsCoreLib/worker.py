@@ -21,11 +21,17 @@ _POLL_INTERVAL_MS = 100
 class BackgroundJob:
     """Runs `target(progress_cb)` on a worker thread; delivers the outcome on the main thread."""
 
-    def __init__(self, target, on_success=None, on_error=None, on_progress=None):
+    def __init__(self, target, on_success=None, on_error=None, on_progress=None,
+                 on_event=None):
         self._target = target
         self._on_success = on_success
         self._on_error = on_error
         self._on_progress = on_progress
+        # A second channel beside `progress`, for a tool reporting STRUCTURED
+        # events as it works (see client._consume_stream). Same rule as every
+        # other callback here: emitted on the worker thread, delivered on the
+        # main one, so a handler may touch the scene.
+        self._on_event = on_event
         self._queue = queue.Queue()
         self._timer = qt.QTimer()
         self._timer.setInterval(_POLL_INTERVAL_MS)
@@ -50,7 +56,14 @@ class BackgroundJob:
             def progress_cb(message):
                 self._queue.put(("progress", message))
 
-            result = self._target(progress_cb)
+            def event_cb(event):
+                self._queue.put(("event", event))
+
+            result = (
+                self._target(progress_cb, event_cb)
+                if self._on_event is not None
+                else self._target(progress_cb)
+            )
             self._queue.put(("success", result))
         except Exception as exc:
             logger.exception("Background job failed")
@@ -64,6 +77,8 @@ class BackgroundJob:
                     continue
                 if kind == "progress" and self._on_progress:
                     self._on_progress(payload)
+                elif kind == "event" and self._on_event:
+                    self._on_event(payload)
                 elif kind == "success":
                     self._timer.stop()
                     if self._on_success:

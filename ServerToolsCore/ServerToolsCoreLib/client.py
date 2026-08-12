@@ -62,6 +62,54 @@ _CONNECTION_POOL_SIZE = 16
 # argument name.
 _UPLOADS_FIELD = "__uploads__"
 
+# What a streamed run that failed part-way tells the user. The count matters:
+# "it failed" and "it failed after writing 26 of your 40 patients" call for
+# very different next steps.
+_STREAM_PARTIAL = (
+    "'{tool}' failed after delivering {delivered} result(s), which are saved. "
+    "The server said: {detail}"
+)
+
+
+def _safe_subdirectory(root: str, relative) -> str:
+    """`root/relative`, or `root` when `relative` is anything but a plain
+    relative path underneath it.
+
+    The value is the SERVER's, and it is joined onto a local path: an absolute
+    path, a `..` component or a drive letter would write a patient's files
+    somewhere the user never chose. Same reasoning as running the server's
+    `filename` through os.path.basename.
+    """
+    if not relative or relative in (".", "./"):
+        return root
+    candidate = os.path.normpath(os.path.join(root, str(relative)))
+    if os.path.isabs(str(relative)) or os.path.splitdrive(str(relative))[0]:
+        logger.warning("Ignoring an absolute directory in a run event")
+        return root
+    if os.path.commonpath([os.path.abspath(root), os.path.abspath(candidate)]) != os.path.abspath(root):
+        logger.warning("Ignoring a directory that escapes the output folder")
+        return root
+    os.makedirs(candidate, exist_ok=True)
+    return candidate
+
+
+def _extract_safely(archive: zipfile.ZipFile, destination: str) -> None:
+    """Unpack, refusing any member that would land outside `destination`.
+
+    The archive is built by the server, but "we trust the server" is exactly
+    the assumption a zip-slip check exists to remove — and the server applies
+    the same check to what a client uploads.
+    """
+    root = os.path.abspath(destination)
+    for member in archive.infolist():
+        target = os.path.abspath(os.path.join(destination, member.filename))
+        if os.path.commonpath([root, target]) != root:
+            raise ServerToolError(
+                f"Refusing a result entry that would be written outside the output "
+                f"folder: {member.filename!r}"
+            )
+    archive.extractall(destination)
+
 
 def _download_message(received: int, expected: Optional[int], label: str = "results") -> str:
     """"Downloading results... 8.2 / 14.1 MB (58%)", or without the total when
@@ -211,7 +259,10 @@ def _pooled_session() -> requests.Session:
 class ToolResult:
     """Uniform result regardless of output_kind."""
 
-    kind: str  # "text" | "file"
+    # "text" | "file" | "stream". A streamed run has already written every
+    # file it produced into `path` (the output folder) as it went, so there is
+    # no archive left to unpack -- see base_widget._handleSaveAsResult.
+    kind: str
     text: Optional[str] = None
     path: Optional[str] = None
 
@@ -374,12 +425,23 @@ class ToolServerClient:
         files: Optional[dict] = None,
         output_dir: Optional[str] = None,
         progress_cb: Optional[Callable[[str], None]] = None,
+        event_cb: Optional[Callable[[dict], None]] = None,
     ) -> ToolResult:
         """`files`: {schema_argument_name: local_file_path}, one entry per
         `type: "file"` argument you're providing. Each is uploaded as its own
         multipart field named after its schema argument — a tool can declare
         several independent file arguments (e.g. SurgMovPred's "model" +
-        "input"); there is no single reserved "file" key."""
+        "input"); there is no single reserved "file" key.
+
+        `event_cb`, when given AND the tool declares `streaming`, asks the
+        server to report as it works: each item is announced as it starts and
+        again as it finishes, and every file it produces is downloaded into
+        `output_dir` the moment it exists rather than at the end. The callback
+        sees each event as a dict; see `_consume_stream`.
+
+        Passing it against a tool (or a server) that cannot stream is not an
+        error — the request falls through to the ordinary blocking path and the
+        callback simply never fires."""
         args = args or {}
         files = files or {}
         schema = self.get_tool_schema(tool_name)
@@ -387,6 +449,14 @@ class ToolServerClient:
 
         headers = {"Authorization": f"Bearer {self._token}"}
         data = self._stringify(args)
+
+        # Streaming is asked for only when the caller wants the events AND the
+        # tool says it can produce them: the schema is the one place that
+        # knows, so no module has to remember which of its tools stream.
+        streaming = bool(event_cb) and bool(schema.get("streaming"))
+        delivery = (
+            {"X-Result-Delivery": "stream"} if streaming else _RESULT_DELIVERY_HEADER
+        )
 
         # Anything big enough to be worth it goes up FIRST, in parallel parts,
         # and this request then only references it. What stays in `files` is
@@ -434,7 +504,7 @@ class ToolServerClient:
                 # merely for being big.
                 response = self._session.post(
                     f"{self._server_url}/run/{tool_name}",
-                    headers={**headers, **_RESULT_DELIVERY_HEADER},
+                    headers={**headers, **delivery},
                     data=data,
                     files=files_payload or None,
                     timeout=self._timeout,
@@ -457,7 +527,126 @@ class ToolServerClient:
         if progress_cb:
             progress_cb("Processing response...")
 
+        if streaming and response.headers.get("Content-Type", "").startswith(
+            "application/x-ndjson"
+        ):
+            return self._consume_stream(
+                tool_name, response, output_dir, progress_cb, event_cb
+            )
+
         return self._build_result(tool_name, response, schema, output_dir, progress_cb)
+
+    # ------------------------------------------------------------------
+    # Streamed runs
+    # ------------------------------------------------------------------
+
+    def _consume_stream(
+        self,
+        tool_name: str,
+        response,
+        output_dir: Optional[str],
+        progress_cb: Optional[Callable[[str], None]],
+        event_cb: Callable[[dict], None],
+    ) -> ToolResult:
+        """Read the NDJSON body, fetching each file as it is announced.
+
+        The events are forwarded to `event_cb` verbatim — deciding what a
+        "scan" or an "item" means is the module's business, not this layer's.
+        What happens here is the part every streaming tool needs identically:
+        pulling each artifact into `output_dir` while the run continues, and
+        turning an in-band `error` event into the same `ServerToolError` a
+        failed blocking run raises.
+
+        **A file that arrives is kept even if the run later fails.** That is the
+        whole point: thirty-nine patients segmented and the fortieth unreadable
+        used to return nothing at all.
+        """
+        if not output_dir:
+            raise ServerToolError("An output directory is required for a streamed run.")
+        os.makedirs(output_dir, exist_ok=True)
+
+        error: Optional[str] = None
+        delivered = 0
+        try:
+            for line in response.iter_lines(decode_unicode=False):
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, ValueError):
+                    # A malformed line is dropped rather than failing a run
+                    # whose files are already landing on disk.
+                    logger.warning("Unparseable event from '%s'", tool_name)
+                    continue
+                if not isinstance(event, dict):
+                    # A line that IS valid JSON but not an object -- a bare
+                    # string, a number, a list. Dropped for the same reason:
+                    # `event.get(...)` on it would raise and abandon a run
+                    # whose earlier files are already on the user's disk.
+                    logger.warning("Ignoring a non-object event from '%s'", tool_name)
+                    continue
+
+                kind = event.get("event")
+                if kind == "artifact":
+                    try:
+                        self._collect_artifact(tool_name, event, output_dir, progress_cb)
+                        delivered += 1
+                    except ServerToolError as exc:
+                        # One file that could not be fetched must not abandon
+                        # the rest of a run that is still producing them.
+                        logger.warning("Could not fetch an artifact: %s", exc)
+                        event = dict(event, fetch_error=str(exc))
+                elif kind == "error":
+                    error = event.get("detail") or "The tool failed on the server."
+                elif kind == "heartbeat":
+                    # Proof of life for a phase with nothing to report; the
+                    # panel's own elapsed timer already says how long.
+                    continue
+
+                try:
+                    event_cb(event)
+                except Exception:  # noqa: BLE001 - a UI callback must not kill the transfer
+                    logger.exception("A run-event callback raised")
+        except requests.RequestException as exc:
+            raise ServerToolError(
+                f"The connection to '{tool_name}' dropped after {delivered} file(s): {exc}"
+            ) from exc
+        finally:
+            response.close()
+
+        if error:
+            raise ServerToolError(
+                _STREAM_PARTIAL.format(tool=tool_name, delivered=delivered, detail=error)
+                if delivered
+                else error
+            )
+        return ToolResult(kind="stream", path=output_dir, text=None)
+
+    def _collect_artifact(
+        self,
+        tool_name: str,
+        event: dict,
+        output_dir: str,
+        progress_cb: Optional[Callable[[str], None]],
+    ) -> str:
+        """Download one announced file into the run's output folder.
+
+        `relative_dir` comes from the server and is joined onto a local path,
+        so it is treated as untrusted: an absolute path or a `..` component
+        would write outside the folder the user picked. The same rule the
+        non-streamed path applies to `filename`.
+        """
+        reference = event.get("result_ref") or {}
+        destination = _safe_subdirectory(output_dir, event.get("relative_dir"))
+        result = self._download_reference(tool_name, reference, destination, progress_cb)
+        # A per-item bundle is unpacked where it belongs; a single file is
+        # already in place. Decided from the extension, never by sniffing the
+        # bytes -- .xlsx and friends are zip containers (see slicer_io).
+        if result.path and result.path.lower().endswith(".zip"):
+            with zipfile.ZipFile(result.path) as archive:
+                _extract_safely(archive, destination)
+            os.remove(result.path)
+        return destination
 
     # ------------------------------------------------------------------
     # Bulk transfer (see transfer.py for why it is not one request)

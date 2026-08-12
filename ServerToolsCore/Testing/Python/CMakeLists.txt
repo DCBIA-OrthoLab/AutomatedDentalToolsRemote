@@ -39,3 +39,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE} -m unittest test_joystick
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
+
+# test_streaming.py: the client half of a streamed run, against a real socket
+# rather than a mock -- what it exercises is a body arriving in pieces over
+# time and files fetched from a second endpoint while it is still open, and a
+# mocked response hands back the whole thing at once. Same reasoning as
+# test_transfer.py.
+add_test(
+  NAME ServerToolsCore_test_streaming
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_streaming
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )

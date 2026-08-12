@@ -111,6 +111,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.uiWidget = None
         self._progressLabel = None
         self._elapsedTimer = None  # ticks once a second while a job runs
+        # The per-item table a streaming tool fills in as it works. Built on
+        # the first event, kept across runs, emptied at Apply.
+        self._runTable = None
+        self._runRows = {}
         self._jobStartedAt = None
         self._jobPhase = ""
 
@@ -792,6 +796,13 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         a zip signature: .xlsx/.docx/.ods are themselves zip containers
         (OOXML), so that would "extract" a result spreadsheet into raw XML
         parts instead of keeping it as the file it is."""
+        # A streamed run has already written every file it produced into the
+        # output folder, one item at a time -- there is no archive left, and
+        # `path` is the folder itself rather than a file in it.
+        if getattr(result, "kind", None) == "stream":
+            slicer.util.infoDisplay(_("Results saved to {path}").format(path=result.path))
+            return
+
         if slicer_io.is_extractable_archive(result.path):
             resultDir = os.path.dirname(result.path)
             # Unpacking runs on the main thread and a result archive can expand
@@ -870,17 +881,29 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.applyButton.setVisible(False)
         self.cancelButton.setVisible(True)
 
-        def task(progress_cb):
+        # A tool that reports as it works gets the queue table; every other one
+        # is untouched, so this costs nothing on a panel whose tool runs in one
+        # step. `streaming` is the schema's answer, never a module's list.
+        wantsEvents = bool((self._schema or {}).get("streaming"))
+        if wantsEvents:
+            self._resetRunTable()
+
+        def task(progress_cb, event_cb=None):
             return self.client.run(
                 self.TOOL_NAME,
                 args=args,
                 files=files,
                 output_dir=outputDir,
                 progress_cb=progress_cb,
+                event_cb=event_cb,
             )
 
         self._job = BackgroundJob(
-            task, on_success=self._onJobSuccess, on_error=self._onJobError, on_progress=self._onJobProgress
+            task,
+            on_success=self._onJobSuccess,
+            on_error=self._onJobError,
+            on_progress=self._onJobProgress,
+            on_event=self._onRunEvent if wantsEvents else None,
         )
         self._jobPhase = _("Sending request...")
         self._startElapsedTimer()
@@ -900,6 +923,95 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _onJobError(self, exc) -> None:
         self._teardownJob()
         slicer.util.errorDisplay(str(exc))
+
+    # ------------------------------------------------------------------
+    # The run table: what a streaming tool is doing, item by item
+    # ------------------------------------------------------------------
+
+    def _resetRunTable(self) -> None:
+        """Empty the table and show it. A run's rows must never be read as the
+        previous run's, so this happens at Apply, not at the first event."""
+        self._runRows = {}
+        if self._runTable is None:
+            return
+        self._runTable.setRowCount(0)
+        self._runTable.setVisible(True)
+
+    def _onRunEvent(self, event: dict) -> None:
+        """One event from the server, on the main thread.
+
+        Deliberately generic: an "item" is whatever the tool is iterating over
+        (a scan, a patient, a timepoint) and the words in the row are the
+        server's. This layer only knows there are things, they have a status,
+        and some of them arrive.
+        """
+        kind = event.get("event")
+        if kind not in ("item", "artifact"):
+            return
+        if self._runTable is None:
+            self._buildRunTable()
+        name = str(event.get("name") or "")
+        if not name:
+            return
+
+        if kind == "artifact":
+            # The file is on disk now: say so on the row rather than adding one.
+            self._setRunRow(name, event.get("index"), event.get("total"),
+                            _("saved"), event.get("fetch_error") or "")
+            return
+
+        status = str(event.get("status") or "")
+        label = {
+            "running": _("running..."),
+            "ok": _("done"),
+            "failed": _("failed"),
+        }.get(status, status)
+        self._setRunRow(name, event.get("index"), event.get("total"),
+                        label, str(event.get("error") or ""))
+
+        total = event.get("total")
+        if total:
+            done = sum(
+                1 for row in self._runRows.values() if row["status"] != _("running...")
+            )
+            self._jobPhase = _("{done} of {total} done").format(done=done, total=total)
+            self._renderProgress()
+
+    def _buildRunTable(self) -> None:
+        """Created on the first event rather than at setup(): a tool that never
+        streams must not carry an empty table around, and the panel is rebuilt
+        whenever the schema is refetched."""
+        self._runTable = qt.QTableWidget(0, 3)
+        self._runTable.setHorizontalHeaderLabels([_("Item"), _("Status"), _("Detail")])
+        self._runTable.horizontalHeader().setStretchLastSection(True)
+        self._runTable.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        self._runTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
+        self._runTable.verticalHeader().setVisible(False)
+        self._runTable.setMinimumHeight(150)
+        if self._progressLabel is not None:
+            index = self._rootLayout.indexOf(self._progressLabel)
+            self._rootLayout.insertWidget(index, self._runTable)
+        else:
+            self._rootLayout.addWidget(self._runTable)
+        design.apply(self._runTable)
+
+    def _setRunRow(self, name: str, index, total, status: str, detail: str) -> None:
+        row = self._runRows.get(name)
+        if row is None:
+            position = self._runTable.rowCount
+            self._runTable.insertRow(position)
+            for column in range(3):
+                self._runTable.setItem(position, column, qt.QTableWidgetItem(""))
+            label = f"{index}/{total}  {name}" if index and total else name
+            self._runTable.item(position, 0).setText(label)
+            row = {"position": position, "status": ""}
+            self._runRows[name] = row
+        row["status"] = status
+        self._runTable.item(row["position"], 1).setText(status)
+        if detail:
+            self._runTable.item(row["position"], 2).setText(detail)
+        # Keep the newest row in view: a forty-patient cohort scrolls past.
+        self._runTable.scrollToItem(self._runTable.item(row["position"], 0))
 
     def _onJobProgress(self, message) -> None:
         # Kept as the phase, not printed once and forgotten: the elapsed-time
