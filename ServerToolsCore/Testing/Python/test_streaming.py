@@ -244,12 +244,34 @@ class StreamedRunTest(unittest.TestCase):
             self._artifact("r1", "evil.zip", _zip_bytes({"../escaped.txt": "nope"})),
             {"event": "done"},
         ]
-        _result, events = self._run()
-        # The run is not abandoned for it; the event carries the reason.
-        self.assertIn("fetch_error", events[1])
+        # A result that could not be brought back is a real failure and is
+        # raised as one, at the END so everything else is saved first. Silently
+        # continuing would leave a hole in the results with only a log line.
+        with self.assertRaises(ServerToolError) as raised:
+            self._run()
+        self.assertIn("could not be downloaded", str(raised.exception))
         self.assertFalse(
             os.path.exists(os.path.join(os.path.dirname(self.output), "escaped.txt"))
         )
+
+    def test_the_reader_never_waits_for_a_download(self):
+        """The fix for "the server seems to wait for the client": fetching runs
+        on its own thread, so a slow download cannot stop the event loop from
+        reading -- which is what used to freeze the panel mid-run and make a
+        server that was still working look stalled."""
+        _Handler.script = [
+            {"event": "start"},
+            self._artifact("r1", "p1.nii.gz", b"x" * 4096),
+            {"event": "item", "index": 2, "total": 2, "name": "p2", "status": "running"},
+            {"event": "item", "index": 2, "total": 2, "name": "p2", "status": "ok"},
+            {"event": "done"},
+        ]
+        seen = []
+        self.client.run("probe", args={}, output_dir=self.output,
+                        event_cb=lambda e: seen.append(e["event"]))
+        # Every event was forwarded, and the artifact still landed.
+        self.assertEqual(seen, ["start", "artifact", "item", "item", "done"])
+        self.assertEqual(os.listdir(self.output), ["p1.nii.gz"])
 
     def test_a_malformed_line_does_not_abandon_the_run(self):
         """A file already on disk must not be lost to an event the client

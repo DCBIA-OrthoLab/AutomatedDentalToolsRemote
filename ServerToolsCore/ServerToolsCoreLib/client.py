@@ -15,7 +15,9 @@ import json
 import logging
 import mimetypes
 import os
+import queue
 import re
+import threading
 import zipfile
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -565,6 +567,26 @@ class ToolServerClient:
             raise ServerToolError("An output directory is required for a streamed run.")
         os.makedirs(output_dir, exist_ok=True)
 
+        # **Fetching runs on its own thread, and that is not an optimisation.**
+        # Downloading and unpacking inline meant this loop stopped reading the
+        # socket for as long as a file took to land, so every event behind it
+        # waited: the panel froze on the row it had just finished, and the run
+        # looked like it had stalled on the server. It had not — the tool never
+        # blocks on the client (its events go onto an unbounded queue
+        # server-side) — but nothing on screen could say so.
+        #
+        # One worker, not a pool: the artifacts of one run are written into the
+        # same tree, and their order is the order the server produced them.
+        pending: "queue.Queue" = queue.Queue()
+        collected = []
+        fetcher = threading.Thread(
+            target=self._collect_artifacts,
+            args=(tool_name, pending, output_dir, progress_cb, collected),
+            name=f"artifacts-{tool_name}",
+            daemon=True,
+        )
+        fetcher.start()
+
         error: Optional[str] = None
         delivered = 0
         try:
@@ -588,14 +610,9 @@ class ToolServerClient:
 
                 kind = event.get("event")
                 if kind == "artifact":
-                    try:
-                        self._collect_artifact(tool_name, event, output_dir, progress_cb)
-                        delivered += 1
-                    except ServerToolError as exc:
-                        # One file that could not be fetched must not abandon
-                        # the rest of a run that is still producing them.
-                        logger.warning("Could not fetch an artifact: %s", exc)
-                        event = dict(event, fetch_error=str(exc))
+                    # Handed off, not fetched here: see the comment above.
+                    pending.put(event)
+                    delivered += 1
                 elif kind == "error":
                     error = event.get("detail") or "The tool failed on the server."
                 elif kind == "heartbeat":
@@ -608,19 +625,57 @@ class ToolServerClient:
                 except Exception:  # noqa: BLE001 - a UI callback must not kill the transfer
                     logger.exception("A run-event callback raised")
         except requests.RequestException as exc:
+            pending.put(None)
+            fetcher.join()
             raise ServerToolError(
-                f"The connection to '{tool_name}' dropped after {delivered} file(s): {exc}"
+                f"The connection to '{tool_name}' dropped after {len(collected)} file(s): {exc}"
             ) from exc
         finally:
             response.close()
 
+        # Every event has arrived; wait for the files still coming down. The
+        # run is not finished until they are on disk, whatever the server said.
+        pending.put(None)
+        fetcher.join()
+        failures = [item for item in collected if item.get("fetch_error")]
+        saved = len(collected) - len(failures)
+
+        # The server failing and a download failing are different things and
+        # get different words: one is "the tool broke", the other is "the tool
+        # worked and I could not bring a file back". Both name what WAS saved,
+        # because that is what decides whether the user re-runs everything or
+        # just the rest.
         if error:
             raise ServerToolError(
-                _STREAM_PARTIAL.format(tool=tool_name, delivered=delivered, detail=error)
-                if delivered
+                _STREAM_PARTIAL.format(tool=tool_name, delivered=saved, detail=error)
+                if saved
                 else error
             )
+        if failures:
+            raise ServerToolError(
+                f"{len(failures)} of {len(collected)} result(s) could not be downloaded "
+                f"({failures[0]['fetch_error']}). The {saved} that arrived are saved in "
+                f"{output_dir}."
+            )
         return ToolResult(kind="stream", path=output_dir, text=None)
+
+    def _collect_artifacts(self, tool_name, pending, output_dir, progress_cb, collected) -> None:
+        """Drain announced artifacts onto disk until told to stop (a `None`).
+
+        Runs on its own thread so the event loop never stops reading the
+        socket. A file that cannot be fetched is recorded and the next one is
+        attempted: one failed download must not cost a run the other 39.
+        """
+        while True:
+            event = pending.get()
+            if event is None:
+                return
+            try:
+                self._collect_artifact(tool_name, event, output_dir, progress_cb)
+                collected.append(event)
+            except Exception as exc:  # noqa: BLE001 - reported, never raised into the loop
+                logger.warning("Could not fetch an artifact: %s", exc)
+                collected.append(dict(event, fetch_error=str(exc)))
 
     def _collect_artifact(
         self,
