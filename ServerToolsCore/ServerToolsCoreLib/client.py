@@ -96,24 +96,6 @@ def _safe_subdirectory(root: str, relative) -> str:
     return candidate
 
 
-def _extract_safely(archive: zipfile.ZipFile, destination: str) -> None:
-    """Unpack, refusing any member that would land outside `destination`.
-
-    The archive is built by the server, but "we trust the server" is exactly
-    the assumption a zip-slip check exists to remove — and the server applies
-    the same check to what a client uploads.
-    """
-    root = os.path.abspath(destination)
-    for member in archive.infolist():
-        target = os.path.abspath(os.path.join(destination, member.filename))
-        if os.path.commonpath([root, target]) != root:
-            raise ServerToolError(
-                f"Refusing a result entry that would be written outside the output "
-                f"folder: {member.filename!r}"
-            )
-    archive.extractall(destination)
-
-
 def _download_message(received: int, expected: Optional[int], label: str = "results") -> str:
     """"Downloading results... 8.2 / 14.1 MB (58%)", or without the total when
     the server sent no usable Content-Length."""
@@ -599,19 +581,21 @@ class ToolServerClient:
         cancelled = False
         delivered = 0
         try:
-            # `chunk_size=1` is NOT a detail, and it is not about efficiency.
+            # `chunk_size=1` is not about efficiency. requests' default is
+            # 512 and urllib3 blocks until it has that many bytes; these events
+            # are 50-250 bytes and the stream is deliberately quiet between
+            # items, so an event sits in the socket buffer until enough
+            # heartbeats pile up BEHIND it to reach 512. With a 15s heartbeat
+            # that is minutes of delay on the events driving the panel -- the
+            # heartbeat added to prove the connection was alive is what would
+            # make it look dead.
             #
-            # requests' default is 512, and urllib3 blocks until it has that
-            # many bytes. These events are 50-250 bytes and the stream is
-            # deliberately quiet between items, so an `artifact` event sat in
-            # the socket buffer until enough heartbeats piled up BEHIND it to
-            # reach 512 -- measured at ~2.5 minutes per artifact on a real run
-            # with a 15s heartbeat, which is exactly the delay it costs.
-            #
-            # The heartbeat added to prove the connection was alive is what
-            # made the client look dead. Reading a byte at a time delivers each
-            # line the moment it lands; the volume here is a few KB per run, so
-            # what it costs is nothing.
+            # Honest scope: this was NOT what made a real run slow (that was
+            # unpacking on the transfer thread, see _collect_artifact). The
+            # buffering is real and `test_an_event_reaches_the_client_before_
+            # the_next_one_is_sent` fails by over a second without this, but it
+            # delays what the panel SHOWS, not what a run costs. Reading a byte
+            # at a time costs nothing here: a run's whole stream is a few KB.
             for line in response.iter_lines(chunk_size=1, decode_unicode=False):
                 if cancel_event is not None and cancel_event.is_set():
                     # Leaving the loop closes the response in the `finally`
@@ -705,10 +689,8 @@ class ToolServerClient:
         attempted: one failed download must not cost a run the other 39.
 
         Each finished artifact is reported back through `event_cb` with what it
-        COST -- so where a run's time went is visible in the panel itself
-        rather than only in a log line, whose level a host application decides.
-        Diagnosing a slow run by asking someone to raise a logger's level is
-        how you get no answer.
+        cost, so a slow run can be diagnosed from the panel rather than from a
+        log line whose level a host application decides.
         """
         while True:
             queued = pending.get()
@@ -717,24 +699,22 @@ class ToolServerClient:
             announced_at, event = queued
             started = time.monotonic()
             try:
-                timings = self._collect_artifact(tool_name, event, output_dir, progress_cb)
+                elapsed = self._collect_artifact(tool_name, event, output_dir, progress_cb)
                 collected.append(event)
             except Exception as exc:  # noqa: BLE001 - reported, never raised into the loop
                 logger.warning("Could not fetch an artifact: %s", exc)
                 collected.append(dict(event, fetch_error=str(exc)))
-                timings = None
+                elapsed = None
             if event_cb is None:
                 continue
+            detail = f"{elapsed:.0f}s" if elapsed is not None else "failed"
             waited = started - announced_at
-            detail = (
-                f"{timings[0]:.0f}s down, {timings[1]:.0f}s unpack"
-                if timings
-                else "failed"
-            )
             if waited > 1:
-                # How long it sat in the queue before this thread got to it.
-                # A large value here means the BOTTLENECK IS THIS LOOP, not the
-                # transfer -- which no amount of staring at download times says.
+                # Silent when healthy, and the one number that would catch this
+                # investigation's bug coming back: how long the file sat in the
+                # queue before this thread reached it. A large value means the
+                # bottleneck is THIS LOOP, which no amount of staring at
+                # download times would say.
                 detail += f", {waited:.0f}s queued"
             try:
                 event_cb({
@@ -752,8 +732,9 @@ class ToolServerClient:
         event: dict,
         output_dir: str,
         progress_cb: Optional[Callable[[str], None]],
-    ) -> str:
-        """Download one announced file into the run's output folder.
+    ):
+        """Download one announced file into the run's output folder; return how
+        long it took.
 
         `relative_dir` comes from the server and is joined onto a local path,
         so it is treated as untrusted: an absolute path or a `..` component
@@ -763,46 +744,29 @@ class ToolServerClient:
         reference = event.get("result_ref") or {}
         destination = _safe_subdirectory(output_dir, event.get("relative_dir"))
         started = time.monotonic()
-        # `verify_archive=False`: the CRC pass would decompress the whole
-        # bundle, and the extraction below decompresses it AGAIN -- zipfile
-        # checks each member's CRC as it extracts, so a corrupt archive is
-        # caught either way. Measured on a run with mesh exports: the bundles
-        # were hundreds of MB and unpacking took ~2.5 MINUTES per scan, twice
-        # over. The blocking path keeps its verification, where the archive is
-        # the whole result and may not be unpacked at all.
+        # **This thread downloads and does nothing else.** A bundle is left
+        # ARCHIVED for base_widget to unpack once the run is over: unpacking it
+        # here means unpacking it while the run continues, and the same
+        # `extractall` that takes 0.05s with nothing else running was measured
+        # at over two minutes under those conditions. AMASSS never had the
+        # problem because its blocking path unpacks after `_teardownJob`, with
+        # nothing competing.
+        #
+        # `verify_archive=False` for the same reason -- the CRC pass is a full
+        # decompression, and `zipfile` checks every member's CRC when
+        # base_widget extracts it anyway. The length check in _verify_download
+        # still runs here, so a truncated download is still caught now.
         result = self._download_reference(
             tool_name, reference, destination, progress_cb, verify_archive=False
         )
-        downloaded = time.monotonic()
-
-        # **The bundle is left archived on purpose.** Unpacking it here means
-        # unpacking it on this thread WHILE the run continues, and the same
-        # `extractall` that takes 0.05s with nothing else running was measured
-        # at over two minutes under those conditions. AMASSS never had the
-        # problem because its (blocking) path unpacks after `_teardownJob`,
-        # with the run finished and nothing competing -- so the streamed path
-        # now does the same: download as results appear, unpack at the end.
-        # See base_widget._unpackStreamedBundles.
-
-        # Logged per artifact because the two halves have very different
-        # remedies: a slow download is the link, a slow unpack is what the run
-        # was asked to produce (mesh exports are two orders of magnitude bigger
-        # than a segmentation). Without this the client could only report one
-        # elapsed number for both.
-        finished = time.monotonic()
+        elapsed = time.monotonic() - started
         logger.info(
-            "Collected '%s': %.1f MB, download %.1fs, unpack %.1fs",
+            "Collected '%s': %.1f MB in %.1fs",
             event.get("name") or "?",
             int(reference.get("size") or 0) / (1024 * 1024),
-            downloaded - started,
-            finished - downloaded,
+            elapsed,
         )
-        if progress_cb:
-            progress_cb(
-                f"Saved {event.get('name') or 'result'} "
-                f"({downloaded - started:.0f}s down, {finished - downloaded:.0f}s unpack)"
-            )
-        return (downloaded - started, finished - downloaded)
+        return elapsed
 
     # ------------------------------------------------------------------
     # Bulk transfer (see transfer.py for why it is not one request)

@@ -304,14 +304,14 @@ class StreamedRunTest(unittest.TestCase):
         self.assertIn("done", [e["event"] for e in events])
 
     def test_an_event_reaches_the_client_before_the_next_one_is_sent(self):
-        """The bug that cost ~2.5 MINUTES per artifact on a real run.
+        """Events must not wait for a buffer to fill.
 
         `requests.iter_lines()` defaults to reading 512 bytes at a time and
         blocks until it has them. These events are 50-250 bytes and the stream
         is quiet between items, so an `artifact` event sat in the socket buffer
-        until enough heartbeats piled up behind it to reach 512 -- and the
-        heartbeat added to prove the connection was alive is what made the
-        client look dead.
+        until enough heartbeats piled up behind it to reach 512 -- so the
+        heartbeat added to prove the connection was alive is what would make
+        the panel look frozen. It delays what is SHOWN, not what a run costs.
 
         The server here sends one artifact, then trickles heartbeats. If the
         client only sees the artifact once several heartbeats have followed it,
@@ -350,10 +350,8 @@ class StreamedRunTest(unittest.TestCase):
         saved = [e for e in events if e.get("status") == "saved"]
         self.assertEqual(len(saved), 1)
         self.assertEqual(saved[0]["name"], "p1.nii.gz")
-        # The three numbers that tell a slow transfer from a slow unpack from a
-        # client that never got round to it.
-        self.assertIn("down", saved[0]["error"])
-        self.assertIn("unpack", saved[0]["error"])
+        # What it cost, so a slow run is diagnosable from the panel.
+        self.assertRegex(saved[0]["error"], r"^\d+s")
 
     def test_each_collected_result_is_released(self):
         """A reference the server keeps until someone says otherwise; not
@@ -401,9 +399,9 @@ class DrainCoalescingTest(unittest.TestCase):
         return BackgroundJob(lambda progress_cb: None, **kwargs)
 
     def test_only_the_newest_progress_message_is_rendered(self):
-        """A transfer emits one per chunk; a tick can carry hundreds. They are
-        one label's text, so rendering the intermediate values is work nobody
-        sees -- and it starves the thread producing them."""
+        """They are one label's text, so the intermediate values are never
+        seen. This matters when the main thread was blocked long enough for a
+        burst to pile up: render the current state, not a stale sequence."""
         rendered = []
         job = self._job(on_progress=rendered.append)
         for index in range(200):

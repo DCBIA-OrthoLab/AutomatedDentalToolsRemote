@@ -82,12 +82,12 @@ class BackgroundJob:
     def _drain(self) -> None:
         """Deliver what the worker produced, on the main thread.
 
-        **Progress messages are COALESCED to the newest one per tick.** They
-        are a single label's text: rendering the intermediate values is work
-        nobody sees. A transfer emits one per chunk, so a tick could carry
-        hundreds -- and every one of them is a Qt call from Python, which holds
-        the GIL while it runs. Rendering them all does not just waste the main
-        thread, it starves the worker thread that is producing them.
+        **Progress messages are coalesced to the newest one per tick**, because
+        they are one label's text and the intermediate values are never seen.
+        Normally a tick carries at most one anyway (transfer.py's meter is
+        throttled to four a second), so this only matters when the main thread
+        was blocked long enough for a burst to pile up -- then it renders the
+        current state instead of replaying a stale sequence.
 
         Events are NOT coalesced: each one means something (an item started,
         finished, was saved) and dropping any would lose a row.
