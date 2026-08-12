@@ -1456,9 +1456,82 @@ structure in the scene twice), and the palette. It imports neither `slicer` nor
 `qt`, which is what makes the label mapping unit-testable — the one part where
 a mistake does not fail, it renames anatomy.
 
-Not offered, because the tool does not produce them: the STL/OBJ/glTF/VTK mesh
-exports. The server port returns segmentations only. When it grows the
-argument, the panel grows the field by itself.
+**Mesh exports arrived exactly that way.** The server grew `export_formats`
+(VTK / STL / OBJ / VTK-merged), `surface_smoothing` and `surface_decimation`,
+and the panel grew the fields with **no client change at all** — which is the
+claim this architecture makes, tested here for the first time on a real
+addition. glTF is deliberately absent: it needs a live render window, which a
+headless container has no GL context for, so it belongs on the Slicer side
+(from the loaded segmentation) rather than as a server argument that would fail
+on most deployments.
+
+The colours are the server's now too. `label_colors` in the run report is
+preferred over the local palette (`results.label_colors`), because a mesh
+export bakes its colour into the `.vtk` it writes and a client picking its own
+would draw the segmentation in one colour and the surface from the same run in
+another. The local table stays as the fallback for a server that predates the
+field, and it is deliberately the same rule.
+
+BatchDentalSeg is also the first tool to **stream** (see "Streamed runs"
+above): each scan is reported as it starts and finishes and its files land in
+the output folder while the rest of the cohort is still on the GPU.
+
+## Streamed runs: watching a batch, and keeping what worked
+
+A tool whose schema says `streaming: true` can report as it works, and the
+panel then shows a **run table** — one row per item, updated as each starts,
+finishes and lands — instead of only an elapsed-time tick. More importantly,
+each finished file is downloaded into the output folder *while the run
+continues*, so a batch that fails on patient 27 keeps the twenty-six before it.
+
+The whole thing is opt-in twice over, and both halves matter:
+
+- a module passes `event_cb` (base_widget does it automatically for any tool
+  whose schema declares `streaming`), and
+- `client.run` sends `X-Result-Delivery: stream` only when **the schema** says
+  the tool can produce events. No module keeps a list of which of its tools
+  stream, and asking a tool that cannot is not an error — the request falls
+  through to the blocking path and the callback never fires.
+
+`client._consume_stream` reads the NDJSON body and forwards every event
+verbatim: what an "item" means (a scan, a patient, a timepoint) is the tool's
+business, not this layer's. What it does itself is the part every streaming
+tool needs identically — fetching each artifact, unpacking a per-item bundle
+into the directory the event names, and turning an in-band `error` event into
+the same `ServerToolError` a failed blocking run raises, **naming how many
+results were already saved**.
+
+Three things are load-bearing:
+
+- **`relative_dir` is untrusted.** It comes from the server and is joined onto
+  a local path, so an absolute path or a `..` component would write a patient's
+  files somewhere the user never picked (`_safe_subdirectory`). Members of a
+  per-item archive get the same check (`_extract_safely`) — "we trust the
+  server" is precisely the assumption a zip-slip check exists to remove, and
+  the server applies the same one to what a client uploads.
+- **A line that is valid JSON but not an object is dropped**, not crashed on.
+  It was a real defect, caught by the test that sends one: `event.get(...)` on
+  a bare string raised and abandoned a run whose earlier files were already on
+  the user's disk.
+- **`ToolResult(kind="stream")`** has `path` set to the output FOLDER, not to
+  an archive — everything is already unpacked in it, so `_handleSaveAsResult`
+  and any module override must not look for a zip to open.
+
+`BackgroundJob` grew a second channel for this (`on_event`), following the rule
+the first one already had: emitted on the worker thread, delivered on the main
+one by the same `QTimer` drain, so a handler may touch the MRML scene.
+
+**The run table is generic.** `base_widget` knows only that there are items,
+that they have a status, and that some of them arrive; every word in a row is
+the server's. It is built on the first event and emptied at Apply, never at the
+first event — one run's rows must never be read as the previous run's.
+
+`test_streaming.py` drives all of this against a real `ThreadingHTTPServer`,
+not a mock, for the same reason `test_transfer.py` does: what is being tested
+is a body arriving in pieces over time plus files fetched from a second
+endpoint while it is still open, and a mocked response hands back the whole
+thing at once — it would pass against a client that waited for the last byte
+before doing anything, which is the exact bug this removes.
 
 ## How to add a new module in 5 minutes
 

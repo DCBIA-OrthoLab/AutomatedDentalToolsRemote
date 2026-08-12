@@ -37,6 +37,10 @@ VOLUME_EXTENSIONS = (".nii.gz", ".nrrd.gz", ".gipl.gz", ".nii", ".nrrd", ".gipl"
 # from ("Segment_5"). Parsed as a fallback only — see segment_label_value.
 _TRAILING_INTEGER = re.compile(r"(\d+)$")
 
+# A published colour is applied to a segment without further checking, so it is
+# matched rather than trusted: `#RRGGBB`, nothing else.
+_HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
 # The six structures the DentalSegmentator / PediatricDentalSeg /
 # NasoMaxillaDentSeg tables share, in the colours the original
 # BATCHDENTALSEG module drew them in, so a clinician moving to the remote
@@ -166,14 +170,39 @@ def segment_label_value(segment_id: str, index: int, declared=None) -> int:
     return index + 1
 
 
-def color_for(name: str, value: int) -> tuple:
-    """`(r, g, b)` in 0..1 for a segment, from its name when we know it.
+def label_colors(report) -> dict:
+    """`{segment name: "#RRGGBB"}` as the SERVER assigned them, or `{}`.
+
+    The server publishes this because a mesh export bakes the colour into the
+    .vtk it writes: a client picking its own would draw the segmentation in one
+    colour and the surface from the same run in another. Preferring the
+    report's table is what keeps the two in step, and it means a model added
+    server-side arrives with its colours as well as its labels.
+    """
+    published = (report or {}).get("label_colors") or {}
+    return {
+        name: value
+        for name, value in published.items()
+        if isinstance(value, str) and _HEX_COLOR.match(value)
+    }
+
+
+def color_for(name: str, value: int, published=None) -> tuple:
+    """`(r, g, b)` in 0..1 for a segment.
+
+    `published` is `label_colors(report)` and wins when it names this segment.
+    The fallback below is what runs against a server too old to publish the
+    table, and it is deliberately the same rule the server uses.
 
     Looking the colour up by NAME rather than by value is what keeps it right
     across models: NasoMaxillaDentSeg separates the maxilla and so shifts every
     later integer, and a palette indexed by integer would recolour the mandible
     as the teeth on that one model alone.
     """
+    if published:
+        from_server = published.get(name)
+        if from_server:
+            return hex_to_rgb(from_server)
     hex_color = _NAMED_COLORS.get((name or "").strip().lower())
     if hex_color:
         return hex_to_rgb(hex_color)

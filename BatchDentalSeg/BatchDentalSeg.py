@@ -285,8 +285,12 @@ class BatchDentalSegWidget(ServerToolWidgetBase):
         what turns a label volume into named anatomy — and a partial run into
         something other than scans that silently went missing.
         """
-        resultDir = os.path.dirname(result.path)
-        if slicer_io.is_extractable_archive(result.path):
+        # A streamed run delivered each scan as it finished, so `path` is
+        # already the output folder and there is nothing left to unpack. A
+        # blocking run returns the archive, whose folder is what to read.
+        streamed = getattr(result, "kind", None) == "stream"
+        resultDir = result.path if streamed else os.path.dirname(result.path)
+        if not streamed and slicer_io.is_extractable_archive(result.path):
             # Unpacking runs on the main thread and label volumes expand ~100x,
             # so say so before starting rather than looking frozen.
             self._showPhase(_("Extracting results..."))
@@ -299,11 +303,13 @@ class BatchDentalSegWidget(ServerToolWidgetBase):
 
         report = results.read_report(resultDir)
         paths = results.find_segmentations(resultDir, (report or {}).get("prediction_ID") or "")
-        loaded = self._loadSegmentations(paths, results.label_names(report))
+        loaded = self._loadSegmentations(
+            paths, results.label_names(report), results.label_colors(report)
+        )
 
         slicer.util.infoDisplay(self._summarize(resultDir, report, len(paths), loaded))
 
-    def _loadSegmentations(self, paths: list, labelNames: dict) -> int:
+    def _loadSegmentations(self, paths: list, labelNames: dict, labelColors: dict = None) -> int:
         """Load the returned label volumes as segmentations; return how many
         made it. One unreadable file is logged and skipped rather than costing
         the user the other thirty-nine."""
@@ -325,7 +331,7 @@ class BatchDentalSegWidget(ServerToolWidgetBase):
             except Exception as exc:  # noqa: BLE001 - one bad file must not lose the rest
                 logger.warning("Could not load %s: %s", path, exc)
                 continue
-            self._nameSegments(node, labelNames)
+            self._nameSegments(node, labelNames, labelColors)
             lastNode = node
             loaded += 1
 
@@ -333,9 +339,9 @@ class BatchDentalSegWidget(ServerToolWidgetBase):
             self._showInReview(lastNode)
         return loaded
 
-    def _nameSegments(self, node, labelNames: dict) -> None:
+    def _nameSegments(self, node, labelNames: dict, labelColors: dict = None) -> None:
         """Give each segment the name the model's own label table says it has,
-        and a colour to match.
+        and the colour the server drew it in.
 
         Without this a returned segmentation opens as `Segment_1..n` in Slicer's
         default palette, and which structure is which is a lookup in a JSON
@@ -362,7 +368,11 @@ class BatchDentalSegWidget(ServerToolWidgetBase):
                 # rather than invent one. Visible as unnamed, which is honest.
                 continue
             segment.SetName(name)
-            segment.SetColor(*results.color_for(name, value))
+            # The report's palette when the server published one: a mesh export
+            # bakes that colour into its .vtk, and the segmentation drawn in a
+            # different colour from the surface of the same run is confusing in
+            # exactly the way colour is supposed to prevent.
+            segment.SetColor(*results.color_for(name, value, labelColors))
             if displayNode is not None:
                 displayNode.SetSegmentOpacity3D(segmentId, results.opacity_for(name))
 

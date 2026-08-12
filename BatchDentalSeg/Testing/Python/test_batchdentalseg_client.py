@@ -107,6 +107,42 @@ BATCHDENTALSEG_SCHEMA = {
             "extensions": None,
             "description": "Suffix used in output file names, e.g. scan_Seg.nii.gz",
         },
+        "export_formats": {
+            "label": "Also export meshes", "section": "Outputs",
+            "visible_when": None, "ui": "inline", "groups": None,
+            "type": "multichoice", "types": ["multichoice"], "required": False,
+            "server_selectable": None, "initial": None, "extensions": None,
+            "choices": {"VTK": False, "STL": False, "OBJ": False, "VTK (merged)": False},
+            "description": (
+                "Surface meshes built from the segmentation, one file per structure "
+                "(plus one whole-scan file for 'VTK (merged)'). Only VTK carries the "
+                "structure colours; STL has no colour field and OBJ would need a "
+                "companion .mtl. The segmentation volume is written either way"
+            ),
+        },
+        "surface_smoothing": {
+            "label": "Mesh smoothing", "section": "Outputs",
+            "visible_when": None, "ui": None, "groups": None,
+            "type": "int", "types": ["int"], "required": False,
+            "server_selectable": None, "choices": None, "initial": 5,
+            "extensions": None,
+            "description": (
+                "Smoothing iterations for the meshes (0-95). Ignored when no export "
+                "format is selected"
+            ),
+        },
+        "surface_decimation": {
+            "label": "Mesh decimation (%)", "section": "Outputs",
+            "visible_when": None, "ui": None, "groups": None,
+            "type": "int", "types": ["int"], "required": False,
+            "server_selectable": None, "choices": None, "initial": 90,
+            "extensions": None,
+            "description": (
+                "Percentage of mesh triangles to drop (0-99). 90 keeps the shape to "
+                "well under a voxel while making the files usable; 0 keeps every "
+                "triangle. Ignored when no export format is selected"
+            ),
+        },
     },
 }
 
@@ -266,7 +302,11 @@ class TestPanelLayout(unittest.TestCase):
         layout = qt.QFormLayout()
         widgets = formgen.build(BATCHDENTALSEG_SCHEMA["arguments"], layout)
         # `input` is a file argument: base_widget gives it its own input row.
-        self.assertEqual(sorted(widgets), ["model", "prediction_ID", "separate_segments"])
+        self.assertEqual(
+            sorted(widgets),
+            ["export_formats", "model", "prediction_ID", "separate_segments",
+             "surface_decimation", "surface_smoothing"],
+        )
 
     def test_the_declared_defaults_reach_the_widgets(self):
         layout = qt.QFormLayout()
@@ -455,6 +495,72 @@ class TestSegmentLabelling(unittest.TestCase):
 
     def test_the_named_palette_is_matched_case_insensitively(self):
         self.assertEqual(results.color_for("mandible", 2), results.color_for("Mandible", 2))
+
+
+class TestExportFormats(unittest.TestCase):
+    """The mesh formats the local module offered, now a server argument."""
+
+    def test_the_formats_are_a_multichoice_starting_all_off(self):
+        group = formgen.MultiChoiceGroup(
+            _argument("export_formats")["choices"], _argument("export_formats")["ui"]
+        )
+        # All off by default: meshing a UniversalLab scan is 55 surfaces,
+        # minutes of CPU and hundreds of MB nobody asked for.
+        self.assertEqual(
+            group.value(),
+            {"VTK": False, "STL": False, "OBJ": False, "VTK (merged)": False},
+        )
+
+    def test_the_whole_selection_travels_including_the_unchecked(self):
+        group = formgen.MultiChoiceGroup(_argument("export_formats")["choices"])
+        group.boxes["STL"].setChecked(True)
+        payload = json.loads(
+            ToolServerClient._stringify({"export_formats": group.value()})["export_formats"]
+        )
+        # Server-side, what is sent IS the selection: an option left out counts
+        # as unchecked whatever its declared default.
+        self.assertEqual(
+            payload, {"VTK": False, "STL": True, "OBJ": False, "VTK (merged)": False}
+        )
+
+    def test_the_mesh_settings_carry_the_servers_own_defaults(self):
+        layout = qt.QFormLayout()
+        widgets = formgen.build(BATCHDENTALSEG_SCHEMA["arguments"], layout)
+        # `initial` matters here beyond cosmetics: a form always sends its
+        # widgets, so a spin box starting at Qt's 0 would send 0 and every mesh
+        # would come out unsmoothed and undecimated — the tool's own defaults
+        # never reached.
+        self.assertEqual(widgets["surface_smoothing"].value, 5)
+        self.assertEqual(widgets["surface_decimation"].value, 90)
+
+    def test_the_mesh_rows_sit_in_the_outputs_box(self):
+        for name in ("export_formats", "surface_smoothing", "surface_decimation"):
+            self.assertEqual(formgen.section_of(_argument(name)), "Outputs")
+
+
+class TestPublishedColors(unittest.TestCase):
+    """The server publishes `label_colors`; the client follows it."""
+
+    def test_the_published_palette_wins_over_the_local_one(self):
+        # A mesh export bakes its colour into the .vtk, so the panel drawing
+        # the same structure in another colour is the one thing colour is
+        # supposed to prevent.
+        published = results.label_colors(_report(label_colors={"Mandible": "#123456"}))
+        self.assertEqual(results.color_for("Mandible", 2, published),
+                         results.hex_to_rgb("#123456"))
+
+    def test_a_server_publishing_nothing_falls_back_to_the_local_palette(self):
+        # An older server, or a report that could not be read.
+        self.assertEqual(results.label_colors(_report()), {})
+        self.assertEqual(results.color_for("Mandible", 2, {}),
+                         results.color_for("Mandible", 2))
+
+    def test_a_malformed_colour_is_ignored_rather_than_applied(self):
+        # It reaches vtkSegment.SetColor, so it is matched, not trusted.
+        published = results.label_colors(
+            _report(label_colors={"Mandible": "red", "Upper Teeth": "#00FF00", "X": 3})
+        )
+        self.assertEqual(published, {"Upper Teeth": "#00FF00"})
 
 
 class TestStem(unittest.TestCase):
