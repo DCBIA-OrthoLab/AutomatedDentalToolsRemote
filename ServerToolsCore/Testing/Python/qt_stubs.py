@@ -368,6 +368,34 @@ class QDoubleSpinBox(QSpinBox):
         self.decimals = decimals
 
 
+class QTimer(QObject):
+    """Enough of a timer for worker.BackgroundJob to be constructed and driven.
+
+    It never fires on its own: a test calls `_drain()` directly, which is
+    exactly what one tick does. Making it fire would mean running an event
+    loop, and what is worth testing here is what a tick DOES, not when.
+    """
+
+    def __init__(self, *_args, **_kwargs):
+        QObject.__init__(self)
+        self.timeout = Signal()
+        self.interval = 0
+        self.singleShot = False
+        self.started = False
+
+    def setInterval(self, milliseconds):
+        self.interval = milliseconds
+
+    def setSingleShot(self, single):
+        self.singleShot = bool(single)
+
+    def start(self, *_args):
+        self.started = True
+
+    def stop(self):
+        self.started = False
+
+
 class QPalette:
     Window = 0
 

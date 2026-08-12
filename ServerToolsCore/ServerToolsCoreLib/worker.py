@@ -80,13 +80,26 @@ class BackgroundJob:
             self._queue.put(("error", exc))
 
     def _drain(self) -> None:
+        """Deliver what the worker produced, on the main thread.
+
+        **Progress messages are COALESCED to the newest one per tick.** They
+        are a single label's text: rendering the intermediate values is work
+        nobody sees. A transfer emits one per chunk, so a tick could carry
+        hundreds -- and every one of them is a Qt call from Python, which holds
+        the GIL while it runs. Rendering them all does not just waste the main
+        thread, it starves the worker thread that is producing them.
+
+        Events are NOT coalesced: each one means something (an item started,
+        finished, was saved) and dropping any would lose a row.
+        """
+        latest_progress = None
         try:
             while True:
                 kind, payload = self._queue.get_nowait()
                 if self._cancelled:
                     continue
-                if kind == "progress" and self._on_progress:
-                    self._on_progress(payload)
+                if kind == "progress":
+                    latest_progress = payload
                 elif kind == "event" and self._on_event:
                     self._on_event(payload)
                 elif kind == "success":
@@ -99,3 +112,5 @@ class BackgroundJob:
                         self._on_error(payload)
         except queue.Empty:
             pass
+        if latest_progress is not None and self._on_progress:
+            self._on_progress(latest_progress)

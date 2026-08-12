@@ -33,6 +33,10 @@ _HERE = os.path.abspath(os.path.dirname(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..", "..")))
 
+import qt_stubs
+
+qt_stubs.install()
+
 from ServerToolsCoreLib.client import ToolServerClient
 from ServerToolsCoreLib.errors import ServerToolError
 
@@ -379,3 +383,44 @@ class StreamedRunTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DrainCoalescingTest(unittest.TestCase):
+    """`BackgroundJob._drain` is what stands between the worker thread and the
+    main thread. What it does per tick is Qt work, and Qt work from Python
+    holds the GIL."""
+
+    def _job(self, **kwargs):
+        # qt is stubbed here, so the timer never fires on its own: _drain is
+        # called directly, which is exactly what a tick does.
+        from ServerToolsCoreLib.worker import BackgroundJob
+
+        return BackgroundJob(lambda progress_cb: None, **kwargs)
+
+    def test_only_the_newest_progress_message_is_rendered(self):
+        """A transfer emits one per chunk; a tick can carry hundreds. They are
+        one label's text, so rendering the intermediate values is work nobody
+        sees -- and it starves the thread producing them."""
+        rendered = []
+        job = self._job(on_progress=rendered.append)
+        for index in range(200):
+            job._queue.put(("progress", f"chunk {index}"))
+        job._drain()
+        self.assertEqual(rendered, ["chunk 199"])
+
+    def test_every_event_is_delivered(self):
+        """Events are NOT coalesced: each one means something (an item started,
+        finished, was saved) and dropping any would lose a row."""
+        seen = []
+        job = self._job(on_event=seen.append)
+        for index in range(5):
+            job._queue.put(("event", {"event": "item", "n": index}))
+        job._drain()
+        self.assertEqual([e["n"] for e in seen], [0, 1, 2, 3, 4])
+
+    def test_progress_still_arrives_when_it_is_the_only_thing_queued(self):
+        rendered = []
+        job = self._job(on_progress=rendered.append)
+        job._queue.put(("progress", "only one"))
+        job._drain()
+        self.assertEqual(rendered, ["only one"])
