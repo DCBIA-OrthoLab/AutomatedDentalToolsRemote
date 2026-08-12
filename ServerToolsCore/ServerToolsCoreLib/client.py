@@ -599,7 +599,20 @@ class ToolServerClient:
         cancelled = False
         delivered = 0
         try:
-            for line in response.iter_lines(decode_unicode=False):
+            # `chunk_size=1` is NOT a detail, and it is not about efficiency.
+            #
+            # requests' default is 512, and urllib3 blocks until it has that
+            # many bytes. These events are 50-250 bytes and the stream is
+            # deliberately quiet between items, so an `artifact` event sat in
+            # the socket buffer until enough heartbeats piled up BEHIND it to
+            # reach 512 -- measured at ~2.5 minutes per artifact on a real run
+            # with a 15s heartbeat, which is exactly the delay it costs.
+            #
+            # The heartbeat added to prove the connection was alive is what
+            # made the client look dead. Reading a byte at a time delivers each
+            # line the moment it lands; the volume here is a few KB per run, so
+            # what it costs is nothing.
+            for line in response.iter_lines(chunk_size=1, decode_unicode=False):
                 if cancel_event is not None and cancel_event.is_set():
                     # Leaving the loop closes the response in the `finally`
                     # below. That disconnect is the ONLY thing the server can

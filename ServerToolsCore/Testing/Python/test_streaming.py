@@ -24,6 +24,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -88,6 +89,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/x-ndjson")
         self.end_headers()
         for event in type(self).script:
+            pause = event.pop("pause", 0) if isinstance(event, dict) else 0
+            if pause:
+                time.sleep(pause)
             self.wfile.write((json.dumps(event) + "\n").encode())
             # Flushed per line: the client must be able to act on event N
             # before event N+1 exists, which is the entire contract.
@@ -291,6 +295,37 @@ class StreamedRunTest(unittest.TestCase):
         # `done` is the server's last word; the client may still report what
         # collecting each artifact cost after it (see the "saved" events).
         self.assertIn("done", [e["event"] for e in events])
+
+    def test_an_event_reaches_the_client_before_the_next_one_is_sent(self):
+        """The bug that cost ~2.5 MINUTES per artifact on a real run.
+
+        `requests.iter_lines()` defaults to reading 512 bytes at a time and
+        blocks until it has them. These events are 50-250 bytes and the stream
+        is quiet between items, so an `artifact` event sat in the socket buffer
+        until enough heartbeats piled up behind it to reach 512 -- and the
+        heartbeat added to prove the connection was alive is what made the
+        client look dead.
+
+        The server here sends one artifact, then trickles heartbeats. If the
+        client only sees the artifact once several heartbeats have followed it,
+        the buffering is back.
+        """
+        _Handler.script = [
+            {"event": "start"},
+            self._artifact("r1", "p1.nii.gz", b"x" * 64),
+        ] + [{"event": "heartbeat", "elapsed": i, "pause": 0.15} for i in range(10)] + [
+            {"event": "done"},
+        ]
+        seen_at = {}
+        start = time.time()
+
+        def record(event):
+            seen_at.setdefault(event["event"], time.time() - start)
+
+        self.client.run("probe", args={}, output_dir=self.output, event_cb=record)
+        # The artifact must arrive before the heartbeats that follow it have
+        # had time to accumulate -- i.e. within roughly one heartbeat.
+        self.assertLess(seen_at["artifact"], 0.30, seen_at)
 
     def test_each_artifact_reports_what_it_cost(self):
         """Where a run's time went has to be visible in the PANEL, not only in

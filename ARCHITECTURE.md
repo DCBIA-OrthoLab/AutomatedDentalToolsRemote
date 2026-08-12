@@ -1501,6 +1501,19 @@ into the directory the event names, and turning an in-band `error` event into
 the same `ServerToolError` a failed blocking run raises, **naming how many
 results were already saved**.
 
+**`iter_lines(chunk_size=1)` is load-bearing, and it is the least obvious line
+in this file.** requests defaults to 512, and urllib3 blocks until it has that
+many bytes. These events are 50-250 bytes and the stream is deliberately quiet
+between items, so an `artifact` event sat in the socket buffer until enough
+heartbeats piled up BEHIND it to reach 512 bytes. Measured on a real cohort:
+**~2.5 minutes of delay per artifact**, on a run whose server side took 2m41 —
+the client trailed by six minutes, and the profile was maddeningly consistent
+(constant, independent of file size, invisible server-side, and absent from
+every benchmark that sent its events in one burst). The heartbeat added to
+prove the connection was alive is precisely what made the client look dead.
+`test_an_event_reaches_the_client_before_the_next_one_is_sent` fails by more
+than a second the moment the default comes back.
+
 Three things are load-bearing:
 
 - **`relative_dir` is untrusted.** It comes from the server and is joined onto
