@@ -44,7 +44,11 @@ add_subdirectory(FlexReg_CLI)
 # add_subdirectory(MedX_CLI)
 add_subdirectory(MRI2CBCT)
 add_subdirectory(MRI2CBCT_CLI)
-add_subdirectory(BATCHDENTALSEG)
+# Replaced by BatchDentalSeg, the thin client of the server's "BatchDentalSeg"
+# tool. The folder is left in the tree but unwired, like ALI_Method and
+# SurgMovPred_CLI -- building both would put two dental segmentation modules
+# in the same category, one of which runs nnUNet in Slicer's own interpreter.
+# add_subdirectory(BATCHDENTALSEG)
 add_subdirectory(DOCShapeAXI)
 add_subdirectory(DOCShapeAXI_CLI)
 add_subdirectory(CLIC)
@@ -62,6 +66,7 @@ add_subdirectory(ServerToolsSettings)
 add_subdirectory(SlicerCloud)
 add_subdirectory(SurgMovPred)
 add_subdirectory(ExampleTool)
+add_subdirectory(BatchDentalSeg)
 ## NEXT_MODULE
 
 #-----------------------------------------------------------------------------

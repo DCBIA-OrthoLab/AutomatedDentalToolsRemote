@@ -66,6 +66,13 @@ SlicerAutomatedDentalTools/
 │   ├── ASO.py                              # declarative, plus optional result loading
 │   ├── Testing/Python/test_aso_client.py   # ASO's schema as a fixture, same stubs
 │   └── ASO_Method/                         # former local module, left in place but unwired
+├── BatchDentalSeg/                         # teeth and jaw structures on dental CT/CBCT
+│   ├── CMakeLists.txt
+│   ├── BatchDentalSeg.py                   # declarative, plus segment naming and a review box
+│   ├── BatchDentalSegLib/results.py        # the Slicer-free half: report, discovery, palette
+│   ├── Testing/Python/test_batchdentalseg_client.py  # its schema as a fixture, same stubs
+│   └── Resources/Icons/BatchDentalSeg.png
+├── BATCHDENTALSEG/                         # former local module, left in place but unwired
 ├── SurgMovPred_CLI/                        # left in place but unwired (see "SurgMovPred_CLI" below)
 └── ALI_CBCT/, ALI_IOS/, ASO_CBCT/, ASO_IOS/  # the CLIs they used to drive, likewise unwired
 ```
@@ -131,6 +138,14 @@ interpreter launch:
   deadlock a naive two-pipe read walks into — neither of which a mocked
   `Popen` can exhibit. One test writes 20 000 stderr lines specifically to
   push past the pipe buffer.
+- **`BatchDentalSeg/Testing/Python/test_batchdentalseg_client.py`** — same
+  stubs, plus that module's own Slicer-free half (`BatchDentalSegLib/results.py`).
+  Half of it is the schema (the file/folder row derived with no override, the
+  model that travels as a name, `input` + `model` alone being a valid request);
+  the other half is the result handling, where a mistake is silent rather than
+  loud — a label value mapped by position instead of by value renames anatomy
+  without failing, and a palette indexed by value recolours the teeth on the
+  one model that numbers them differently.
 - **`test_joystick.py`**: the 2D pad under the same stubs. The value/pixel
   mapping, clamping, and the gesture handlers' arithmetic (absolute and
   spring-back drags, wheel, arrows). Painting is not exercised, there is no
@@ -1375,6 +1390,75 @@ module's one real job. A landmark absent from the scene means one of two very
 different things — *not in the selected bundle* (use another one) or *never
 converged* (this scan is hard) — and only the report tells them apart, so the
 summary is built around the failures and names both kinds separately.
+
+## `BatchDentalSeg`
+
+```python
+class BatchDentalSegWidget(ServerToolWidgetBase):
+    TOOL_NAME = "BatchDentalSeg"
+```
+
+That is the whole declaration — no `FILE_INPUTS`, no `RESULT_KIND`. `input` is
+typed `("volume_or_zip_file", "folder")`, so `auto_file_mode` already gives it
+the file/folder row (one scan or a whole cohort, zipped before upload), and
+`output_kind: "files"` can only derive `"save_as"`. The rest of the file is
+what happens *after* a run.
+
+It replaces the local `BATCHDENTALSEG` module — 2940 lines of Qt driving nnUNet
+inside Slicer's own interpreter, with a queue table, a RAM watchdog, a process
+killer and a runtime model download from GitHub. None of that has a client-side
+counterpart: the queue is a folder argument, the memory is the server's, the
+models are staged server-side and picked by name. The folder stays in the tree
+but is dropped from the root `CMakeLists.txt`, like `ALI_Method` — building
+both would put two dental segmentation modules in one category.
+
+**What was kept from that interface**, because it is the part a clinician
+actually used:
+
+- **the model-scope line** under the model dropdown. Its text is the server's
+  own `description` for `model`, shown on screen instead of only as a tooltip.
+  It does not follow the selection: the schema publishes one description for
+  the argument, not one per hosted bundle. The exact table of the model that
+  *ran* is in the report, and the end-of-run summary shows it. A per-bundle
+  description would be a small server-side addition, and this row would then
+  follow the dropdown with no change here beyond reading it;
+- **segments that come back named and coloured**, instead of grey
+  `Segment_1..n`;
+- **a "Segmentation review" box** — a segmentation selector, Slicer's segment
+  editor, and the surface-smoothing slider the local module lifted out of the
+  Show-3D button. Collapsed until a result is loaded, then opened on it. Built
+  in `addExtraWidgets` (which runs once) rather than in the schema-driven half
+  (which is rebuilt when a server that was down comes back), so a rebuild
+  cannot take the editor away mid-edit.
+
+**Naming the segments is the server's job, not the module's.** The returned
+volume is a label map and the four models do not number the same things —
+NasoMaxillaDentSeg separates the maxilla, which shifts every later value, and
+UniversalLab labels 52 teeth individually. `BatchDentalSeg_report.json`
+publishes the `labels` table of the model that ran, and that table is the only
+thing saying what an integer means, so no structure list lives in this client.
+What *is* client-side is presentation: the six colours the original module drew
+the shared structures in (looked up **by name**, so the same structure keeps
+its colour whichever model produced it), a golden-angle hue walk for everything
+else (every UniversalLab tooth, anything a future model adds), and translucency
+on the bone shells so the teeth inside them are visible.
+
+The mapping goes through the label **value**, never the segment's position:
+`vtkSegment.GetLabelValue()` when the Slicer version records it, otherwise the
+integer Slicer put in the segment id (`Segment_5`), and only then position. A
+structure absent from a scan leaves a gap in the values, and position would
+name everything after it as the structure before it — silently.
+
+`BatchDentalSegLib/results.py` holds all of that: report reading, deciding
+which returned volumes to load (`separate_segments` writes one binary mask per
+structure *beside* the multi-label volume, and loading both would put every
+structure in the scene twice), and the palette. It imports neither `slicer` nor
+`qt`, which is what makes the label mapping unit-testable — the one part where
+a mistake does not fail, it renames anatomy.
+
+Not offered, because the tool does not produce them: the STL/OBJ/glTF/VTK mesh
+exports. The server port returns segmentations only. When it grows the
+argument, the panel grows the field by itself.
 
 ## How to add a new module in 5 minutes
 
