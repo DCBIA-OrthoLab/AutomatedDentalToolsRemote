@@ -429,6 +429,7 @@ class ToolServerClient:
         output_dir: Optional[str] = None,
         progress_cb: Optional[Callable[[str], None]] = None,
         event_cb: Optional[Callable[[dict], None]] = None,
+        cancel_event=None,
     ) -> ToolResult:
         """`files`: {schema_argument_name: local_file_path}, one entry per
         `type: "file"` argument you're providing. Each is uploaded as its own
@@ -444,7 +445,12 @@ class ToolServerClient:
 
         Passing it against a tool (or a server) that cannot stream is not an
         error — the request falls through to the ordinary blocking path and the
-        callback simply never fires."""
+        callback simply never fires.
+
+        `cancel_event` (a `threading.Event`) makes a streamed run genuinely
+        cancellable: setting it stops the read loop and CLOSES the response,
+        which is what makes the server see the client leave and stop its tool.
+        Nothing can interrupt a blocking request, so it is ignored there."""
         args = args or {}
         files = files or {}
         schema = self.get_tool_schema(tool_name)
@@ -534,7 +540,7 @@ class ToolServerClient:
             "application/x-ndjson"
         ):
             return self._consume_stream(
-                tool_name, response, output_dir, progress_cb, event_cb
+                tool_name, response, output_dir, progress_cb, event_cb, cancel_event
             )
 
         return self._build_result(tool_name, response, schema, output_dir, progress_cb)
@@ -550,6 +556,7 @@ class ToolServerClient:
         output_dir: Optional[str],
         progress_cb: Optional[Callable[[str], None]],
         event_cb: Callable[[dict], None],
+        cancel_event=None,
     ) -> ToolResult:
         """Read the NDJSON body, fetching each file as it is announced.
 
@@ -582,16 +589,26 @@ class ToolServerClient:
         collected = []
         fetcher = threading.Thread(
             target=self._collect_artifacts,
-            args=(tool_name, pending, output_dir, progress_cb, collected),
+            args=(tool_name, pending, output_dir, progress_cb, collected, event_cb),
             name=f"artifacts-{tool_name}",
             daemon=True,
         )
         fetcher.start()
 
         error: Optional[str] = None
+        cancelled = False
         delivered = 0
         try:
             for line in response.iter_lines(decode_unicode=False):
+                if cancel_event is not None and cancel_event.is_set():
+                    # Leaving the loop closes the response in the `finally`
+                    # below. That disconnect is the ONLY thing the server can
+                    # observe -- it then stops its tool at the next point that
+                    # tool reports from, instead of running a batch to
+                    # completion for nobody.
+                    logger.info("Cancelled by the user; closing the '%s' stream", tool_name)
+                    cancelled = True
+                    break
                 if not line:
                     continue
                 try:
@@ -612,7 +629,7 @@ class ToolServerClient:
                 kind = event.get("event")
                 if kind == "artifact":
                     # Handed off, not fetched here: see the comment above.
-                    pending.put(event)
+                    pending.put((time.monotonic(), event))
                     delivered += 1
                 elif kind == "error":
                     error = event.get("detail") or "The tool failed on the server."
@@ -641,6 +658,12 @@ class ToolServerClient:
         failures = [item for item in collected if item.get("fetch_error")]
         saved = len(collected) - len(failures)
 
+        # A cancelled run is not a failed one: what already arrived is on disk
+        # and is worth keeping, and the panel has already released itself.
+        if cancelled:
+            logger.info("'%s' cancelled with %d result(s) saved", tool_name, saved)
+            return ToolResult(kind="stream", path=output_dir, text=None)
+
         # The server failing and a download failing are different things and
         # get different words: one is "the tool broke", the other is "the tool
         # worked and I could not bring a file back". Both name what WAS saved,
@@ -660,23 +683,55 @@ class ToolServerClient:
             )
         return ToolResult(kind="stream", path=output_dir, text=None)
 
-    def _collect_artifacts(self, tool_name, pending, output_dir, progress_cb, collected) -> None:
+    def _collect_artifacts(self, tool_name, pending, output_dir, progress_cb, collected,
+                           event_cb=None) -> None:
         """Drain announced artifacts onto disk until told to stop (a `None`).
 
         Runs on its own thread so the event loop never stops reading the
         socket. A file that cannot be fetched is recorded and the next one is
         attempted: one failed download must not cost a run the other 39.
+
+        Each finished artifact is reported back through `event_cb` with what it
+        COST -- so where a run's time went is visible in the panel itself
+        rather than only in a log line, whose level a host application decides.
+        Diagnosing a slow run by asking someone to raise a logger's level is
+        how you get no answer.
         """
         while True:
-            event = pending.get()
-            if event is None:
+            queued = pending.get()
+            if queued is None:
                 return
+            announced_at, event = queued
+            started = time.monotonic()
             try:
-                self._collect_artifact(tool_name, event, output_dir, progress_cb)
+                timings = self._collect_artifact(tool_name, event, output_dir, progress_cb)
                 collected.append(event)
             except Exception as exc:  # noqa: BLE001 - reported, never raised into the loop
                 logger.warning("Could not fetch an artifact: %s", exc)
                 collected.append(dict(event, fetch_error=str(exc)))
+                timings = None
+            if event_cb is None:
+                continue
+            waited = started - announced_at
+            detail = (
+                f"{timings[0]:.0f}s down, {timings[1]:.0f}s unpack"
+                if timings
+                else "failed"
+            )
+            if waited > 1:
+                # How long it sat in the queue before this thread got to it.
+                # A large value here means the BOTTLENECK IS THIS LOOP, not the
+                # transfer -- which no amount of staring at download times says.
+                detail += f", {waited:.0f}s queued"
+            try:
+                event_cb({
+                    "event": "item",
+                    "name": event.get("name"),
+                    "status": "saved",
+                    "error": detail,
+                })
+            except Exception:  # noqa: BLE001 - a UI callback must not kill the fetcher
+                logger.exception("A run-event callback raised")
 
     def _collect_artifact(
         self,
@@ -740,7 +795,7 @@ class ToolServerClient:
                 f"Saved {event.get('name') or 'result'} "
                 f"({downloaded - started:.0f}s down, {finished - downloaded:.0f}s unpack)"
             )
-        return destination
+        return (downloaded - started, finished - downloaded)
 
     # ------------------------------------------------------------------
     # Bulk transfer (see transfer.py for why it is not one request)

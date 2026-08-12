@@ -32,6 +32,10 @@ class BackgroundJob:
         # other callback here: emitted on the worker thread, delivered on the
         # main one, so a handler may touch the scene.
         self._on_event = on_event
+        # What `cancel()` sets and the target may watch. A blocking request
+        # cannot be interrupted from here, but a STREAMED one can stop reading
+        # and close its response -- which is what makes the server notice.
+        self.cancel_event = threading.Event()
         self._queue = queue.Queue()
         self._timer = qt.QTimer()
         self._timer.setInterval(_POLL_INTERVAL_MS)
@@ -45,10 +49,16 @@ class BackgroundJob:
         self._timer.start()
 
     def cancel(self) -> None:
-        """Best-effort: the in-flight HTTP request cannot be interrupted, but its
-        result is discarded and the UI is released immediately (see ARCHITECTURE.md
-        limitations — no true server-side cancel)."""
+        """Stop listening, and ask the target to stop working.
+
+        `cancel_event` is what a STREAMED run watches: closing the response
+        makes the server see the client leave, and its tool stops at the next
+        point it reports progress from (see the server's streaming.py). For a
+        plain blocking request there is still nothing to interrupt — the result
+        is discarded and the UI released, as before.
+        """
         self._cancelled = True
+        self.cancel_event.set()
         self._timer.stop()
 
     def _run(self) -> None:
@@ -60,7 +70,7 @@ class BackgroundJob:
                 self._queue.put(("event", event))
 
             result = (
-                self._target(progress_cb, event_cb)
+                self._target(progress_cb, event_cb, self.cancel_event)
                 if self._on_event is not None
                 else self._target(progress_cb)
             )

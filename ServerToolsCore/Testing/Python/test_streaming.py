@@ -269,8 +269,10 @@ class StreamedRunTest(unittest.TestCase):
         seen = []
         self.client.run("probe", args={}, output_dir=self.output,
                         event_cb=lambda e: seen.append(e["event"]))
-        # Every event was forwarded, and the artifact still landed.
-        self.assertEqual(seen, ["start", "artifact", "item", "item", "done"])
+        # Every event was forwarded, and the artifact still landed. The
+        # trailing "item" is the client reporting what that artifact cost,
+        # which arrives once the fetcher thread has finished with it.
+        self.assertEqual(seen[:5], ["start", "artifact", "item", "item", "done"])
         self.assertEqual(os.listdir(self.output), ["p1.nii.gz"])
 
     def test_a_malformed_line_does_not_abandon_the_run(self):
@@ -286,7 +288,30 @@ class StreamedRunTest(unittest.TestCase):
         # parses to a str rather than a dict; the client must survive both.
         _result, events = self._run()
         self.assertEqual(os.listdir(self.output), ["p1.nii.gz"])
-        self.assertEqual(events[-1]["event"], "done")
+        # `done` is the server's last word; the client may still report what
+        # collecting each artifact cost after it (see the "saved" events).
+        self.assertIn("done", [e["event"] for e in events])
+
+    def test_each_artifact_reports_what_it_cost(self):
+        """Where a run's time went has to be visible in the PANEL, not only in
+        a log line whose level the host application decides. Diagnosing a slow
+        run by asking someone to raise a logger's level is how you get no
+        answer -- which is exactly what happened before this existed."""
+        _Handler.script = [
+            {"event": "start"},
+            self._artifact("r1", "p1.nii.gz", b"x" * 8192),
+            {"event": "done"},
+        ]
+        events = []
+        self.client.run("probe", args={}, output_dir=self.output, event_cb=events.append)
+
+        saved = [e for e in events if e.get("status") == "saved"]
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["name"], "p1.nii.gz")
+        # The three numbers that tell a slow transfer from a slow unpack from a
+        # client that never got round to it.
+        self.assertIn("down", saved[0]["error"])
+        self.assertIn("unpack", saved[0]["error"])
 
     def test_each_collected_result_is_released(self):
         """A reference the server keeps until someone says otherwise; not

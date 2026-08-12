@@ -888,7 +888,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if wantsEvents:
             self._resetRunTable()
 
-        def task(progress_cb, event_cb=None):
+        def task(progress_cb, event_cb=None, cancel_event=None):
             return self.client.run(
                 self.TOOL_NAME,
                 args=args,
@@ -896,6 +896,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 output_dir=outputDir,
                 progress_cb=progress_cb,
                 event_cb=event_cb,
+                cancel_event=cancel_event,
             )
 
         self._job = BackgroundJob(
@@ -910,10 +911,23 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._job.start()
 
     def onCancelButton(self) -> None:
+        """Release the panel, and — for a streaming tool — stop the server too.
+
+        `BackgroundJob.cancel()` sets the event the streamed read loop watches;
+        closing that response is what the server sees. The tool stops at the
+        next point it reports from, so a scan already on the GPU finishes: the
+        wait is bounded by one item, not by the whole batch.
+        """
+        streaming = bool((self._schema or {}).get("streaming"))
         if self._job:
             self._job.cancel()
         self._teardownJob()
-        slicer.util.showStatusMessage(_("Cancelled."), 3000)
+        slicer.util.showStatusMessage(
+            _("Cancelled. The server stops after the item it is on.")
+            if streaming
+            else _("Cancelled. The server finishes this run regardless."),
+            5000,
+        )
 
     def _onJobSuccess(self, result) -> None:
         self._teardownJob()
