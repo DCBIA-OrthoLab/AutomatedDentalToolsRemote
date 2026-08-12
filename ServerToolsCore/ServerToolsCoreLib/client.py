@@ -18,6 +18,7 @@ import os
 import queue
 import re
 import threading
+import time
 import zipfile
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -693,14 +694,52 @@ class ToolServerClient:
         """
         reference = event.get("result_ref") or {}
         destination = _safe_subdirectory(output_dir, event.get("relative_dir"))
-        result = self._download_reference(tool_name, reference, destination, progress_cb)
+        started = time.monotonic()
+        # `verify_archive=False`: the CRC pass would decompress the whole
+        # bundle, and the extraction below decompresses it AGAIN -- zipfile
+        # checks each member's CRC as it extracts, so a corrupt archive is
+        # caught either way. Measured on a run with mesh exports: the bundles
+        # were hundreds of MB and unpacking took ~2.5 MINUTES per scan, twice
+        # over. The blocking path keeps its verification, where the archive is
+        # the whole result and may not be unpacked at all.
+        result = self._download_reference(
+            tool_name, reference, destination, progress_cb, verify_archive=False
+        )
+        downloaded = time.monotonic()
+
         # A per-item bundle is unpacked where it belongs; a single file is
         # already in place. Decided from the extension, never by sniffing the
         # bytes -- .xlsx and friends are zip containers (see slicer_io).
         if result.path and result.path.lower().endswith(".zip"):
-            with zipfile.ZipFile(result.path) as archive:
-                _extract_safely(archive, destination)
+            try:
+                with zipfile.ZipFile(result.path) as archive:
+                    _extract_safely(archive, destination)
+            except zipfile.BadZipFile as exc:
+                os.remove(result.path)
+                raise ServerToolError(
+                    f"A result bundle from '{tool_name}' is unreadable "
+                    f"(incomplete transfer?): {exc}"
+                ) from exc
             os.remove(result.path)
+
+        # Logged per artifact because the two halves have very different
+        # remedies: a slow download is the link, a slow unpack is what the run
+        # was asked to produce (mesh exports are two orders of magnitude bigger
+        # than a segmentation). Without this the client could only report one
+        # elapsed number for both.
+        finished = time.monotonic()
+        logger.info(
+            "Collected '%s': %.1f MB, download %.1fs, unpack %.1fs",
+            event.get("name") or "?",
+            int(reference.get("size") or 0) / (1024 * 1024),
+            downloaded - started,
+            finished - downloaded,
+        )
+        if progress_cb:
+            progress_cb(
+                f"Saved {event.get('name') or 'result'} "
+                f"({downloaded - started:.0f}s down, {finished - downloaded:.0f}s unpack)"
+            )
         return destination
 
     # ------------------------------------------------------------------
@@ -756,8 +795,14 @@ class ToolServerClient:
         reference: dict,
         output_dir: Optional[str],
         progress_cb: Optional[Callable[[str], None]] = None,
+        verify_archive: bool = True,
     ) -> ToolResult:
-        """Fetch a result the server kept for us, over parallel byte ranges."""
+        """Fetch a result the server kept for us, over parallel byte ranges.
+
+        `verify_archive=False` skips the CRC pass for a caller that is about to
+        extract the whole archive anyway -- extraction checks each member's CRC
+        itself, so the pass would only decompress everything a second time.
+        """
         if not output_dir:
             raise ServerToolError("An output directory is required to save the returned file.")
         result_id = reference.get("result_id")
@@ -785,7 +830,8 @@ class ToolServerClient:
                 chunk_bytes=self._chunk_bytes,
                 progress_cb=progress_cb,
             )
-            self._verify_archive(tool_name, dest_path)
+            if verify_archive:
+                self._verify_archive(tool_name, dest_path)
         finally:
             # In a `finally`, and this is the point: the server keeps the
             # result until somebody says it can go, so every way out of this
