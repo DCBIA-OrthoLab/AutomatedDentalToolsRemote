@@ -74,6 +74,11 @@ def _download_message(received: int, expected: Optional[int], label: str = "resu
     return f"Downloading {label}... {received_mb:.1f} / {expected_mb:.1f} MB ({percent}%)"
 
 
+# What a packaged tool declares for a file-or-folder argument. One name, from
+# the tool contract in sadt-tools; see is_file_type and accepts_folder.
+PATH_TYPE = "path"
+
+
 def is_file_type(type_name: str) -> bool:
     """Whether a schema argument `type` denotes a file upload.
 
@@ -83,8 +88,20 @@ def is_file_type(type_name: str) -> bool:
     literal "file", for tools that don't bother being specific) as a file
     argument means a new file-ish type the server introduces later needs no
     client-side code change — the whole point of a schema-driven client.
+
+    "path" is the exception that rule did not survive: it is what a PACKAGED
+    tool (sadt-tools) declares for every file or folder it takes, and it ends
+    in neither. Left out, such a tool's schema reports NO file arguments at
+    all and the panel refuses to build:
+
+        FILE_INPUTS declares ['scans'] but the server's 'AMASSS' schema
+        doesn't have them as file arguments (it has: []).
+
+    It is listed rather than pattern-matched because it is one name, fixed by
+    the tool contract, and guessing at "anything not obviously scalar" would
+    turn every unknown type into a file dialog.
     """
-    return type_name == "file" or type_name.endswith("_file")
+    return type_name in ("file", PATH_TYPE) or type_name.endswith("_file")
 
 
 # Fallback only. The server publishes each file type's extensions in its
@@ -146,8 +163,14 @@ def argument_types(spec: dict) -> list:
 
 def accepts_folder(spec: dict) -> bool:
     """Whether the user may pick a whole folder for this argument (which the
-    client then zips before uploading — see slicer_io.zip_folder)."""
-    return FOLDER_TYPE in argument_types(spec)
+    client then zips before uploading — see slicer_io.zip_folder).
+
+    A packaged tool's "path" always does: the tool contract requires every path
+    argument to take a directory as readily as one file, because the server
+    pays a process start-up cost per call and a cohort of forty scans has to be
+    one run rather than forty."""
+    types = argument_types(spec)
+    return FOLDER_TYPE in types or PATH_TYPE in types
 
 
 def file_extensions_for(spec: dict) -> tuple:
