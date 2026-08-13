@@ -102,6 +102,27 @@ PREFILLED_SCHEMA = {
 }
 
 
+
+class HiddenArgumentTest(unittest.TestCase):
+    """`hidden` is never rendered, whatever else the panel holds.
+
+    It carries the arguments a clinician has no business being asked -- which
+    CUDA device, nnUNet's tile step size -- named by the deployment rather than
+    by the tool. The tool still declares them and still applies its own
+    defaults; the client simply does not ask.
+    """
+
+    def test_a_hidden_argument_is_not_visible(self):
+        self.assertFalse(formgen.is_visible({"type": "float", "hidden": True}, {}))
+
+    def test_hidden_beats_a_satisfied_visible_when(self):
+        spec = {"type": "float", "hidden": True, "visible_when": {"mode": "CBCT"}}
+        self.assertFalse(formgen.is_visible(spec, {"mode": "CBCT"}))
+
+    def test_an_argument_without_the_key_is_unaffected(self):
+        self.assertTrue(formgen.is_visible({"type": "float"}, {}))
+        self.assertTrue(formgen.is_visible({"type": "float", "hidden": False}, {}))
+
 class ScalarInitialValueTest(unittest.TestCase):
     """A scalar argument's `initial` reaches its widget.
 

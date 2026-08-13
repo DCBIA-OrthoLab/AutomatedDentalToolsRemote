@@ -837,6 +837,14 @@ def is_visible(spec: dict, values: dict) -> bool:
     Hiding is the safe answer either way: a field whose precondition cannot be
     evaluated is a field the user cannot fill in meaningfully.
     """
+    # `hidden` is not a condition: it is never rendered, whatever the panel
+    # holds. It carries the arguments a clinician has no business being asked
+    # -- which CUDA device, nnUNet's tile step size -- set by whoever deploys
+    # the server. The tool still declares them and still applies its own
+    # defaults; the client simply does not ask.
+    if spec.get("hidden"):
+        return False
+
     conditions = spec.get("visible_when")
     if not conditions:
         return True
