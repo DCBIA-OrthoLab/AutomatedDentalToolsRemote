@@ -318,6 +318,17 @@ def required_label(text: str) -> qt.QLabel:
     return section_title(f"{text} *")
 
 
+def optional_label(text: str) -> qt.QLabel:
+    """A file argument the tool can do without.
+
+    Said in words rather than by the absence of the `*`: an empty file picker
+    looks like a demand whatever the label does, and a tool that computes the
+    file itself when it is left empty -- AREG's landmarks, produced by ALI
+    through the supervisor -- otherwise reads as a missing input.
+    """
+    return section_title(f"{text} (optional)")
+
+
 def hint_label(text: str) -> qt.QLabel:
     """A wrapped, muted, smaller label for explanatory text shown next to a
     field — the server's own `description` when a tooltip is not enough (see

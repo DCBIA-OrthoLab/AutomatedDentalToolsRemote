@@ -857,13 +857,37 @@ def is_visible(spec: dict, values: dict) -> bool:
     return True
 
 
+def allowed_options(spec: dict, values: dict):
+    """The options a choice argument may offer, given what the panel holds.
+
+    None means "no rule, offer them all". `visible_when` can only show or hide
+    a whole field; this narrows one that stays. AREG's three automation modes
+    are all real, but IOS has no "Oriented + Fully-Automated" — offering it and
+    refusing the run at the end is the worst of both.
+    """
+    rules = spec.get("options_when")
+    if not rules:
+        return None
+    allowed = None
+    for other_name, by_value in rules.items():
+        chosen = values.get(other_name)
+        if chosen is None or chosen not in by_value:
+            # Nothing said about this state: a rule that cannot be evaluated
+            # must not silently empty the box.
+            continue
+        permitted = list(by_value[chosen])
+        allowed = permitted if allowed is None else [o for o in allowed if o in permitted]
+    return allowed
+
+
 def controlling_arguments(arguments_schema: dict) -> set:
-    """Every argument some other argument's visibility depends on — the ones
-    whose change has to re-evaluate the panel."""
+    """Every argument the panel has to re-evaluate on — the ones some other
+    argument's visibility, or its set of options, depends on."""
     return {
         other_name
         for spec in arguments_schema.values()
-        for other_name in (spec.get("visible_when") or {})
+        for key in ("visible_when", "options_when")
+        for other_name in (spec.get(key) or {})
     }
 
 

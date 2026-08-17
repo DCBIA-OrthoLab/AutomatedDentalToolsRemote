@@ -29,3 +29,16 @@ TRANSFER_CHUNK_MB = 8
 # (.nii.gz, .zip, ...) are never touched. Turn off on a fast LAN with a slow
 # client machine, where the CPU is the scarcer resource.
 TRANSFER_COMPRESS = True
+
+# Whether to deflate a folder while packing it for upload. The archive exists
+# because HTTP has no notion of a folder, not to make the data smaller, and
+# the two are not the same trade: measured on this machine, packing STORED runs
+# at 711 MB/s against 57 MB/s deflated, on ONE core. Sending 574 MB of raw .nii
+# takes 1.5s uncompressed over a 379 MB/s link, and 10.8s if compressed first.
+#
+# Compressing only wins below roughly 27 MB/s (215 Mb/s). None decides from
+# SERVER_URL -- a loopback or private address never wins -- and True/False
+# forces it. Note this is the ARCHIVE; TRANSFER_COMPRESS is the wire, and the
+# transfer layer never gzips a .zip, so this is the only place the choice is
+# made for a folder argument.
+ZIP_COMPRESS = None

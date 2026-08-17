@@ -59,8 +59,14 @@ SlicerAutomatedDentalTools/
 │   ├── ASO.py                              # declarative, plus optional result loading
 │   ├── Testing/Python/test_aso_client.py   # ASO's schema as a fixture, same stubs
 │   └── ASO_Method/                         # former local module, left in place but unwired
+├── AREG/                                   # registration of two timepoints
+│   ├── CMakeLists.txt
+│   ├── AREG.py                             # declarative, plus optional result loading
+│   ├── Testing/Python/test_areg_client.py  # AREG's schema as a fixture, same stubs
+│   └── AREG_Method/                        # former local module, left in place but unwired
 ├── SurgMovPred_CLI/                        # left in place but unwired (see "SurgMovPred_CLI" below)
-└── ALI_CBCT/, ALI_IOS/, ASO_CBCT/, ASO_IOS/  # the CLIs they used to drive, likewise unwired
+└── ALI_CBCT/, ALI_IOS/, ASO_CBCT/, ASO_IOS/, AREG_CBCT/, AREG_IOS/, AREG_IOSCBCT/
+                                            # the CLIs they used to drive, likewise unwired
 ```
 
 ### Deviation from a literal reading of the brief
@@ -433,6 +439,31 @@ Four call sites then read `_hiddenArgs`, and each one is load-bearing:
   field cannot disable Apply forever with nothing on screen to explain why. No
   tool declares one today; this is what keeps that from becoming a dead-locked
   panel if one does.
+
+**Apply also ignores an OPTIONAL file argument, whether or not it is visible.**
+`all_required_filled` had always skipped `required: false` scalars, and
+`_inputReady` did not do the same for file rows — so an optional file input
+disabled Apply until something was picked for it, with nothing on the panel
+saying that empty field was what Apply was waiting for. It went unnoticed
+because every file argument of every tool was required until AREG: its
+`mgl_landmarks` exists only to *reuse* landmarks the server would otherwise
+predict, so requiring it made the ordinary run the one you could not launch.
+
+**And `_prepareOneInputFile` uploads nothing for one that is empty.** The two
+halves are one rule and were fixed together: letting Apply fire on an empty
+optional row is only correct if the upload path then leaves that argument out.
+It used to return `widget.currentPath` — the empty string — as though it were a
+path, and the next thing to touch it failed with `No such file or directory:
+''`, which names nothing a user can act on. Uploading nothing is what makes the
+server apply whatever it does when the argument is absent, which for AREG's
+`mgl_landmarks` is "predict the landmarks yourself".
+
+The consequence to keep in mind is that a rule like "Semi-Automated CBCT needs
+`t1_masks`" is **the server's** — that argument is `required: false` because the
+requirement depends on another argument's value, which the schema cannot state.
+Apply now fires, and the server answers a 422 naming the field to fill in. That
+is the right place for it: the client would otherwise have to re-implement each
+tool's cross-argument rules to grey a button out.
 
 `formgen.is_visible` **hides what it cannot evaluate** — a controlling argument
 missing from the collected values. That only happens when the schema could not
