@@ -808,7 +808,11 @@ class DOCShapeAXILogic(ScriptedLoadableModuleLogic):
     self.conda = self.init_conda()
 
   def check_log_path(self):
-    self.log_path = os.path.normpath(os.path.join(os.path.dirname(__file__), 'process.log'))
+    # Slicer's temp directory, like AutoCrop3D, MedX and AREG. This wrote
+    # beside the module's own source, which fails on a read-only install and
+    # otherwise leaves a file in the extension's tree - which is how an empty
+    # process.log came to be committed to this repository.
+    self.log_path = os.path.join(slicer.util.tempDirectory(), 'process.log')
     
     if '\\' in self.log_path:
       self.log_path = self.log_path.replace('\\', '/')
