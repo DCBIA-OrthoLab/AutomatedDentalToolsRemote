@@ -41,7 +41,7 @@ Algorithmes de recalage :
 | `lineEditAddName` | `add_in_namefile` | suffixe des sorties, défaut `Reg` | `AREG/Resources/UI/AREG.ui:566-572` |
 | `lineEditOutputPath` + `ButtonOutput` | `folder_output` | dossier de sortie | `AREG/Resources/UI/AREG.ui:587-602`, `AREG/AREG.py:1157-1162` |
 | `ApproxcheckBox` | `ApproxStep` | « Include Approximation Step », coché par défaut | `AREG/Resources/UI/AREG.ui:429-440`, `AREG/AREG.py:1321` |
-| `LabelSelectcomboBox` | `LabelSeg` | label de segmentation à isoler — **masqué en permanence** | `AREG/Resources/UI/AREG.ui:460-466`, `AREG/AREG.py:518`, `:1318-1320` |
+| `LabelSelectcomboBox` | `LabelSeg` | label de segmentation à isoler - **masqué en permanence** | `AREG/Resources/UI/AREG.ui:460-466`, `AREG/AREG.py:518`, `:1318-1320` |
 | Cases à cocher dynamiques | `dic_checkbox` | zones de recalage + structures AMASSS (CBCT seulement) | `AREG/AREG.py:2033-2057` |
 
 **Tous les sélecteurs sont des dossiers** : `SearchScan` utilise `qt.QFileDialog.getExistingDirectory` (`AREG/AREG.py:1029-1031`), idem pour la sortie (`AREG/AREG.py:1158-1160`). Aucun champ n'accepte un fichier unique.
@@ -61,10 +61,10 @@ Zones de recalage et structures de segmentation (cases créées par `initCheckBo
 | Dossier masques T1 | segmentations binaires/labels | mêmes extensions image | Oui | **Semi_CBCT seulement** | `AREG/AREG_Method/CBCT.py:104-105`, `AREG_CBCT/AREG_CBCT_utils/utils.py:111-138` |
 | Dossiers DICOM | arborescence `T1/<patient>/*.dcm` | dossiers (un sous-dossier par patient) | 1 niveau | option DICOM, **mode 0 seulement** | `AREG/AREG_Method/CBCT.py:602-632`, `AREG_CBCT/AREG_CBCT_utils/utils.py:719-729` |
 | `model_folder_1` | modèles AMASSS | dossier contenant `AMASSS_Models/` + ≥1 `.pth` | Oui | tous | `AREG/AREG_Method/CBCT.py:83-89`, `:323` |
-| `model_folder_2` | modèles d'orientation ASO | sous-dossiers `PreASO/` et `<Référence>/` | — | **mode 0** | `AREG/AREG_Method/CBCT.py:682`, `:717` |
-| `model_folder_3` | modèles ALI_CBCT | dossier `ALI` rempli par `SearchModelALI` — **champ caché** | — | mode 0 (implicite) | `AREG/AREG.py:1104-1154`, `AREG/AREG_Method/CBCT.py:699` |
+| `model_folder_2` | modèles d'orientation ASO | sous-dossiers `PreASO/` et `<Référence>/` | - | **mode 0** | `AREG/AREG_Method/CBCT.py:682`, `:717` |
+| `model_folder_3` | modèles ALI_CBCT | dossier `ALI` rempli par `SearchModelALI` - **champ caché** | - | mode 0 (implicite) | `AREG/AREG.py:1104-1154`, `AREG/AREG_Method/CBCT.py:699` |
 
-**Règle d'appariement patient (CBCT)** — `GetPatients` (`AREG_CBCT/AREG_CBCT_utils/utils.py:68-140`, dupliqué côté module dans `AREG/AREG_Method/CBCT.py:911-982`) :
+**Règle d'appariement patient (CBCT)** - `GetPatients` (`AREG_CBCT/AREG_CBCT_utils/utils.py:68-140`, dupliqué côté module dans `AREG/AREG_Method/CBCT.py:911-982`) :
 
 ```
 patient = basename.split("_Scan")[0].split("_scan")[0].split("_Or")[0].split("_OR")[0]
@@ -83,12 +83,12 @@ Un fichier est classé **segmentation** si son nom (minuscule) contient `mask`, 
 |---|---|---|---|---|---|
 | Dossier T1 | surfaces IOS | `.vtk`, `.stl` **uniquement** côté module | Oui (`Method.search`) | tous | `AREG/AREG_Method/IOS.py:32-33`, `:61-65`, `AREG/AREG_Method/Method.py:196-211` |
 | Dossier T2 | surfaces IOS | idem | Oui | tous | idem |
-| — même dossier, côté CLI | surfaces | `.vtk`, `.vtp`, `.stl`, `.obj` (filtre `endswith`, `.tfm` exclu) | **Non** (`glob.glob(T1/*)`) | — | `AREG_IOS/AREG_IOS_utils/dataset.py:118-124` |
+| - même dossier, côté CLI | surfaces | `.vtk`, `.vtp`, `.stl`, `.obj` (filtre `endswith`, `.tfm` exclu) | **Non** (`glob.glob(T1/*)`) | - | `AREG_IOS/AREG_IOS_utils/dataset.py:118-124` |
 | `model_folder_1` | modèle de segmentation | dossier contenant **exactement un** `.pth` | Oui | Auto_IOS (validé mais **jamais utilisé**) | `AREG/AREG_Method/IOS.py:85-89`, `:213-216` |
 | `model_folder_2` | « Reference Orientation Folder » (gold files ASO) | ≥1 `.vtk` **et** ≥1 `.json` (max 2 de chaque) | Oui | Auto_IOS | `AREG/AREG_Method/IOS.py:132-156`, `:357` |
 | `model_folder_3` | « Registration Model Folder » | dossier contenant **exactement un** `.ckpt` | Oui | Auto_IOS + Semi_IOS | `AREG/AREG_Method/IOS.py:90-93`, `:383`, `:480` |
 
-**Règle d'appariement patient (IOS)** — `Sort`/`sort` (`AREG_IOS/AREG_IOS_utils/dataset.py:98-170`, `:241-265`) : le nom de base T1 privé de la sous-chaîne `"T1"` doit être **strictement égal** au nom de base T2 privé de `"T2"`. Exemple : `P1_Upper_T1_Seg.vtk` ↔ `P1_Upper_T2_Seg.vtk`.
+**Règle d'appariement patient (IOS)** - `Sort`/`sort` (`AREG_IOS/AREG_IOS_utils/dataset.py:98-170`, `:241-265`) : le nom de base T1 privé de la sous-chaîne `"T1"` doit être **strictement égal** au nom de base T2 privé de `"T2"`. Exemple : `P1_Upper_T1_Seg.vtk` ↔ `P1_Upper_T2_Seg.vtk`.
 
 Détection Upper/Lower (**sensible à la casse**) : Lower = `["Lower","_L","L_","Mandibule","Md"]`, Upper = `["Upper","_U","U_","Maxilla","Mx"]` (`dataset.py:204-238`). Tout fichier ne portant pas de marqueur *Upper* est rangé dans la liste **Lower** (`dataset.py:138-142`). Le recalage est calculé sur l'arcade **supérieure** uniquement, la matrice étant ensuite appliquée à l'inférieure (`AREG_IOS/AREG_IOS.py:244-269`).
 
@@ -102,17 +102,17 @@ Segmentation dentaire préalable : `__BypassCrownseg__` (`AREG/AREG_Method/IOS.p
 | Dossier CBCT (`input_t2_folder`) | volumes | `.nrrd`, `.nrrd.gz`, `.nii`, `.nii.gz`, `.gipl`, `.gipl.gz` pour le comptage ; **`.nii.gz` seul** côté CLI | oui / non | tous | `AREG/AREG_Method/IOSCBCT.py:31-37`, `AREG_IOSCBCT/AREG_IOSCBCT.py:311-313` |
 | Dossier « IOS Landmarks » (`lineEditMaskT1Path`) | markups | `.json` | Non (`os.listdir`) | **Reg_IOSCBCT** | `AREG/AREG_Method/IOSCBCT.py:390-391`, `AREG_IOSCBCT/AREG_IOSCBCT.py:326-328` |
 | Dossier « CBCT Landmarks » (`lineEditT2LMPath`) | markups | `.json` | Non | **Reg_IOSCBCT** | `AREG/AREG_Method/IOSCBCT.py:393-394`, `AREG_IOSCBCT/AREG_IOSCBCT.py:344-346` |
-| `model_folder_1` | « Orientation Model Folder » (PreASO + gold CBCT + gold IOS) | sous-dossiers `PreASO/`, `<Référence>/`, `IOS/` | — | **Auto_IOSCBCT** | `AREG/AREG_Method/IOSCBCT.py:602`, `:629`, `:708` |
-| `model_folder_2` | « CBCT Landmarks identification Folder » (ALI_CBCT) | dossier de modèles | — | Auto + Semi | `AREG/AREG_Method/IOSCBCT.py:289`, `:750` |
-| `model_folder_3` | « IOS Landmarks identification Folder » (ALI_IOS) | dossier de modèles | — | Auto + Semi | `AREG/AREG_Method/IOSCBCT.py:320`, `:780` |
+| `model_folder_1` | « Orientation Model Folder » (PreASO + gold CBCT + gold IOS) | sous-dossiers `PreASO/`, `<Référence>/`, `IOS/` | - | **Auto_IOSCBCT** | `AREG/AREG_Method/IOSCBCT.py:602`, `:629`, `:708` |
+| `model_folder_2` | « CBCT Landmarks identification Folder » (ALI_CBCT) | dossier de modèles | - | Auto + Semi | `AREG/AREG_Method/IOSCBCT.py:289`, `:750` |
+| `model_folder_3` | « IOS Landmarks identification Folder » (ALI_IOS) | dossier de modèles | - | Auto + Semi | `AREG/AREG_Method/IOSCBCT.py:320`, `:780` |
 
-**Règle d'appariement patient (IOS/CBCT)** — `getPatients` (`AREG_IOSCBCT/AREG_IOSCBCT.py:240-366`), entièrement par expressions régulières sur le nom de fichier :
+**Règle d'appariement patient (IOS/CBCT)** - `getPatients` (`AREG_IOSCBCT/AREG_IOSCBCT.py:240-366`), entièrement par expressions régulières sur le nom de fichier :
 
 - timepoint : `re.search(r'[Tt]([0-2])', filename)` → `T0`/`T1`/`T2` (`:251-254`) ;
 - mâchoire : `re.search(r'[_]?[uU][_]?', filename)` → *upper*, sinon `[_]?[lL][_]?` → *lower* (`:256-263`) ;
 - identifiant : `re.search(r'([A-Za-z]+)[_]?([0-9]+)[_]?[Tt][0-2]', filename)` → lettres + chiffres (`:265-270`), puis normalisation qui supprime les `_` et les zéros de tête (`P_0001`, `P001`, `P00001` → `P1`, `:272-291`).
 
-La clé de regroupement est `f"{patient_id}_{timepoint}"` : **chaque timepoint est un « patient » distinct**. Un patient complet exige 5 fichiers : `ios_upper`, `ios_lower`, `cbct`, `ios_lm_upper`, `ios_lm_lower`, `cbct_lm_upper`, `cbct_lm_lower` (7 clés en réalité) — toute clé manquante provoque un `KeyError` capturé qui saute le patient (`AREG_IOSCBCT/AREG_IOSCBCT.py:388-393`, `:450-452`).
+La clé de regroupement est `f"{patient_id}_{timepoint}"` : **chaque timepoint est un « patient » distinct**. Un patient complet exige 5 fichiers : `ios_upper`, `ios_lower`, `cbct`, `ios_lm_upper`, `ios_lm_lower`, `cbct_lm_upper`, `cbct_lm_lower` (7 clés en réalité) - toute clé manquante provoque un `KeyError` capturé qui saute le patient (`AREG_IOSCBCT/AREG_IOSCBCT.py:388-393`, `:450-452`).
 
 ### Arguments des trois CLI
 
@@ -144,7 +144,7 @@ La clé de regroupement est `f"{patient_id}_{timepoint}"` : **chaque timepoint e
 | IOSCBCT (tous) | IOS supérieur recalé | `.vtk` | `<output>/<patient>_<Tx>_Reg_U.vtk` | 1 par (patient, timepoint) |
 | IOSCBCT (tous) | IOS inférieur recalé | `.vtk` | `<output>/<patient>_<Tx>_Reg_L.vtk` | 1 par (patient, timepoint) |
 | IOSCBCT (tous) | Landmarks IOS recalés | `.mrk.json` | `<output>/<patient>_<Tx>_lm_Reg_U.mrk.json` et `…_L.mrk.json` | 2 par (patient, timepoint) |
-| IOSCBCT Auto/Semi | Dossiers intermédiaires **dans le dossier de sortie** | — | `Seg IOS/`, `PRE ASO IOS/`, `CBCT Resampled/`, `PRE ASO CBCT/`, `Oriented CBCT/`, `CBCT Landmarks/`, `IOS Landmarks/`, `Registered IOS/` | 1 jeu par exécution |
+| IOSCBCT Auto/Semi | Dossiers intermédiaires **dans le dossier de sortie** | - | `Seg IOS/`, `PRE ASO IOS/`, `CBCT Resampled/`, `PRE ASO CBCT/`, `Oriented CBCT/`, `CBCT Landmarks/`, `IOS Landmarks/`, `Registered IOS/` | 1 jeu par exécution |
 
 ### Détails de nommage et cardinalité
 
@@ -169,7 +169,7 @@ def WriteSurf(surf, output_folder, name, inname):
 
 L'écrivain est **toujours** `vtkPolyDataWriter` alors que l'extension d'origine est conservée : une entrée `.stl` produit un fichier nommé `.stl` contenant du VTK legacy. Les matrices ne sont écrites que si `areg_mode == "Auto_IOS"` (`AREG_IOS/AREG_IOS.py:214`) ; l'identifiant patient est extrait par `name_t2.split("_T2")[0]` puis `.split("_")[0]` (`AREG_IOS/AREG_IOS.py:217-218`). La matrice T2 est composée avec la matrice ASO : `inv(areg @ inv(aso))` (`AREG_IOS/AREG_IOS_utils/transformation.py:88`).
 
-**IOSCBCT** (`AREG_IOSCBCT/AREG_IOSCBCT.py:165-169`, `:183-184`) : 4 fichiers par clé `<patient>_<timepoint>`. Le JSON de sortie **réutilise le fichier de landmarks CBCT comme gabarit** et n'en remplace que les positions par les landmarks IOS transformés (`:186-202`) — les labels/couleurs proviennent donc du CBCT. Les matrices `mat_ios_upper/lower` (landmark transform) et `mat_icp_upper/lower` (ICP) sont calculées mais **jamais écrites sur disque**.
+**IOSCBCT** (`AREG_IOSCBCT/AREG_IOSCBCT.py:165-169`, `:183-184`) : 4 fichiers par clé `<patient>_<timepoint>`. Le JSON de sortie **réutilise le fichier de landmarks CBCT comme gabarit** et n'en remplace que les positions par les landmarks IOS transformés (`:186-202`) - les labels/couleurs proviennent donc du CBCT. Les matrices `mat_ios_upper/lower` (landmark transform) et `mat_icp_upper/lower` (ICP) sont calculées mais **jamais écrites sur disque**.
 
 ### Variations selon les options
 
@@ -190,15 +190,15 @@ L'écrivain est **toujours** `vtkPolyDataWriter` alors que l'extension d'origine
   - CBCT : `search()` utilise `iglob(path/**/*, recursive=True)` côté module **et** côté CLI → sous-dossiers explorés (`AREG/AREG_Method/CBCT.py:1066-1077`, `AREG_CBCT/AREG_CBCT_utils/utils.py:281-292`).
   - IOS : comptage/validation UI récursifs (`AREG/AREG_Method/Method.py:205-207`) mais le CLI `AREG_IOS` fait un `glob.glob(os.path.join(T1, "*"))` **non récursif** (`AREG_IOS/AREG_IOS_utils/dataset.py:118-119`) → un dossier organisé en sous-dossiers passe la validation puis produit 0 recalage.
   - IOS/CBCT : le CSV de segmentation est construit par `os.walk` (récursif, `AREG/AREG_Method/IOSCBCT.py:224`) mais le CLI `AREG_IOSCBCT` fait 4 `os.listdir` **non récursifs** (`AREG_IOSCBCT/AREG_IOSCBCT.py:294`, `:311`, `:326`, `:344`).
-- **Branches « fichier unique » mortes** : `if os.path.isfile(kwargs["input_t1_folder"]): extension = os.path.splitext(self.input)[1]` — `self.input` n'existe sur aucune de ces classes → `AttributeError` immédiat si un chemin de fichier était passé (`AREG/AREG_Method/IOS.py:305-308`, `:331-334`, `AREG/AREG_Method/IOSCBCT.py:244-247`, `:675-678`).
-- **DICOM** : arborescence à un niveau `T1/<patient>/`, convertie en `T1/NIFTI/<patient>.nii.gz` (`AREG_CBCT/AREG_CBCT_utils/utils.py:709-736`). Le comptage `NumberScanDCM` retourne simplement `len(os.listdir(scan_folder_t1))` — le sous-dossier `NIFTI` créé par une conversion précédente est donc compté comme un patient (`AREG/AREG_Method/CBCT.py:631-632`).
+- **Branches « fichier unique » mortes** : `if os.path.isfile(kwargs["input_t1_folder"]): extension = os.path.splitext(self.input)[1]` - `self.input` n'existe sur aucune de ces classes → `AttributeError` immédiat si un chemin de fichier était passé (`AREG/AREG_Method/IOS.py:305-308`, `:331-334`, `AREG/AREG_Method/IOSCBCT.py:244-247`, `:675-678`).
+- **DICOM** : arborescence à un niveau `T1/<patient>/`, convertie en `T1/NIFTI/<patient>.nii.gz` (`AREG_CBCT/AREG_CBCT_utils/utils.py:709-736`). Le comptage `NumberScanDCM` retourne simplement `len(os.listdir(scan_folder_t1))` - le sous-dossier `NIFTI` créé par une conversion précédente est donc compté comme un patient (`AREG/AREG_Method/CBCT.py:631-632`).
 - **Écriture hors du dossier de sortie** : les dossiers `<input_t2_folder>_Center` et `<input_t1_folder>Or` sont créés **à côté des dossiers d'entrée** (`AREG/AREG_Method/CBCT.py:269`, `:451`, `:714`, `:786`), et en mode `Auto_CBCT` les masques AMASSS sont écrits **dans le dossier T1 d'entrée** (`AREG/AREG_Method/CBCT.py:431`). Les données d'entrée sont donc modifiées.
 
 ---
 
 ## Incohérences et pièges observés dans le code
 
-1. **`ApproxReg` / « Include Approximation Step » : option totalement inopérante.** La case est lue (`AREG/AREG.py:1321`), passée au CLI (`AREG/AREG_Method/CBCT.py:306`, `:491`, `:823`), parsée (`AREG_CBCT/AREG_CBCT.py:65`), transmise à `VoxelBasedRegistration(..., approx=Approx)` — mais le paramètre `approx` n'est **jamais lu** dans le corps de la fonction, qui appelle inconditionnellement `ElastixReg(..., initial_transform=None)` (`AREG_CBCT/AREG_CBCT_utils/utils.py:577`, `:631-633`).
+1. **`ApproxReg` / « Include Approximation Step » : option totalement inopérante.** La case est lue (`AREG/AREG.py:1321`), passée au CLI (`AREG/AREG_Method/CBCT.py:306`, `:491`, `:823`), parsée (`AREG_CBCT/AREG_CBCT.py:65`), transmise à `VoxelBasedRegistration(..., approx=Approx)` - mais le paramètre `approx` n'est **jamais lu** dans le corps de la fonction, qui appelle inconditionnellement `ElastixReg(..., initial_transform=None)` (`AREG_CBCT/AREG_CBCT_utils/utils.py:577`, `:631-633`).
 
 2. **`SegmentationLabel` mort.** `self.SegmentationLabels = [0]` en dur, `LabelSelectcomboBox` masqué au démarrage (`AREG/AREG.py:408`, `:518`) ; la méthode `GetSegmentationLabel` qui remplirait la liste (`AREG/AREG_Method/CBCT.py:176-186`) n'est appelée nulle part. `LabelSeg` vaut donc toujours `"0"` → `SegLabel = None` → `applyMask` ignore le label (`AREG_CBCT/AREG_CBCT_utils/utils.py:477-486`).
 
@@ -208,9 +208,9 @@ L'écrivain est **toujours** `vtkPolyDataWriter` alors que l'extension d'origine
 
 5. **Messages d'erreur inversés (IOS).** `model_folder_1` vide → « Please select folder for the registration model » alors que c'est le dossier de **segmentation** ; `model_folder_3` vide → « Please select folder for the segmentation model » alors que c'est le dossier de **recalage** (`AREG/AREG_Method/IOS.py:202-211`). De plus `search(model_folder_3, ".ckpt")` est évalué avant le test de non-vacuité, donc sur une chaîne vide (`:205`).
 
-6. **`TestModel` sans effet en mode IOS/CBCT.** `IOSCBCT.TestModel` ne teste que les noms de widgets `lineEditModelSegOr` et `lineEditModelAli` (`AREG/AREG_Method/IOSCBCT.py:84-96`) — ces widgets **n'existent pas** dans `AREG.ui` (les champs s'appellent `lineEditModel1/2/3`). La fonction retourne toujours `None` : aucune validation de modèle n'est faite.
+6. **`TestModel` sans effet en mode IOS/CBCT.** `IOSCBCT.TestModel` ne teste que les noms de widgets `lineEditModelSegOr` et `lineEditModelAli` (`AREG/AREG_Method/IOSCBCT.py:84-96`) - ces widgets **n'existent pas** dans `AREG.ui` (les champs s'appellent `lineEditModel1/2/3`). La fonction retourne toujours `None` : aucune validation de modèle n'est faite.
 
-7. **`SearchModelALI` inutile et coûteux en IOS/CBCT.** Pour `Auto_IOSCBCT`, `downloadModel(..., name="Orientation")` déclenche la pop-up de choix de référence puis `SearchModelALI` qui télécharge 6 à 7 archives ALI et écrit leur chemin dans `lineEditModel1` (`AREG/AREG.py:1052-1067`, `:1152-1153`) — chemin immédiatement **écrasé** par le dossier `Models/Orientation` quelques lignes plus loin (`:1101`). En mode « Test Files », l'enchaînement `SearchModelALI` puis `downloadModel(..., test=True)` déclenche la pop-up et le téléchargement **deux fois** (`AREG/AREG.py:980-984`).
+7. **`SearchModelALI` inutile et coûteux en IOS/CBCT.** Pour `Auto_IOSCBCT`, `downloadModel(..., name="Orientation")` déclenche la pop-up de choix de référence puis `SearchModelALI` qui télécharge 6 à 7 archives ALI et écrit leur chemin dans `lineEditModel1` (`AREG/AREG.py:1052-1067`, `:1152-1153`) - chemin immédiatement **écrasé** par le dossier `Models/Orientation` quelques lignes plus loin (`:1101`). En mode « Test Files », l'enchaînement `SearchModelALI` puis `downloadModel(..., test=True)` déclenche la pop-up et le téléchargement **deux fois** (`AREG/AREG.py:980-984`).
 
 8. **`lineEditModel3` caché mais obligatoire en CBCT mode 0.** `SwitchModeCBCT(0)` masque `label_4`/`lineEditModel3` (`AREG/AREG.py:610-612`) alors que ce champ porte le chemin des modèles ALI_CBCT utilisé par `parameter_ali["dir_models"]` (`AREG/AREG_Method/CBCT.py:699`). `Or_Auto_CBCT.TestProcess` ne le vérifie pas (`:634-662`) : si l'utilisateur n'a jamais cliqué « Download » sur le modèle d'orientation, ALI_CBCT est lancé avec un dossier vide.
 
@@ -234,19 +234,19 @@ L'écrivain est **toujours** `vtkPolyDataWriter` alors que l'extension d'origine
 
 18. **`DisplayAREGIOSCBCT(0)` → division par zéro.** La classe est instanciée avec `nb_progress = 0` (`AREG/AREG_Method/IOSCBCT.py:362`, `:431`, `:822`) et `__call__` calcule `self.progress / self.nb_progress_total * 100` (`AREG/AREG_Method/Progress.py:190`). La classe est de plus **définie deux fois** dans le même fichier (`Progress.py:135` puis `:182`).
 
-19. **`diccheckbox2` jamais rempli.** `setcheckbox2` n'est appelé nulle part ; `enableCheckbox` itère donc sur un dictionnaire vide (`AREG/AREG.py:1174-1183`) — et de toute façon `existsLandmark` retourne `None` dans toutes les implémentations (`AREG/AREG_Method/CBCT.py:248-249`, `IOS.py:444-445`, `IOSCBCT.py:166-167`), ce qui provoque un `return` anticipé (`AREG/AREG.py:1171-1172`). Aucune case n'est jamais pré-cochée automatiquement.
+19. **`diccheckbox2` jamais rempli.** `setcheckbox2` n'est appelé nulle part ; `enableCheckbox` itère donc sur un dictionnaire vide (`AREG/AREG.py:1174-1183`) - et de toute façon `existsLandmark` retourne `None` dans toutes les implémentations (`AREG/AREG_Method/CBCT.py:248-249`, `IOS.py:444-445`, `IOSCBCT.py:166-167`), ce qui provoque un `return` anticipé (`AREG/AREG.py:1171-1172`). Aucune case n'est jamais pré-cochée automatiquement.
 
 20. **`IOSCBCT.TestCheckbox` mort.** Il exige « au moins 3 landmarks » (`AREG/AREG_Method/IOSCBCT.py:77-82`) mais aucun `TestProcess` du mode IOS/CBCT ne l'appelle, et aucune case n'est créée pour ce mode (`initCheckBoxCBCT` n'est appelé que pour les 3 classes CBCT, `AREG/AREG.py:443-459`).
 
 21. **`Semi_CBCT.TestReference` incohérent.** La fonction calcule `out` puis retourne inconditionnellement `None` (`AREG/AREG_Method/CBCT.py:60-71`), et appelle `self.NumberScan(ref_folder)` avec un seul argument alors que la signature en exige deux (`:51`).
 
-22. **Visibilité contradictoire de `CbCBCTInputType`.** `SwitchModeCBCT(0)` la masque (`AREG/AREG.py:614-615`), puis la fin de `SwitchType` la ré-affiche pour tout mode CBCT d'index 0 (`:848-857`). Résultat net : DICOM n'est proposé qu'en mode « Orientation and Registration » — le seul mode où `TestScanDCM`/`NumberScanDCM` sont réellement implémentés (`AREG/AREG_Method/CBCT.py:602`, `:631`), les autres héritant de stubs qui retournent `None` (`AREG/AREG_Method/Method.py:228-251`).
+22. **Visibilité contradictoire de `CbCBCTInputType`.** `SwitchModeCBCT(0)` la masque (`AREG/AREG.py:614-615`), puis la fin de `SwitchType` la ré-affiche pour tout mode CBCT d'index 0 (`:848-857`). Résultat net : DICOM n'est proposé qu'en mode « Orientation and Registration » - le seul mode où `TestScanDCM`/`NumberScanDCM` sont réellement implémentés (`AREG/AREG_Method/CBCT.py:602`, `:631`), les autres héritant de stubs qui retournent `None` (`AREG/AREG_Method/Method.py:228-251`).
 
 23. **`DCMInput` transmis à `AREG_CBCT` sur des dossiers déjà convertis.** En `Or_Auto_CBCT`, `DCMInput` vaut `isDCMInput` alors que `t1_folder` est le dossier d'orientation contenant des NIfTI (`AREG/AREG_Method/CBCT.py:815-820`) : `convertdicom2nifti` y est relancé et crée un sous-dossier `NIFTI` vide.
 
 24. **Prérequis CUDA non négociable en IOS.** `PredPatch` force `torch.device("cuda")` et `.cuda()` (`AREG_IOS/AREG_IOS_utils/PredPatch.py:31`, `:43-45`) : aucune bascule CPU, le mode IOS échoue sur machine sans GPU NVIDIA.
 
-25. **Indices XML discontinus (`AREG_IOS.xml`).** Les indices déclarés sont 0, 1, 2, 3, 5, 6, 7 — l'index 4 manque (`AREG_IOS/AREG_IOS.xml:48`), alors que `argparse` attend 7 positionnels consécutifs (`AREG_IOS/AREG_IOS.py:308-314`). Les trois XML conservent par ailleurs les métadonnées du template (`FirstName LastName (Institution)`, `https://github.com/username/project`, description « This is a CLI module that can be bundled in an extension »).
+25. **Indices XML discontinus (`AREG_IOS.xml`).** Les indices déclarés sont 0, 1, 2, 3, 5, 6, 7 - l'index 4 manque (`AREG_IOS/AREG_IOS.xml:48`), alors que `argparse` attend 7 positionnels consécutifs (`AREG_IOS/AREG_IOS.py:308-314`). Les trois XML conservent par ailleurs les métadonnées du template (`FirstName LastName (Institution)`, `https://github.com/username/project`, description « This is a CLI module that can be bundled in an extension »).
 
 26. **`.split(".")[0]` dans l'extraction d'identifiant CBCT** (`AREG_CBCT/AREG_CBCT_utils/utils.py:92`) : tout point dans un nom de patient tronque l'identifiant (`P.Dupont_T1.nii.gz` → `P`), et les patients ne différant qu'après le premier point fusionnent.
 
@@ -265,7 +265,7 @@ L'écrivain est **toujours** `vtkPolyDataWriter` alors que l'extension d'origine
 | ALI_CBCT (7 ou 6 landmarks) | `lineEditModel3` (CBCT, caché) | un `.zip` par landmark (`Ba, S, N, RPo, LPo, ROr, LOr` ou `IF, ANS, PNS, UR1O, UR6O, UL6O`) | `https://github.com/lucanchling/ALI_CBCT/releases/download/models_v01/<LM>.zip` | CBCT Or_Auto (`AREG/AREG.py:1104-1140`, `AREG/AREG_Method/CBCT.py:126-130`) |
 | ALI_CBCT dents (8 archives) | `lineEditModel2` (IOSCBCT) | `Cranial_Base`, `Lower_Bones_1/2`, `Lower_Left/Right_Teeth`, `Upper_Bones_v2`, `Upper_Left/Right_Teeth_v2` | `…/releases/download/v0.1-v2.0_models/*.zip` | IOSCBCT Auto + Semi (`AREG/AREG_Method/IOSCBCT.py:197-206`, `:487-496`) |
 | ALI_IOS (ALIDDM) | `lineEditModel3` (IOSCBCT) | `Models.zip` | `https://github.com/baptistebaquero/ALIDDM/releases/download/v1.0.3/Models.zip` | IOSCBCT Auto + Semi (`AREG/AREG_Method/IOSCBCT.py:207`, `:497`) |
-| Segmentation IOS | `lineEditModel1` (IOS) | un `.pth` | `https://github.com/HUTIN1/ASO/releases/download/v1.0.0/segmentation_model.zip` | IOS Auto — **validé mais inutilisé** (`AREG/AREG_Method/IOS.py:177`) |
+| Segmentation IOS | `lineEditModel1` (IOS) | un `.pth` | `https://github.com/HUTIN1/ASO/releases/download/v1.0.0/segmentation_model.zip` | IOS Auto - **validé mais inutilisé** (`AREG/AREG_Method/IOS.py:177`) |
 | Référence d'orientation IOS (gold files) | `lineEditModel2` (IOS) / `model_folder_1/IOS` (IOSCBCT) | `.vtk` + `.json` | `https://github.com/HUTIN1/ASO/releases/download/v1.0.0/Gold_file.zip` | IOS Auto, IOSCBCT Auto (`AREG/AREG_Method/IOS.py:176`, `IOSCBCT.py:485`) |
 | Recalage IOS (patch Butterfly, MONAI UNet) | `lineEditModel3` (IOS) | un `.ckpt` (`torch.load(...)["state_dict"]`) | `https://github.com/HUTIN1/AREG/releases/download/v1.0.0/AREG_model.zip` | **IOS Auto et Semi (obligatoire)** (`AREG/AREG_Method/IOS.py:175`, `AREG_IOS/AREG_IOS_utils/PredPatch.py:27-33`) |
 | `dentalmodelseg` (CrownSegmentationcli) | résolu automatiquement | binaire de l'env conda `shapeaxi` ou `lib/Python/bin/dentalmodelseg` | modèle `"latest"` téléchargé par l'outil lui-même | IOS Auto, IOSCBCT Auto + Semi (`AREG/AREG_Method/IOS.py:299-300`, `:319`) |
@@ -278,14 +278,14 @@ Environnement conda `shapeaxi` (python 3.9, `ocnn==2.2.1`, `shapeaxi==1.0.10`, +
 
 ---
 
-## Avis — entrées/sorties à ajouter ou retirer
+## Avis - entrées/sorties à ajouter ou retirer
 
 ### À retirer / corriger en priorité
 
 1. **Retirer ou implémenter `ApproxcheckBox`** : une option visible, cochée par défaut, qui ne change rien est le pire des deux mondes. Soit brancher `initial_transform` dans `ElastixReg`, soit supprimer la case, le paramètre XML et l'argument CLI.
 2. **Retirer `LabelSelectcomboBox` / `SegmentationLabel`** ou brancher réellement `GetSegmentationLabel` sur le dossier de masques choisi. En l'état, trois couches (UI, module, CLI) transportent une valeur constante.
 3. **Retirer l'exigence de `model_folder_1` en `Auto_IOS`** (modèle `.pth` jamais utilisé) ou le passer à CrownSegmentationcli à la place de `"model": "latest"`.
-4. **Retirer l'exigence de suffixe en IOS/CBCT** ou, mieux, le transmettre au CLI `AREG_IOSCBCT` et l'insérer dans les noms `_Reg_U.vtk` / `_lm_Reg_U.mrk.json` — sinon deux exécutions successives écrasent silencieusement les sorties précédentes.
+4. **Retirer l'exigence de suffixe en IOS/CBCT** ou, mieux, le transmettre au CLI `AREG_IOSCBCT` et l'insérer dans les noms `_Reg_U.vtk` / `_lm_Reg_U.mrk.json` - sinon deux exécutions successives écrasent silencieusement les sorties précédentes.
 5. **Supprimer les imports morts de landmarks dans `AREG_CBCT.py`** ou, préférablement, réactiver la fonctionnalité (voir ci-dessous).
 
 ### À ajouter

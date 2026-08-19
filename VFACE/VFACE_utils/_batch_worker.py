@@ -3,7 +3,7 @@
 Worker script for batch_process.
 Each invocation processes a SINGLE pair of VTK files in its own process.
 When this process exits, ALL memory (including VTK C++ allocations) is
-reclaimed by the operating system — no leaks possible.
+reclaimed by the operating system - no leaks possible.
 
 Usage:
     python _batch_worker.py --file1 path/to/t1.vtk --file2 path/to/t2.vtk --output path/to/out.vtk [--signed|--unsigned]

@@ -41,7 +41,7 @@ class BackgroundJob:
     def cancel(self) -> None:
         """Best-effort: the in-flight HTTP request cannot be interrupted, but its
         result is discarded and the UI is released immediately (see ARCHITECTURE.md
-        limitations — no true server-side cancel)."""
+        limitations - no true server-side cancel)."""
         self._cancelled = True
         self._timer.stop()
 

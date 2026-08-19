@@ -245,7 +245,7 @@ class CLICWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         def worker():
             for idx, scan in enumerate(scans,1):
                 if cancel_evt.is_set(): break
-                _ui_log(self.ui_q, f"===== {idx}/{len(scans)} — {scan.name} =====")
+                _ui_log(self.ui_q, f"===== {idx}/{len(scans)} - {scan.name} =====")
                 self.ui_q.put(("loadScan", str(scan)))
                 tmp = Path(slicer.app.temporaryPath)/f"clic_{idx}.json"
                 tmp.write_text(json.dumps({

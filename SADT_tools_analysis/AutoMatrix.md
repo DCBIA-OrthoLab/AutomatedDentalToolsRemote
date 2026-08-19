@@ -22,26 +22,26 @@ unique** processus CLI (`Automatrix_CLI`) via `slicer.cli.run`.
 - Les transformées sont appliquées avec **SimpleITK uniquement** (`sitk.ReadTransform`,
   `sitk.ResampleImageFilter`) : `Automatrix_CLI/Automatrix_CLI.py:207-223`, `:285`.
   Aucun code VTK n'est présent dans le CLI (les seuls imports sont `argparse, json, glob, sys, os,
-  time, SimpleITK` — `Automatrix_CLI/Automatrix_CLI.py:1-6`).
+  time, SimpleITK` - `Automatrix_CLI/Automatrix_CLI.py:1-6`).
 
 ## Entrées
 
 | Entrée (widget) | Type | Extensions acceptées (validation UI) | Extensions réellement scannées (CLI) | Fichier:ligne |
 |---|---|---|---|---|
-| `LineEditPatient` + `ComboBoxPatient` | Fichier **ou** dossier (au choix) | `.vtk .vtp .stl .off .obj .nii.gz .nrrd .mrk.json` | `.vtk .vtp .stl .off .obj .nii .nii.gz .nrrd .mrk.json` | UI : `AutoMatrix/AutoMatrix.py:1012` et `:1023` — CLI : `Automatrix_CLI/Automatrix_CLI.py:72`, `:123` |
-| `LineEditMatrix` + `ComboBoxMatrix` | Fichier **ou** dossier | `.npy .h5 .tfm .mat .txt` | `.npy .h5 .tfm .mat .txt` | UI : `AutoMatrix/AutoMatrix.py:1035-1043` — CLI : `Automatrix_CLI/Automatrix_CLI.py:137` |
+| `LineEditPatient` + `ComboBoxPatient` | Fichier **ou** dossier (au choix) | `.vtk .vtp .stl .off .obj .nii.gz .nrrd .mrk.json` | `.vtk .vtp .stl .off .obj .nii .nii.gz .nrrd .mrk.json` | UI : `AutoMatrix/AutoMatrix.py:1012` et `:1023` - CLI : `Automatrix_CLI/Automatrix_CLI.py:72`, `:123` |
+| `LineEditMatrix` + `ComboBoxMatrix` | Fichier **ou** dossier | `.npy .h5 .tfm .mat .txt` | `.npy .h5 .tfm .mat .txt` | UI : `AutoMatrix/AutoMatrix.py:1035-1043` - CLI : `Automatrix_CLI/Automatrix_CLI.py:137` |
 | `LineEditReference` | Fichier unique (image) | aucune validation | lu par `sitk.ReadImage` | `AutoMatrix/Resources/UI/AutoMatrix.ui:254-259`, `Automatrix_CLI/Automatrix_CLI.py:236-241` |
-| `LineEditOutput` | Dossier | — | créé par `os.makedirs` | `AutoMatrix/AutoMatrix.py:426-428`, `AutoMatrix/AutoMatrix_Method/applyMatrix.py:68` |
-| `LineEditSuffix` | Chaîne (défaut `_apply`) | — | concaténée au nom de sortie | `AutoMatrix/Resources/UI/AutoMatrix.ui:322-328`, `Automatrix_CLI/Automatrix_CLI.py:291` |
-| `checkBoxMatrixName` | Booléen (défaut **coché**) | — | ajoute `_<stem de la matrice>` | `AutoMatrix/Resources/UI/AutoMatrix.ui:336-345`, `Automatrix_CLI/Automatrix_CLI.py:290` |
-| `CheckBoxSegmentation` (`is_seg`) | Booléen | — | interpolateur NearestNeighbor au lieu de Linear | `AutoMatrix/Resources/UI/AutoMatrix.ui:268-275`, `Automatrix_CLI/Automatrix_CLI.py:210` |
-| `CheckBoxMirror` | Booléen | — | télécharge et impose une matrice miroir | `AutoMatrix/AutoMatrix.py:304-324`, `:381-402` |
-| `CheckBoxSuffixBased` (« From AReg ») | Booléen | — | mode d'appariement alternatif — **masqué dans l'UI** | `AutoMatrix/AutoMatrix.py:296`, `Automatrix_CLI/Automatrix_CLI.py:259-279` |
+| `LineEditOutput` | Dossier | - | créé par `os.makedirs` | `AutoMatrix/AutoMatrix.py:426-428`, `AutoMatrix/AutoMatrix_Method/applyMatrix.py:68` |
+| `LineEditSuffix` | Chaîne (défaut `_apply`) | - | concaténée au nom de sortie | `AutoMatrix/Resources/UI/AutoMatrix.ui:322-328`, `Automatrix_CLI/Automatrix_CLI.py:291` |
+| `checkBoxMatrixName` | Booléen (défaut **coché**) | - | ajoute `_<stem de la matrice>` | `AutoMatrix/Resources/UI/AutoMatrix.ui:336-345`, `Automatrix_CLI/Automatrix_CLI.py:290` |
+| `CheckBoxSegmentation` (`is_seg`) | Booléen | - | interpolateur NearestNeighbor au lieu de Linear | `AutoMatrix/Resources/UI/AutoMatrix.ui:268-275`, `Automatrix_CLI/Automatrix_CLI.py:210` |
+| `CheckBoxMirror` | Booléen | - | télécharge et impose une matrice miroir | `AutoMatrix/AutoMatrix.py:304-324`, `:381-402` |
+| `CheckBoxSuffixBased` (« From AReg ») | Booléen | - | mode d'appariement alternatif - **masqué dans l'UI** | `AutoMatrix/AutoMatrix.py:296`, `Automatrix_CLI/Automatrix_CLI.py:259-279` |
 
 Aucune entrée n'est un **nœud MRML** : tout passe par des chemins texte (`QLineEdit`). Les
 sélecteurs `qMRMLNodeComboBox` référencés dans `updateParameterNodeFromGUI`
 (`AutoMatrix/AutoMatrix.py:733-737` : `inputSelector`, `outputSelector`, `imageThresholdSliderWidget`…)
-n'existent pas dans le `.ui` — ce sont des restes du template Slicer, jamais appelés.
+n'existent pas dans le `.ui` - ce sont des restes du template Slicer, jamais appelés.
 
 **Détail des données patients.** Le sélecteur de fichier est ouvert par `openFinder`
 (`AutoMatrix/AutoMatrix.py:405-432`) : `getExistingDirectory` si `ComboBoxPatient.currentIndex==1`
@@ -52,11 +52,11 @@ donc l'utilisateur peut sélectionner n'importe quoi ; la validation n'a lieu qu
 **Détail des matrices.** Formats déclarés : `.npy`, `.h5`, `.tfm`, `.mat`, `.txt`
 (`AutoMatrix/AutoMatrix.py:1035-1043`). Le CLI lit chaque matrice avec `sitk.ReadTransform(matrix)`
 (`Automatrix_CLI/Automatrix_CLI.py:285`) : `.tfm`, `.h5`, `.mat` et `.txt` sont des formats de
-transformée ITK valides, **`.npy` ne l'est pas** — la lecture lèvera une exception attrapée et
+transformée ITK valides, **`.npy` ne l'est pas** - la lecture lèvera une exception attrapée et
 loguée en `ERROR` puis le fichier sera ignoré (`:286-288`).
 
 **Scan récursif.** La fonction `search` utilise
-`glob.iglob(os.path.normpath("/".join([path, "**", "*"])), recursive=True)` — le scan est donc
+`glob.iglob(os.path.normpath("/".join([path, "**", "*"])), recursive=True)` - le scan est donc
 **récursif** dans toute l'arborescence, aussi bien pour les patients que pour les matrices :
 `AutoMatrix/AutoMatrix_Method/General_tools.py:39-48` et son doublon
 `Automatrix_CLI/Automatrix_CLI.py:48-57`.
@@ -111,13 +111,13 @@ possédant *n* scans et *m* matrices appariées, on obtient donc **n × m fichie
 
 **Variations selon les options.**
 - *Segmentation* (`is_seg=True`) : interpolation plus proche voisin au lieu de linéaire
-  (`Automatrix_CLI/Automatrix_CLI.py:210`) — même nombre de fichiers, contenu différent.
+  (`Automatrix_CLI/Automatrix_CLI.py:210`) - même nombre de fichiers, contenu différent.
 - *Mirror* : le suffixe devient `_mir` et `checkBoxMatrixName` est décoché
   (`AutoMatrix/AutoMatrix.py:316-319`) ; côté CLI, si le nom de la matrice contient « mirror »
   (insensible à la casse), la référence utilisateur est **ignorée** et l'image elle-même sert de
   référence (`Automatrix_CLI/Automatrix_CLI.py:303-304`).
 - *Landmarks* : la transformée est **inversée** avant application aux points
-  (`transform.GetInverse()`, `Automatrix_CLI/Automatrix_CLI.py:176`) — cohérent avec le fait que le
+  (`transform.GetInverse()`, `Automatrix_CLI/Automatrix_CLI.py:176`) - cohérent avec le fait que le
   resampling d'image utilise la transformée sortie→entrée. Si l'inversion échoue, le fichier est
   simplement sauté avec un WARNING (`:177-179`). Seuls les points `positionStatus == 'defined'` et
   de dimension 3 sont transformés ; les autres sont recopiés tels quels (`:181-185`).
@@ -132,14 +132,14 @@ Tout se joue dans `GetPatients`, dupliquée à l'identique (à un détail près)
 C'est **la version du CLI** qui régit le traitement réel ; celle du module ne sert qu'à compter les
 scans (`NbScan`, `AutoMatrix/AutoMatrix_Method/applyMatrix.py:39-41`).
 
-**Étape 1 — collecte des scans.**
+**Étape 1 - collecte des scans.**
 - `Path(file_path).is_dir()` vrai → `search()` récursif sur les 9 extensions
   (`Automatrix_CLI/Automatrix_CLI.py:72`), puis concaténation dans une liste plate (`:74-99`).
 - Sinon → un seul fichier, accepté uniquement si son extension figure dans la liste blanche
   (`Automatrix_CLI/Automatrix_CLI.py:123`). **Si l'extension n'est pas reconnue, `patients` reste
   vide et le CLI ne fait rien, silencieusement** (aucun message d'erreur côté CLI).
 
-**Étape 2 — extraction de la clé patient (le « LinkName »).** Pour chaque scan, le nom de base est
+**Étape 2 - extraction de la clé patient (le « LinkName »).** Pour chaque scan, le nom de base est
 tronqué au premier des marqueurs suivants (`Automatrix_CLI/Automatrix_CLI.py:104`) :
 
 ```
@@ -147,7 +147,7 @@ _Seg _seg _Scan _scan _Or _OR _MAND _MD _MAX _MX _CB _lm _T2 _T1 _Cl _MR  puis '
 ```
 puis, en boucle, `_T0` … `_T49` (`:105-106`). Exemple : `P17_T1_MAND_Seg.nii.gz` → clé `P17`.
 
-**Étape 3 — collecte et appariement des matrices.**
+**Étape 3 - collecte et appariement des matrices.**
 - Si le chemin matrice est un **dossier** : `search()` récursif sur `.npy/.h5/.tfm/.mat/.txt`
   (`Automatrix_CLI/Automatrix_CLI.py:137`), puis extraction d'une clé patient par troncature sur une
   liste de marqueurs **différente** (`:157`) :
@@ -160,17 +160,17 @@ puis, en boucle, `_T0` … `_T49` (`:105-106`). Exemple : `P17_T1_MAND_Seg.nii.g
 - Si le chemin matrice est un **fichier** : la même matrice est ajoutée à **tous** les patients
   (`Automatrix_CLI/Automatrix_CLI.py:165-167`), sans aucune vérification d'existence ni de format.
 
-**Étape 4 — mode « From AReg » (`fromAreg == "True"`).** L'appariement par nom est court-circuité
+**Étape 4 - mode « From AReg » (`fromAreg == "True"`).** L'appariement par nom est court-circuité
 pour les landmarks uniquement (`Automatrix_CLI/Automatrix_CLI.py:259-279`) : le suffixe du fichier
 (`_CB`, `_L`, `_U`) sélectionne un sous-dossier et un nom de matrice canonique via `suffix_map`
 (`:227-231`), et le chemin construit est
 `<dossier_matrices>/<Cranial Base|Maxilla|Mandible>/<ID>_OutReg/<ID>_{CBReg|MAXReg|MANDReg}_matrix.tfm`
-(`:264-269`). **Ce chemin est bâti sur `args.matrix_lineEdit`, un attribut inexistant — voir
+(`:264-269`). **Ce chemin est bâti sur `args.matrix_lineEdit`, un attribut inexistant - voir
 Incohérences.**
 
 ## Incohérences et pièges observés dans le code
 
-1. **`args.matrix_lineEdit` n'existe pas** — `Automatrix_CLI/Automatrix_CLI.py:265` utilise
+1. **`args.matrix_lineEdit` n'existe pas** - `Automatrix_CLI/Automatrix_CLI.py:265` utilise
    `args.matrix_lineEdit` alors que l'argument déclaré est `input_matrix`
    (`Automatrix_CLI/Automatrix_CLI.py:330`, `Automatrix_CLI/Automatrix_CLI.xml:25-30`). Le mode
    « From AReg » lèverait donc systématiquement un `AttributeError`. Il est de fait inatteignable :
@@ -197,7 +197,7 @@ Incohérences.**
    `if len(dico['.vtk'])==0 and len(dico['.vtp']) and len(dico['.stl']) and …` : seul le premier
    terme est comparé à 0, les suivants sont évalués par leur véracité. L'avertissement « Folder empty
    or wrong type of file patient » ne se déclenche donc que si le dossier ne contient **aucun** `.vtk`
-   mais **au moins un de chaque** des sept autres extensions — c'est-à-dire en pratique jamais. Le
+   mais **au moins un de chaque** des sept autres extensions - c'est-à-dire en pratique jamais. Le
    test équivalent côté matrices (`:1036`) est, lui, correct.
 
 6. **`TestProcess` renvoie un tuple, le widget attend une chaîne.**
@@ -254,7 +254,7 @@ Incohérences.**
 15. **Le mode Mirror laisse le champ Reference renseigné.** `Mirror()` désactive le widget mais ne
     remet pas son texte à `"None"` (`AutoMatrix/AutoMatrix.py:311-313`) ; la valeur est tout de même
     transmise au CLI. Elle est heureusement neutralisée par le test `"mirror" in
-    os.path.basename(matrix).lower()` (`Automatrix_CLI/Automatrix_CLI.py:303`) — mais uniquement
+    os.path.basename(matrix).lower()` (`Automatrix_CLI/Automatrix_CLI.py:303`) - mais uniquement
     parce que le fichier téléchargé s'appelle `Matrix_mirror.tfm` (`AutoMatrix/AutoMatrix.py:402`).
     Une matrice miroir renommée perdrait ce comportement.
 
@@ -268,12 +268,12 @@ Incohérences.**
 - **Aucun modèle de deep learning**, aucun téléchargement de poids, pas d'installation de paquets pip.
 - Un **unique téléchargement optionnel** : l'archive `Mirror.zip` du mode Mirror
   (`AutoMatrix/AutoMatrix.py:382`), hébergée sur un dépôt GitHub personnel
-  (`GaelleLeroux/DCBIA_Apply_matrix`) et non sur l'organisation du projet — point de fragilité à long
+  (`GaelleLeroux/DCBIA_Apply_matrix`) et non sur l'organisation du projet - point de fragilité à long
   terme.
 - Le CLI est enregistré comme `Automatrix_CLI` (`Automatrix_CLI/CMakeLists.txt`) et référencé côté
   Python par `slicer.modules.automatrix_cli` (`AutoMatrix/AutoMatrix_Method/applyMatrix.py:84`).
 
-## Avis — entrées/sorties à ajouter ou retirer
+## Avis - entrées/sorties à ajouter ou retirer
 
 **À retirer / corriger en priorité**
 

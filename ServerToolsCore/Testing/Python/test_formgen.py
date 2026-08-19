@@ -1,9 +1,9 @@
-"""Unit tests for ServerToolsCoreLib.formgen — run outside Slicer, `qt`/`ctk`/
+"""Unit tests for ServerToolsCoreLib.formgen - run outside Slicer, `qt`/`ctk`/
 `slicer` stubbed (see qt_stubs.py).
 
 Everything here is driven by EXAMPLE_TOOL_SCHEMA, the real `GET /tools` entry
 for `example_tool`: it is the one tool exercising every argument shape the
-panel has to render — free text, int, float, a single-choice dropdown, a
+panel has to render - free text, int, float, a single-choice dropdown, a
 multi-choice checkbox group, and a file argument that also accepts a folder.
 
 Usage:
@@ -380,7 +380,7 @@ class ChangeSignalTest(unittest.TestCase):
 
 
 class AutoFileModeTest(unittest.TestCase):
-    """The one rule deciding what a file argument's picker looks like — and,
+    """The one rule deciding what a file argument's picker looks like - and,
     downstream, whether base_widget zips the selection before uploading."""
 
     def test_folder_plus_a_file_type_offers_both(self):
@@ -490,7 +490,7 @@ class ResultKindTest(unittest.TestCase):
 
 
 class FileOrFolderInputTest(unittest.TestCase):
-    """The `input` argument: `types` = ["csv_file", "folder"] — one path field
+    """The `input` argument: `types` = ["csv_file", "folder"] - one path field
     taking either, with the client working out which it got."""
 
     def setUp(self):
@@ -509,7 +509,7 @@ class FileOrFolderInputTest(unittest.TestCase):
         self.assertIsInstance(self.field.pathEdit, qt.QLineEdit)
 
     def test_the_file_dialog_is_restricted_to_the_declared_extensions(self):
-        # The extensions still come from `types` — that is the whole point of
+        # The extensions still come from `types` - that is the whole point of
         # driving the dialog here rather than letting ctkPathLineEdit do it.
         self.field.fileButton.clicked.emit()
 
@@ -754,7 +754,7 @@ class LabelTest(unittest.TestCase):
 
     def test_the_fallback_is_why_labels_belong_server_side(self):
         # It cannot know that "cbct" is an acronym, nor that ASO's `input`
-        # holds the scans AND their landmarks. That is not a bug to fix here —
+        # holds the scans AND their landmarks. That is not a bug to fix here - 
         # no naming rule can recover a phrase nobody wrote down.
         self.assertEqual(formgen.label_for("cbct_landmarks", {}), "Cbct landmarks")
 

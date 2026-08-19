@@ -2,7 +2,7 @@
 ServerToolsCoreLib can be unit-tested outside Slicer.
 
 Only what `formgen` (and the `design` module it pulls in) actually touches is
-implemented — enough to assert *which* widgets a schema produces, in which
+implemented - enough to assert *which* widgets a schema produces, in which
 order, with which initial state, and what they read back as. This obviously
 tests the schema-to-widget logic, not Qt itself; the Qt calls it makes are the
 same ones the previously shipped widgets already used.
@@ -107,7 +107,7 @@ class QHBoxLayout(QLayout):
 
 
 class QGridLayout(QLayout):
-    """Records the (row, column) each widget was placed at — which is the whole
+    """Records the (row, column) each widget was placed at - which is the whole
     point of the "grid" multichoice layout: a chart is only a chart if the
     positions are right (see formgen._build_grid_boxes)."""
 
@@ -174,7 +174,7 @@ class Qt:
 class QFileDialog:
     """Test seam: `next_file`/`next_directory` are what the static helpers
     return, so a test can drive the browse buttons without a real (modal)
-    dialog, and inspect the arguments they were called with — the file
+    dialog, and inspect the arguments they were called with - the file
     dialog's filter string among them."""
 
     next_file = ""
@@ -290,7 +290,7 @@ class QComboBox(QObject):
     @property
     def count(self):
         # A property, not a method: PythonQt exposes a Qt property whose getter
-        # shares its name as an attribute, and it shadows the method — real
+        # shares its name as an attribute, and it shadows the method - real
         # Slicer raises "'int' object is not callable" on `combo.count()`.
         return len(self._items)
 
@@ -437,7 +437,7 @@ def install():
 
     `slicer` is deliberately empty: `design.is_dark_mode()` reaches for
     `slicer.app.palette()` inside a try/except, so the missing attribute makes
-    it fall back to the light palette — which is all these tests need.
+    it fall back to the light palette - which is all these tests need.
     """
     qt = types.ModuleType("qt")
     for name, value in globals().items():

@@ -59,14 +59,14 @@ class AMASSSWidget(ServerToolWidgetBase):
 
     Nothing about the anatomy lives here: the structure list, its display names
     and which ones start checked are a `multichoice` argument in the server's
-    schema, rendered by formgen — so a new model appears in this panel with no
+    schema, rendered by formgen - so a new model appears in this panel with no
     client release.
     """
 
     TOOL_NAME = "AMASSS"
     # "auto": the schema says `scans` is a "path", which a packaged tool uses
-    # for a file OR a folder, so the panel takes either — one path field with a
-    # File and a Folder browse button — a single scan or a whole cohort, the
+    # for a file OR a folder, so the panel takes either - one path field with a
+    # File and a Folder browse button - a single scan or a whole cohort, the
     # folder being zipped before upload. Nothing here names a type, an
     # extension, or a mode.
     #
@@ -130,7 +130,7 @@ class AMASSSWidget(ServerToolWidgetBase):
         if len(found) > self.MAX_RESULTS_TO_LOAD:
             slicer.util.infoDisplay(
                 _(
-                    "{count} result files were produced — too many to load at once.\n"
+                    "{count} result files were produced - too many to load at once.\n"
                     "They are all saved in {path}."
                 ).format(count=len(found), path=outputDir)
             )

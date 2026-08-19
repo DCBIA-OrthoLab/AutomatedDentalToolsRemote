@@ -32,5 +32,5 @@ Date de l'analyse : 2026-07-27 (dépôt cloné à cette date, branche par défau
 | [VFACE](VFACE.md) | Méta-pipeline CBCT complet (ALI→ASO→AMASSS→AREG→mesures→classification) |
 | [GreedyReg](GreedyReg.md) | Registration via Greedy |
 | [Agent](Agent.md) | Agent conversationnel pilotant les modules |
-| [MedX](MedX.md) | Résumé de notes cliniques (BART) — ⚠️ désactivé, remplacé par CNE |
-| [SurgMovPred](SurgMovPred.md) | Prédiction de mouvement chirurgical (ML tabulaire) — ⚠️ absent du CMakeLists racine |
+| [MedX](MedX.md) | Résumé de notes cliniques (BART) - ⚠️ désactivé, remplacé par CNE |
+| [SurgMovPred](SurgMovPred.md) | Prédiction de mouvement chirurgical (ML tabulaire) - ⚠️ absent du CMakeLists racine |

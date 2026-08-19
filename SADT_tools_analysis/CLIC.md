@@ -18,13 +18,13 @@ Architecture d'exécution :
 |---|---|---|---|---|---|
 | Scans CBCT | `lineEditScanPath` + bouton `SearchScanFolder` (CLIC.ui:174-181) | **Dossier uniquement** (`QFileDialog.getExistingDirectory`) | `.nii`, `.nii.gz`, `.nrrd`, `.mha`, `.mhd` (insensible à la casse) | Oui | CLIC.py:310-314, CLIC.py:316-329 |
 | Dossier modèle | `lineEditModelPath` + `SearchModelFolder` (CLIC.ui:229-236) | Dossier contenant au moins un `*.pth` | `.pth` (premier par ordre alphabétique) | Oui | CLIC.py:137-139 ; clic_runner.py:76 |
-| Modèle pré-entraîné (téléchargement) | `DownloadModelPushButton` (CLIC.ui:206-211) | Fichier `.pth` téléchargé | — | Non (alternative au choix manuel) | CLIC.py:331-359 |
-| Dossier de sortie | `SaveFolderLineEdit` + `SearchSaveFolder` (CLIC.ui:257-262, 296) | Dossier | — | **Non** (repli : dossier parent du scan) | CLIC.py:140-142 ; clic_runner.py:71 |
-| Suffixe | `suffixLineEdit` (CLIC.ui:276-281) | Texte libre | — | Non (défaut `"seg"`) | CLIC.py:255 ; clic_runner.py:72 |
+| Modèle pré-entraîné (téléchargement) | `DownloadModelPushButton` (CLIC.ui:206-211) | Fichier `.pth` téléchargé | - | Non (alternative au choix manuel) | CLIC.py:331-359 |
+| Dossier de sortie | `SaveFolderLineEdit` + `SearchSaveFolder` (CLIC.ui:257-262, 296) | Dossier | - | **Non** (repli : dossier parent du scan) | CLIC.py:140-142 ; clic_runner.py:71 |
+| Suffixe | `suffixLineEdit` (CLIC.ui:276-281) | Texte libre | - | Non (défaut `"seg"`) | CLIC.py:255 ; clic_runner.py:72 |
 
 Détails et preuves :
 
-- **Sélection : dossier seulement.** Les trois boutons Browse passent tous par `_browse`, qui appelle `qt.QFileDialog.getExistingDirectory` (CLIC.py:311). Il est donc **impossible de sélectionner un fichier unique via l'UI**, alors que le label affiche « Select Scan File/Folder » (CLIC.ui:165). Le code de collecte gère pourtant le cas fichier (`return [p]` si `p` n'est pas un dossier, CLIC.py:329) — branche morte via l'UI.
+- **Sélection : dossier seulement.** Les trois boutons Browse passent tous par `_browse`, qui appelle `qt.QFileDialog.getExistingDirectory` (CLIC.py:311). Il est donc **impossible de sélectionner un fichier unique via l'UI**, alors que le label affiche « Select Scan File/Folder » (CLIC.ui:165). Le code de collecte gère pourtant le cas fichier (`return [p]` si `p` n'est pas un dossier, CLIC.py:329) - branche morte via l'UI.
 - **Extensions filtrées** dans `_collect_scans` : tuple `(".nii", ".nii.gz", ".nrrd", ".mha", ".mhd")` (CLIC.py:318), testées par `name.lower().endswith(ext)` (CLIC.py:322-323), donc `.nii.gz` est correctement reconnu.
 - **Scan NON récursif** : un seul niveau. `_collect_scans` liste d'abord les sous-dossiers immédiats contenant au moins un scan valide et, s'il y en a, retourne **les sous-dossiers eux-mêmes** ; sinon il retourne les fichiers valides à la racine du dossier (CLIC.py:325-328). Aucun `rglob`/récursion plus profonde.
 - **Validation à l'exécution** : `_on_predict` exige seulement `input_path` et `model_dir` (CLIC.py:226-228) ; message « No scan found » si la collecte est vide (CLIC.py:238-240). Le dossier de sortie n'est jamais vérifié.
@@ -39,7 +39,7 @@ Détails et preuves :
 | Segmentation | NIfTI compressé, labels int16 (0-3) | `<output_dir>/<stem_du_scan>/<stem_du_scan>_<suffix>.nii.gz` | **1 fichier par scan**, chacun dans son propre sous-dossier | clic_runner.py:100-104 |
 | JSON de paramètres | `.json` | `<slicer temporaryPath>/clic_<idx>.json` | 1 par scan, **supprimé après exécution** (`tmp.unlink`) | CLIC.py:250-256, 275 |
 | Chargements dans la scène Slicer | nœuds Volume + Segmentation | via `loadVolume` / `loadSegmentation` | 1 volume par scan ; segmentation seulement si le tag `[SEG]` est détecté | CLIC.py:249, 303-308 |
-| Légende 2D (Buccal/Bicortical/Palatal) | acteurs VTK dans les vues Red/Yellow/Green | — (affichage uniquement, rien d'écrit) | recréée à chaque segmentation active | CLIC.py:361-385 |
+| Légende 2D (Buccal/Bicortical/Palatal) | acteurs VTK dans les vues Red/Yellow/Green | - (affichage uniquement, rien d'écrit) | recréée à chaque segmentation active | CLIC.py:361-385 |
 | Modèle téléchargé | `.pth` | `~/Documents/CLIC_Models/final_model.pth` | 1, écrasé à chaque re-téléchargement | CLIC.py:338-348 |
 
 Détails :
@@ -66,34 +66,34 @@ Détails :
 4. **Mode sous-dossiers/DICOM cassé** : passage de répertoires entiers à `nib.load` (voir section précédente ; CLIC.py:327-328 vs clic_runner.py:83).
 5. **UI « File/Folder » mensongère** : label « Select Scan File/Folder » (CLIC.ui:165) vs sélection dossier-uniquement (CLIC.py:311).
 6. **Bouton Cancel inopérant** : `_on_cancel` ne fait qu'écrire un log (CLIC.py:288-289) ; `cancel_evt` n'est jamais déclenché par l'utilisateur (il ne sert qu'à terminer la boucle UI en fin de worker, CLIC.py:276).
-7. **Widget dupliqué** : deux `QTextEdit` nommés `logTextEdit` dans le .ui (CLIC.ui:343 et CLIC.ui:353) ; `childWidgetVariables` n'en référencera qu'un — les logs peuvent s'afficher dans le mauvais.
-8. **Chemins codés en dur spécifiques à une machine** : `/home/luciacev/anaconda3/bin/conda` et `/home/luciacev/anaconda3` comme replis conda (CLIC.py:90, CLIC.py:104-107) — non portable.
+7. **Widget dupliqué** : deux `QTextEdit` nommés `logTextEdit` dans le .ui (CLIC.ui:343 et CLIC.ui:353) ; `childWidgetVariables` n'en référencera qu'un - les logs peuvent s'afficher dans le mauvais.
+8. **Chemins codés en dur spécifiques à une machine** : `/home/luciacev/anaconda3/bin/conda` et `/home/luciacev/anaconda3` comme replis conda (CLIC.py:90, CLIC.py:104-107) - non portable.
 9. **Nommage `.nii.gz`** : `Path.stem` ne retire qu'une extension → sous-dossier `X.nii` et fichier `X.nii_seg.nii.gz` pour toute entrée compressée (clic_runner.py:100-102).
 10. **Crash silencieux si pas de `.pth`** : `sorted(model_dir.glob("*.pth"))[0]` (clic_runner.py:76) lève `IndexError` sans message utilisateur ; le widget ne vérifie pas le contenu du dossier modèle.
 11. **Pip douteux** : le déclassement numpy est passé sous la forme `"'numpy<2.0'"` avec quotes imbriquées (CLIC.py:204), susceptible d'installer littéralement `'numpy<2.0'` ou d'échouer selon le shell intermédiaire.
 12. **Écrasement de segmentation existante** sans avertissement (`mkdir exist_ok=True` + `nib.save` direct, clic_runner.py:101-104).
-13. **Test vide** : `CLIC/testing/test_CanineSegmentation.py` fait 0 octet — aucune couverture de test.
+13. **Test vide** : `CLIC/testing/test_CanineSegmentation.py` fait 0 octet - aucune couverture de test.
 14. **README vs code** : le README parle d'un bouton « Predict » / « Run Prediction » et d'un choix fichier ou dossier (README.md:802, 825) ; le bouton réel s'appelle « Run » (CLIC.ui:310) et seul un dossier est sélectionnable.
 
-## Avis — entrées/sorties à ajouter ou retirer
+## Avis - entrées/sorties à ajouter ou retirer
 
 **À corriger en priorité (avant d'ajouter quoi que ce soit)**
 - Réparer le protocole `[PROGRESS]`/`[SEG]` : faire des `print(...)` bruts (ou retirer le formatteur logging) côté runner, sinon aucune sortie n'est jamais rechargée dans Slicer.
-- Soit retirer `.nrrd`/`.mha`/`.mhd` de `_collect_scans`, soit remplacer nibabel par SimpleITK dans le runner (SimpleITK lit les cinq formats et permettrait aussi les séries DICOM) — l'état actuel promet des formats qui plantent.
+- Soit retirer `.nrrd`/`.mha`/`.mhd` de `_collect_scans`, soit remplacer nibabel par SimpleITK dans le runner (SimpleITK lit les cinq formats et permettrait aussi les séries DICOM) - l'état actuel promet des formats qui plantent.
 - Corriger le mode sous-dossiers (itérer sur les fichiers du sous-dossier, ou supprimer cette branche).
 
 **Entrées à ajouter**
 - Un vrai sélecteur **fichier OU dossier** (deux boutons, ou `getOpenFileName` avec filtre `*.nii *.nii.gz`), puisque le code du runner gère déjà le scan unique.
-- Exposer le **seuil de score** (0,7) et le **seuil de masque** (0,5), aujourd'hui codés en dur (clic_runner.py:93-94) — utile cliniquement pour ajuster sensibilité/spécificité.
+- Exposer le **seuil de score** (0,7) et le **seuil de masque** (0,5), aujourd'hui codés en dur (clic_runner.py:93-94) - utile cliniquement pour ajuster sensibilité/spécificité.
 - Un sélecteur de **fichier `.pth` précis** plutôt qu'un dossier dont on prend silencieusement le premier `.pth` alphabétique.
 - Option CPU/GPU explicite (le runner choisit seul, clic_runner.py:73).
 
 **Entrées à retirer / nettoyer**
-- `SavePredictCheckBox` : la retirer du .ui ou la câbler réellement (`output_dir = None` quand cochée) — en l'état c'est une entrée morte trompeuse.
+- `SavePredictCheckBox` : la retirer du .ui ou la câbler réellement (`output_dir = None` quand cochée) - en l'état c'est une entrée morte trompeuse.
 - Les chemins anaconda codés en dur (CLIC.py:90,104) : à retirer d'une extension distribuée publiquement.
 
 **Sorties à ajouter**
 - Un **nettoyage du stem** (`.nii.gz` → nom de base propre) pour éviter les dossiers `X.nii`.
 - Une option « fichier plat dans le dossier de sortie » (sans sous-dossier par scan) : la cardinalité 1 sous-dossier + 1 fichier par scan complique les traitements batch en aval.
-- Un petit **rapport récapitulatif** (CSV/JSON : scan, classe(s) détectée(s), volumes par label, temps) — le module classifie Buccal/Bicortical/Palatal mais n'exporte aujourd'hui **aucune donnée de classification**, uniquement le masque ; c'est la sortie la plus utile qui manque au vu du rôle annoncé de l'outil (classification de canines incluses).
+- Un petit **rapport récapitulatif** (CSV/JSON : scan, classe(s) détectée(s), volumes par label, temps) - le module classifie Buccal/Bicortical/Palatal mais n'exporte aujourd'hui **aucune donnée de classification**, uniquement le masque ; c'est la sortie la plus utile qui manque au vu du rôle annoncé de l'outil (classification de canines incluses).
 - Un code de retour/erreur structuré du runner (tag `[ERROR]`) pour que le widget signale les scans en échec au lieu de continuer silencieusement.

@@ -41,7 +41,7 @@ Chaque étape est **indépendante** : il n'y a aucun chaînage automatique des d
 (chaque `Process()` ne renvoie qu'**une** entrée de `list_Processes_Parameters`,
 p. ex. `MRI2CBCT/MRI2CBCT_utils/Preprocess_MRI.py:76-95`).
 
-### Étape 1 — Orientation + centrage MRI (`MRI2CBCT_ORIENT_CENTER_MRI`)
+### Étape 1 - Orientation + centrage MRI (`MRI2CBCT_ORIENT_CENTER_MRI`)
 
 Widget `orientCenterMRI` (`MRI2CBCT/MRI2CBCT.py:1621-1671`) → `Process_MRI.Process`
 (`MRI2CBCT/MRI2CBCT_utils/Preprocess_MRI.py:76-95`) → CLI
@@ -50,7 +50,7 @@ Le CLI applique une nouvelle matrice de direction (`:61`), remplace éventuellem
 et recalcule l'origine pour « centrer » le volume avec une permutation d'axes codée en dur pour l'IRM
 (`:44-53`, `new_origin = [z/2, -x/2, y/2]`).
 
-### Étape 2 — Cropping gauche/droite (`MRI2CBCT_LR_CROP`)
+### Étape 2 - Cropping gauche/droite (`MRI2CBCT_LR_CROP`)
 
 Widget `lrCropMRI2CBCT` (`MRI2CBCT/MRI2CBCT.py:1555-1619`) → `LR_CROP_MRI2CBCT.Process`
 (`MRI2CBCT/MRI2CBCT_utils/LR_crop.py:85-104`) → CLI
@@ -58,7 +58,7 @@ Widget `lrCropMRI2CBCT` (`MRI2CBCT/MRI2CBCT.py:1555-1619`) → `LR_CROP_MRI2CBCT
 L'IRM est coupée **selon Z** (`MRI2CBCT_CLI/MRI2CBCT_CLI_utils/LR_crop.py:20-26`), le CBCT et la segmentation
 **selon X** (`:44-50`), avec inversion des étiquettes L/R si la direction X est négative (`:52-56`).
 
-### Étape 3 — Ré-échantillonnage (`MRI2CBCT_RESAMPLE_CBCT_MRI`)
+### Étape 3 - Ré-échantillonnage (`MRI2CBCT_RESAMPLE_CBCT_MRI`)
 
 Widget `resampleMRICBCT` (`MRI2CBCT/MRI2CBCT.py:1673-1784`) → `Preprocess_CBCT_MRI.Process`
 (`MRI2CBCT/MRI2CBCT_utils/Preprocess_CBCT_MRI.py:102-126`) → CLI
@@ -67,7 +67,7 @@ Le CLI construit d'abord un CSV d'inventaire (`MRI2CBCT_CLI/MRI2CBCT_CLI_utils/r
 puis ré-échantillonne fichier par fichier (`MRI2CBCT_CLI/MRI2CBCT_CLI_utils/resample.py:29-123`) et **supprime le CSV**
 (`MRI2CBCT_RESAMPLE_CBCT_MRI.py:122-133`).
 
-### Étape 4 — Approximation
+### Étape 4 - Approximation
 
 **Automatique** : `approximateMRI` (`MRI2CBCT/MRI2CBCT.py:1997-2080`) → `Approximation_MRI2CBCT.Process`
 (`MRI2CBCT/MRI2CBCT_utils/Approx_MRI2CBCT.py:86-117`) → CLI
@@ -84,7 +84,7 @@ La transformation finale est calculée **dans Slicer** par `finalizeApproximatio
 `MRI2CBCT/MRI2CBCT_utils/ManualApprox_MRI2CBCT.py:68-221`) : 6 sliders rotation/translation, poignées
 interactives Slicer, bouton « Center MRI on CBCT », sauvegarde par `onConfirm` (`:436-488`).
 
-### Étape 5 — Crop ATM (`MRI2CBCT_TMJ_CROP`)
+### Étape 5 - Crop ATM (`MRI2CBCT_TMJ_CROP`)
 
 Widget `tmjCropMRI2CBCT` (`MRI2CBCT/MRI2CBCT.py:1493-1553`) → `TMJ_CROP_MRI2CBCT.Process`
 (`MRI2CBCT/MRI2CBCT_utils/TMJ_crop.py:105-130`) → CLI
@@ -93,7 +93,7 @@ Même segmentation nnUNet que l'approximation (`condyle_segmentation.segment_con
 **fixée à 400×400×400 voxels** centrée sur le centroïde du masque (`MRI2CBCT_TMJ_CROP.py:33-34, 96-107`),
 puis rééchantillonnage du CBCT et de la segmentation sur la grille de l'IRM recadrée (`:134-149`).
 
-### Étape 6 — Registration (`MRI2CBCT_REG`)
+### Étape 6 - Registration (`MRI2CBCT_REG`)
 
 Widget `registration_MR2CBCT` (`MRI2CBCT/MRI2CBCT.py:1882-1946`) → `Registration_MRI2CBCT.Process`
 (`MRI2CBCT/MRI2CBCT_utils/Reg_MRI2CBCT.py:108-129`) → CLI
@@ -113,27 +113,27 @@ Widget `registration_MR2CBCT` (`MRI2CBCT/MRI2CBCT.py:1882-1946`) → `Registrati
 
 | Étape | Champ UI | Type | Extensions **réellement** traitées | Récursif ? | Référence |
 |---|---|---|---|---|---|
-| Orientation | `LineEditMRI` | dossier (`getExistingDirectory`) | `.nii`, `.nii.gz` (CLI) — validation UI accepte aussi `.nrrd` | UI : oui ; CLI : oui (`os.walk`) | `MRI2CBCT.py:1266-1272`, `MRI2CBCT_ORIENT_CENTER_MRI.py:89-93`, `Preprocess_MRI.py:47` |
-| Orientation | table `tableWidgetOrient` (3×3 + colonne « Negative ») | 9 entiers ∈ {-1,0,1} | — | — | `MRI2CBCT.py:451-480`, `845-862` |
-| Orientation | `checkBoxBilateralMRI` + `AcquisitionSpacing` | booléen + float (mm) | — | — | `MRI2CBCT.py:1631-1634` |
-| Orientation | `comboBoxDICOMVolumes` | nœud DICOM chargé | — | — | `MRI2CBCT.py:692-738` (**affichage seul**) |
-| Orientation | `lineEditOutputOrientMRI` | dossier | — | — | `MRI2CBCT.py:1319-1321` |
+| Orientation | `LineEditMRI` | dossier (`getExistingDirectory`) | `.nii`, `.nii.gz` (CLI) - validation UI accepte aussi `.nrrd` | UI : oui ; CLI : oui (`os.walk`) | `MRI2CBCT.py:1266-1272`, `MRI2CBCT_ORIENT_CENTER_MRI.py:89-93`, `Preprocess_MRI.py:47` |
+| Orientation | table `tableWidgetOrient` (3×3 + colonne « Negative ») | 9 entiers ∈ {-1,0,1} | - | - | `MRI2CBCT.py:451-480`, `845-862` |
+| Orientation | `checkBoxBilateralMRI` + `AcquisitionSpacing` | booléen + float (mm) | - | - | `MRI2CBCT.py:1631-1634` |
+| Orientation | `comboBoxDICOMVolumes` | nœud DICOM chargé | - | - | `MRI2CBCT.py:692-738` (**affichage seul**) |
+| Orientation | `lineEditOutputOrientMRI` | dossier | - | - | `MRI2CBCT.py:1319-1321` |
 | L/R crop | `lineEditSepCBCT`, `lineEditSepMRI`, `lineEditSepSeg` | dossiers (0 à 3 fournis) | `.nii`, `.nii.gz` | **non** (`glob` à plat) | `MRI2CBCT.py:1343-1353`, `MRI2CBCT_LR_CROP.py:33` |
-| L/R crop | `lineEditSepOut` | dossier | — | — | `MRI2CBCT.py:1355-1357` |
+| L/R crop | `lineEditSepOut` | dossier | - | - | `MRI2CBCT.py:1355-1357` |
 | Resample | `lineEditResampleMRI` / `…T2MRI` / `…CBCT` / `…T2CBCT` / `…Seg` / `…T2Seg` | dossiers | `.nii`, `.nii.gz` | oui (`os.walk`) | `MRI2CBCT.py:1295-1317`, `resample_create_csv.py:62-65` |
-| Resample | `tableWidgetResample` | 3 entiers (taille) + 3 flottants (spacing) + 2 cases « Keep » | — | — | `MRI2CBCT.py:518-616`, `643-675` |
-| Resample | `checkBoxCenterImage` (coché par défaut) | booléen → `"True"`/`"False"` | — | — | `MRI2CBCT.py:1711`, `MRI2CBCT.ui:356-362` |
-| Resample | `lineEditOuputResample` | dossier | — | — | `MRI2CBCT.py:1323-1325` |
+| Resample | `tableWidgetResample` | 3 entiers (taille) + 3 flottants (spacing) + 2 cases « Keep » | - | - | `MRI2CBCT.py:518-616`, `643-675` |
+| Resample | `checkBoxCenterImage` (coché par défaut) | booléen → `"True"`/`"False"` | - | - | `MRI2CBCT.py:1711`, `MRI2CBCT.ui:356-362` |
+| Resample | `lineEditOuputResample` | dossier | - | - | `MRI2CBCT.py:1323-1325` |
 | Approx | `lineEditApproxCBCT`, `lineEditApproxMRI` | dossier **ou** volume de la scène | `.nii`, `.nii.gz` (pas `.nrrd`) | oui (`os.walk`) | `MRI2CBCT.py:1331-1337`, `1948-1995`, `approximate.py:58-74`, `Approx_MRI2CBCT.py:55-63` |
-| Approx | `lineEditOutputApprox` | dossier | — | — | `MRI2CBCT.py:1339-1341` |
-| Approx | modèle nnUNet | téléchargé automatiquement | `.pth` + `dataset.json` + `plans.json` | — | `MRI2CBCT.py:1233-1260`, `2008-2011` |
-| TMJ crop | `lineEditCropTMJCBCT`, `…MRI`, `…Seg` | dossiers (**3 obligatoires**) | `.nii.gz`, `.nii`, `.nrrd`, `.nrrd.gz`, `.gipl`, `.gipl.gz` (appariement) — mais lecture `nibabel` ⇒ NIfTI seulement | oui (`rglob`) | `MRI2CBCT.py:1359-1369`, `MRI2CBCT_CLI/MRI2CBCT_CLI_utils/TMJ_crop.py:58-83` |
-| TMJ crop | `lineEditTMJModel` (+ bouton Download) | dossier modèle nnUNet | `fold_0/checkpoint_final.pth`, `dataset.json`, `plans.json` | — | `MRI2CBCT.py:1192-1203`, `TMJ_crop.py:62-74` |
-| TMJ crop | `lineEditCropTMJOut` | dossier | — | — | `MRI2CBCT.py:1371-1373` |
+| Approx | `lineEditOutputApprox` | dossier | - | - | `MRI2CBCT.py:1339-1341` |
+| Approx | modèle nnUNet | téléchargé automatiquement | `.pth` + `dataset.json` + `plans.json` | - | `MRI2CBCT.py:1233-1260`, `2008-2011` |
+| TMJ crop | `lineEditCropTMJCBCT`, `…MRI`, `…Seg` | dossiers (**3 obligatoires**) | `.nii.gz`, `.nii`, `.nrrd`, `.nrrd.gz`, `.gipl`, `.gipl.gz` (appariement) - mais lecture `nibabel` ⇒ NIfTI seulement | oui (`rglob`) | `MRI2CBCT.py:1359-1369`, `MRI2CBCT_CLI/MRI2CBCT_CLI_utils/TMJ_crop.py:58-83` |
+| TMJ crop | `lineEditTMJModel` (+ bouton Download) | dossier modèle nnUNet | `fold_0/checkpoint_final.pth`, `dataset.json`, `plans.json` | - | `MRI2CBCT.py:1192-1203`, `TMJ_crop.py:62-74` |
+| TMJ crop | `lineEditCropTMJOut` | dossier | - | - | `MRI2CBCT.py:1371-1373` |
 | Registration | `lineEditRegMRI`, `lineEditRegCBCT`, `lineEditRegLabel` | dossiers | `.nii.gz` **quasi exclusivement** (voir ci-dessous) | UI : oui ; CLI : **non** | `MRI2CBCT.py:1274-1293`, `mri_inverse.py:34`, `normalize_percentile.py:73`, `AREG_MRI.py:131` |
-| Registration | `tableWidgetNorm` (2×4) | 8 entiers | — | — | `MRI2CBCT.py:484-514`, `1134-1153` |
-| Registration | `checkBoxTompraryFold` | booléen | — | — | `MRI2CBCT.py:1897`, `MRI2CBCT_REG.py:202` |
-| Registration | `LineEditOutput` | dossier | — | — | `MRI2CBCT.py:1327-1329` |
+| Registration | `tableWidgetNorm` (2×4) | 8 entiers | - | - | `MRI2CBCT.py:484-514`, `1134-1153` |
+| Registration | `checkBoxTompraryFold` | booléen | - | - | `MRI2CBCT.py:1897`, `MRI2CBCT_REG.py:202` |
+| Registration | `LineEditOutput` | dossier | - | - | `MRI2CBCT.py:1327-1329` |
 
 ### Détail par étape
 
@@ -142,7 +142,7 @@ Widget `registration_MR2CBCT` (`MRI2CBCT/MRI2CBCT.py:1882-1946`) → `Registrati
 - **Sélecteur fichier/dossier neutralisé.** Le `.ui` propose `ComboBoxMRI` avec `File`/`Folder`
   (`MRI2CBCT.ui:569-580`) et `openFinder` en tient compte (`MRI2CBCT.py:1266-1272`), mais le combo est
   **forcé à « Folder » puis désactivé et masqué** (`MRI2CBCT.py:405-406`, `433`). Le mode fichier unique est
-  donc inaccessible — et de toute façon inopérant côté CLI (`os.walk` sur un fichier ne renvoie rien).
+  donc inaccessible - et de toute façon inopérant côté CLI (`os.walk` sur un fichier ne renvoie rien).
 - **Validation UI vs CLI.** `Process_MRI.TestScan` accepte `.nii`, `.nii.gz`, `.nrrd`
   (`MRI2CBCT_utils/Preprocess_MRI.py:47`), avec un `glob.iglob(..., recursive=True)`
   (`MRI2CBCT_utils/Method.py:92-101`) ; le CLI ne traite que `.nii`/`.nii.gz`
@@ -197,7 +197,7 @@ Widget `registration_MR2CBCT` (`MRI2CBCT/MRI2CBCT.py:1882-1946`) → `Registrati
   (`MRI2CBCT.py:1233-1260`), `nnUNet_results` étant déduit de `model_folder.parent.parent`
   (`condyle_segmentation.py:49`).
 - **Approximation manuelle** : les volumes viennent soit des sélecteurs de scène, soit du **premier** NIfTI
-  trouvé à plat dans les dossiers Approx (`ManualApprox_MRI2CBCT.py:227-232`, `268-294`) — un seul patient à
+  trouvé à plat dans les dossiers Approx (`ManualApprox_MRI2CBCT.py:227-232`, `268-294`) - un seul patient à
   la fois.
 
 #### Crop ATM
@@ -208,7 +208,7 @@ Widget `registration_MR2CBCT` (`MRI2CBCT/MRI2CBCT.py:1882-1946`) → `Registrati
   patient : ils ne sont rattachés qu'à un patient déjà vu côté CBCT ou IRM (`:70-82`).
 - Un patient est ignoré si l'un des trois fichiers manque (`MRI2CBCT_TMJ_CROP.py:169-171`) et **re-skippé**
   s'il existe déjà `MRI/<pid>_MRI_TMJ_crop*.nii.gz` dans la sortie (`:173-176`).
-- Extensions listées : `.nii.gz`, `.nii`, `.nrrd`, `.nrrd.gz`, `.gipl`, `.gipl.gz` (`TMJ_crop.py:59`) —
+- Extensions listées : `.nii.gz`, `.nii`, `.nrrd`, `.nrrd.gz`, `.gipl`, `.gipl.gz` (`TMJ_crop.py:59`) - 
   mais la lecture se fait par `nibabel` (`MRI2CBCT_TMJ_CROP.py:69-70`) : un `.nrrd` sera apparié puis fera
   échouer le patient.
 
@@ -216,14 +216,14 @@ Widget `registration_MR2CBCT` (`MRI2CBCT/MRI2CBCT.py:1882-1946`) → `Registrati
 
 - Les trois combos `File`/`Folder` sont **forcés à « Folder », désactivés et masqués**
   (`MRI2CBCT.py:422-427`, `434-436`) : seul le mode dossier existe.
-- **Extensions effectivement supportées** — la chaîne complète n'accepte en pratique que `.nii.gz` :
+- **Extensions effectivement supportées** - la chaîne complète n'accepte en pratique que `.nii.gz` :
   - inversion IRM : `os.listdir` **non récursif**, `.nii` et `.nii.gz` (`mri_inverse.py:34-35`) ;
   - normalisation : **`.nii.gz` uniquement** (`normalize_percentile.py:73`) ⇒ une IRM `.nii` est inversée
     puis silencieusement abandonnée ;
   - masquage : récursif, `.nii`/`.nii.gz`, et le nom **doit contenir** `_CBCT` ou `_MR`
     (`apply_mask.py:113-121`) ;
   - recalage : `os.listdir(cbct_folder)` non récursif, fichiers `.nii.gz` contenant `_CBCT`
-    (`AREG_MRI.py:131-134`) — sinon `ValueError`.
+    (`AREG_MRI.py:131-134`) - sinon `ValueError`.
   La validation UI (`Reg_MRI2CBCT.TestScan`, `MRI2CBCT_utils/Reg_MRI2CBCT.py:46-52`) accepte pourtant
   `.nii`, `.nii.gz` et `.nrrd`, récursivement.
 - **Convention de nommage obligatoire** (documentée dans les messages d'erreur, `AREG_MRI.py:145-149`) :
@@ -232,7 +232,7 @@ Widget `registration_MR2CBCT` (`MRI2CBCT/MRI2CBCT.py:1882-1946`) → `Registrati
   - masque/segmentation : `PATIENTID_CBCT*.nii.gz`
   L'appariement est fait par préfixe `f"{patient_id}_{modality}"` avec exigence que le reste commence par
   `_` ou soit l'extension (`AREG_MRI.py:98-111`). La segmentation, elle, est retrouvée par un simple
-  `startswith(patient_id)` (`apply_mask.py:83-98`) — premier fichier trouvé, ordre `os.listdir` non trié.
+  `startswith(patient_id)` (`apply_mask.py:83-98`) - premier fichier trouvé, ordre `os.listdir` non trié.
 - **Normalisation** : table 2×4 (MRI puis CBCT ; min/max de normalisation, percentiles min/max)
   (`MRI2CBCT.py:484-514`). Deux presets : `Default 1` = `[[0,100,0,100],[0,75,10,95]]`, `Default 2` =
   `[[0,100,10,95],[0,100,10,95]]` (`MRI2CBCT.py:1166-1175`). Vérification min<max avant lancement
@@ -261,7 +261,7 @@ Widget `registration_MR2CBCT` (`MRI2CBCT/MRI2CBCT.py:1882-1946`) → `Registrati
 **Orientation** (`MRI2CBCT_ORIENT_CENTER_MRI.py:99-105`) : sortie **à plat**, l'arborescence d'entrée est
 perdue ; deux fichiers homonymes dans deux sous-dossiers s'écrasent. L'extension de sortie suit celle
 d'entrée (`extract_id` renvoie un drapeau `type_file`, `:23-42`). Si `output_folder` est vide, le CLI
-écrirait dans le dossier d'entrée (`:82`) — cas empêché par la validation UI (`Preprocess_MRI.py:63-65`).
+écrirait dans le dossier d'entrée (`:82`) - cas empêché par la validation UI (`Preprocess_MRI.py:63-65`).
 
 **L/R crop** (`MRI2CBCT_CLI/MRI2CBCT_CLI_utils/LR_crop.py:34-38`, `65-69`) : deux fichiers par entrée.
 Attention, pour le CBCT les noms sont **volontairement croisés** (le ROI « left » est écrit sous
@@ -293,7 +293,7 @@ demi-CBCT et grille IRM recadrée). Si le masque est vide, seul `Mask/` est écr
 abandonné (`:88-90`) ; si l'intersection de la boîte avec le volume est nulle, rien n'est écrit pour ce
 volume (`:53-55`).
 
-**Registration** (`MRI2CBCT_REG.py:38-125`) — arborescence produite sous `folder_general` :
+**Registration** (`MRI2CBCT_REG.py:38-125`) - arborescence produite sous `folder_general` :
 
 ```
 a01_MRI_inv/                                    <base>_inv.nii(.gz)
@@ -319,9 +319,9 @@ Le volume recalé est produit par ré-échantillonnage de l'IRM **originale** su
 | Étape | Fichier unique possible ? | Récursivité réelle |
 |---|---|---|
 | Orientation | Non (combo File masqué, `MRI2CBCT.py:405-406`, `433`) | **Oui** (`os.walk`, `MRI2CBCT_ORIENT_CENTER_MRI.py:90`) |
-| L/R crop | Non | **Non** (`glob` à plat, `MRI2CBCT_LR_CROP.py:33`) — divergence avec la validation UI récursive |
+| L/R crop | Non | **Non** (`glob` à plat, `MRI2CBCT_LR_CROP.py:33`) - divergence avec la validation UI récursive |
 | Resample | Non | **Oui** (`os.walk`, `resample_create_csv.py:62`) mais sortie aplatie |
-| Approx (auto) | **Oui** — chemin de fichier accepté des deux côtés (`approximate.py:101-110`), et mode « Scene Volume » (`MRI2CBCT.py:2013-2033`) | Oui (`os.walk`) |
+| Approx (auto) | **Oui** - chemin de fichier accepté des deux côtés (`approximate.py:101-110`), et mode « Scene Volume » (`MRI2CBCT.py:2013-2033`) | Oui (`os.walk`) |
 | Approx (manuel) | Oui de fait (1er NIfTI du dossier ou nœud de la scène) | **Non** (`glob` à plat, `ManualApprox_MRI2CBCT.py:229`) |
 | TMJ crop | Non | **Oui** (`Path.rglob`, `MRI2CBCT_CLI/MRI2CBCT_CLI_utils/TMJ_crop.py:19`) |
 | Registration | Non (combos masqués, `MRI2CBCT.py:434-436`) | **Non** pour l'IRM (`mri_inverse.py:34`), le CBCT (`normalize_percentile.py:72`) et le listing CBCT (`AREG_MRI.py:131`) ; **oui** pour le masquage (`apply_mask.py:113`) et la recherche par patient (`AREG_MRI.py:104`) |
@@ -360,7 +360,7 @@ n'explorent pas.
    la logique existe dans `openFinder` mais les combos sont forcés, désactivés et masqués
    (`MRI2CBCT.py:405-406`, `422-427`, `433-436`).
 7. **`iso_spacing`** : `resample_fn` teste `if(iso_spacing=="True")` (`resample.py:78`) alors que la valeur
-   passée est toujours le booléen `False` (`MRI2CBCT_RESAMPLE_CBCT_MRI.py:104-113`) — branche morte.
+   passée est toujours le booléen `False` (`MRI2CBCT_RESAMPLE_CBCT_MRI.py:104-113`) - branche morte.
    Le paramètre nommé `iso_spacing` de `main()` sert en réalité de drapeau « c'est une IRM »
    (`:94`, `isMRI = 1 if iso_spacing else 0`).
 8. **Miroir droite/gauche** (`resample.py:57-59`, `119-121`) conditionné à `not center` alors que
@@ -389,15 +389,15 @@ n'explorent pas.
 14. **`resample.py:175` et `:201`** utilisent `args.ow` alors que `args` est un **dictionnaire**
     (`AttributeError`) ; ces branches (`--dir`, `--csv`) ne sont pas empruntées par le module, mais le sont
     par un appel en ligne de commande.
-15. **`resample.py:240`** : `logger.warning(e, file=sys.stderr)` — `file` n'est pas un argument valide de
+15. **`resample.py:240`** : `logger.warning(e, file=sys.stderr)` - `file` n'est pas un argument valide de
     `logging` ⇒ le gestionnaire d'exception lève lui-même une `TypeError`.
-16. **`apply_mask.py:38`** : `logger.warning("failed process on : ", fixed_image_sitk)` — même famille
+16. **`apply_mask.py:38`** : `logger.warning("failed process on : ", fixed_image_sitk)` - même famille
     d'erreur (argument de formatage manquant).
 17. **Approximation manuelle depuis la scène** : `onConfirm` utilise `self._mri_path`, laissé à `None` quand
     le volume vient d'un sélecteur de scène (`ManualApprox_MRI2CBCT.py:247`) ⇒ `os.path.basename(None)`
     lève une exception, capturée et affichée comme « Error: … » (`:461-462`, `:485-487`).
 18. **Nom de package erroné** : `install_function` cherche/installe `nnunet_version==2.8.0`
-    (`MRI2CBCT.py:94`), qui n'est pas le nom PyPI de nnUNet v2 (`nnunetv2`) — la vérification échoue
+    (`MRI2CBCT.py:94`), qui n'est pas le nom PyPI de nnUNet v2 (`nnunetv2`) - la vérification échoue
     systématiquement et l'installation proposée échouera. Le CLI TMJ importe pourtant
     `nnunetv2.inference.predict_from_raw_data` (`MRI2CBCT_TMJ_CROP.py:5`), import **inutilisé** au demeurant
     (la prédiction passe par le sous-processus `nnUNetv2_predict`, `condyle_segmentation.py:57-71`).
@@ -410,13 +410,13 @@ n'explorent pas.
     sous-dossiers différents s'écrasent silencieusement.
 22. **f-strings avec guillemets imbriqués identiques** (`MRI2CBCT.py:1538-1539`, `1606-1607`, `1657-1658`,
     `1770-1771`, `1932-1933`, `2066-2067`, `resample.py:233`) : syntaxe valide uniquement à partir de
-    Python 3.12 — le module ne se charge pas sur un Slicer basé sur Python ≤ 3.11.
+    Python 3.12 - le module ne se charge pas sur un Slicer basé sur Python ≤ 3.11.
 23. **Barre de progression** : l'UI affiche « Progress bar is currently not working for this module » pour le
     crop TMJ (`MRI2CBCT.py:1547`), et le CLI TMJ n'émet effectivement aucun `<filter-progress>`.
 
 ---
 
-## Avis — entrées/sorties à ajouter ou retirer
+## Avis - entrées/sorties à ajouter ou retirer
 
 ### À ajouter
 

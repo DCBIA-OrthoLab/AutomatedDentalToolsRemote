@@ -6,7 +6,7 @@
 # as a fixture, against the qt/ctk/slicer stand-ins in
 # ServerToolsCore/Testing/Python/qt_stubs.py. Pure Python once the widgets are
 # stubbed, so it is registered as a plain Python3 ctest rather than through
-# slicer_add_python_unittest — no Slicer interpreter launch needed. Same
+# slicer_add_python_unittest - no Slicer interpreter launch needed. Same
 # rationale as ServerToolsCore/Testing/Python/CMakeLists.txt.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 

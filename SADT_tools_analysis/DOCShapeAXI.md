@@ -27,10 +27,10 @@ Le CLI enchaîne systématiquement deux étapes : `saxi_predict` puis `saxi_grad
 
 | Entrée (widget) | Type | Extensions réellement acceptées | Où c'est défini / vérifié |
 |---|---|---|---|
-| `dataTypeComboBox` (« Data Type ») | liste fermée de 3 valeurs | — | items : `DOCShapeAXI/Resources/UI/DOCShapeAXI.ui:350-366` ; lu `DOCShapeAXI/DOCShapeAXI.py:448-449` |
+| `dataTypeComboBox` (« Data Type ») | liste fermée de 3 valeurs | - | items : `DOCShapeAXI/Resources/UI/DOCShapeAXI.ui:350-366` ; lu `DOCShapeAXI/DOCShapeAXI.py:448-449` |
 | `mountPointLineEdit` (« Input folder ») | **dossier uniquement** (jamais un fichier) | **`.vtk` seulement** | dialogue dossier : `DOCShapeAXI/DOCShapeAXI.py:439-443` ; validation `os.path.isdir` : `:484` ; filtre `.vtk` : `:990` et `DOCShapeAXI_CLI/DOCShapeAXI_CLI.py:110` |
-| `outputLineEdit` (« Output directory ») | dossier | — | `DOCShapeAXI/DOCShapeAXI.py:455-464` ; validation `os.path.isdir` : `:471-476` |
-| `checkBoxLatestModel` (« Use the latest version on Github ») | case à cocher, **désactivée** (`enabled=false`) et jamais connectée en Python | — | `DOCShapeAXI/Resources/UI/DOCShapeAXI.ui:392-407` ; aucune occurrence dans `DOCShapeAXI/DOCShapeAXI.py` |
+| `outputLineEdit` (« Output directory ») | dossier | - | `DOCShapeAXI/DOCShapeAXI.py:455-464` ; validation `os.path.isdir` : `:471-476` |
+| `checkBoxLatestModel` (« Use the latest version on Github ») | case à cocher, **désactivée** (`enabled=false`) et jamais connectée en Python | - | `DOCShapeAXI/Resources/UI/DOCShapeAXI.ui:392-407` ; aucune occurrence dans `DOCShapeAXI/DOCShapeAXI.py` |
 
 Aucune autre entrée : pas de nœud MRML, pas de sélection de fichier unique, pas de paramètre de batch,
 de device, de seuil ou de nombre de workers exposé à l'utilisateur.
@@ -45,11 +45,11 @@ Détails importants :
   de `:112` ne se déclenche que pour un `.vtk` disparu entre le `listdir` et le test, cas quasi impossible).
   La comparaison est sensible à la casse : un fichier `.VTK` est ignoré.
   À noter : la bibliothèque sous-jacente saurait lire `.vtk`, `.vtp`, `.stl`, `.off`, `.obj`
-  (`shapeaxi/utils.py:254-284`, fonction `ReadSurf`) — la restriction vient uniquement de SADT.
+  (`shapeaxi/utils.py:254-284`, fonction `ReadSurf`) - la restriction vient uniquement de SADT.
 - **Pas de scan récursif** : `os.listdir(surf_dir)` (`DOCShapeAXI_CLI/DOCShapeAXI_CLI.py:108`) et
   `os.listdir(self.input_dir)` (`DOCShapeAXI/DOCShapeAXI.py:988`). Seul le premier niveau du dossier est lu ;
   les sous-dossiers sont ignorés. L'ordre est celui de `listdir`, donc **non trié et non déterministe**.
-- **Types de classification disponibles** (3 items d'UI, mappés vers 5 modèles) — `DOCShapeAXI/DOCShapeAXI.py:1015-1042`
+- **Types de classification disponibles** (3 items d'UI, mappés vers 5 modèles) - `DOCShapeAXI/DOCShapeAXI.py:1015-1042`
   et boucle de tâches `:627-658` :
 
   | Data Type (UI) | Tâche(s) lancée(s) | Modèle | `nn` | `num_classes` |
@@ -74,7 +74,7 @@ Détails importants :
   obligatoire** : `torch.version.cuda.replace(...)` plante en CPU-only). Sous Windows, WSL + libs
   `libxrender1`/`libgl1` sont vérifiés (`DOCShapeAXI/DOCShapeAXI.py:869-883`).
 - **Entrées implicites non exposées** : le device est choisi automatiquement
-  (`cuda` si disponible, sinon `cpu` — `DOCShapeAXI_CLI/DOCShapeAXI_CLI.py:264`) ; `batch_size` est figé
+  (`cuda` si disponible, sinon `cpu` - `DOCShapeAXI_CLI/DOCShapeAXI_CLI.py:264`) ; `batch_size` est figé
   à 1 (`:210`, `:144`) ; `num_workers=4` pour l'explicabilité (`:144`).
 
 ## Sorties
@@ -94,7 +94,7 @@ Nommage, cardinalité et variations :
 
 - **Le nom des CSV contient le libellé d'UI complet, espaces compris** : `files_Mandibular Condyle.csv`,
   `files_Nasopharynx Airway Obstruction_prediction.csv`, etc. (`DOCShapeAXI_CLI/DOCShapeAXI_CLI.py:267`,
-  `:240`). C'est le seul « suffixe » configurable — indirectement, via le type de données.
+  `:240`). C'est le seul « suffixe » configurable - indirectement, via le type de données.
 - **Colonnes de prédiction** : la colonne s'appelle `<task>_prediction`
   (`DOCShapeAXI_CLI/DOCShapeAXI_CLI.py:244`). Donc :
   - Condyle / Cleft → CSV à 2 colonnes : `surf`, `severity_prediction` (entiers 0-3, issus d'un
@@ -113,7 +113,7 @@ Nommage, cardinalité et variations :
   condyle/cleft/airway-severity, **2** pour airway-binary, **1** (`grad_cam_max`) pour airway-regression.
   Chaque tableau est lissé par `psp.MedianFilter` (`DOCShapeAXI_CLI/DOCShapeAXI_CLI.py:180`).
   Le fichier est réécrit à chaque itération de classe (`:182-183` est **dans** la boucle `for class_idx`),
-  soit `num_classes` écritures pour un seul résultat final — coûteux mais correct.
+  soit `num_classes` écritures pour un seul résultat final - coûteux mais correct.
 - **Total pour N formes** : condyle ou cleft → 1 CSV manifeste + 1 CSV prédiction (N lignes) + 1 `.ckpt`
   + N `.vtk`. Airway → 1 CSV manifeste + 1 CSV prédiction (N lignes, 3 colonnes de prédiction)
   + 3 `.ckpt` + 3N `.vtk`.
@@ -127,7 +127,7 @@ Nommage, cardinalité et variations :
 - Le bouton d'entrée ouvre un `QFileDialog.getExistingDirectory` (`DOCShapeAXI/DOCShapeAXI.py:440`),
   libellé « Select a folder containing vtk files ».
 - La validation exige `os.path.isdir(self.logic.input_dir)` (`DOCShapeAXI/DOCShapeAXI.py:484`) : un chemin
-  vers un `.vtk` est refusé avec « input file : Incorrect path » — message trompeur, il parle de « file »
+  vers un `.vtk` est refusé avec « input file : Incorrect path » - message trompeur, il parle de « file »
   alors qu'il teste un dossier.
 - Le CLI fait `os.listdir(args.input_dir)` sans garde (`DOCShapeAXI_CLI/DOCShapeAXI_CLI.py:108`) : un chemin
   de fichier lèverait `NotADirectoryError`.
@@ -190,7 +190,7 @@ Nommage, cardinalité et variations :
     dans la sortie. En installation système en lecture seule, l'ouverture en écriture du `:816` échoue dès
     l'instanciation de la logique. Le fichier est d'ailleurs versionné dans le dépôt.
 13. **Validation d'entrée redondante et message erroné** : `if not(os.path.isdir(...)): if not(os.path.isdir(...)):`
-    (`DOCShapeAXI/DOCShapeAXI.py:471-472`) — la branche `else: msg.setText('Unknown error.')` est
+    (`DOCShapeAXI/DOCShapeAXI.py:471-472`) - la branche `else: msg.setText('Unknown error.')` est
     inatteignable. Et le message d'erreur d'entrée dit « input file » pour un dossier (`:485`).
 14. **Aucune vérification que le dossier d'entrée contient bien des formes du bon type** : rien n'empêche de
     lancer le modèle « condyle » sur des voies aériennes ; la sortie sera silencieusement absurde.
@@ -211,7 +211,7 @@ Nommage, cardinalité et variations :
     avec une erreur obscure. Cas atteignable uniquement si l'on modifie les libellés de la combo, puisque le
     mapping repose sur des mots-clés extraits du texte de l'UI (`DOCShapeAXI/DOCShapeAXI.py:1016, 1020, 1035`).
 
-## Avis — entrées/sorties à ajouter ou retirer
+## Avis - entrées/sorties à ajouter ou retirer
 
 **À ajouter en entrée**
 
@@ -219,7 +219,7 @@ Nommage, cardinalité et variations :
   déjà les lire (`shapeaxi/utils.py:254-284`). Il suffit d'élargir le filtre de
   `DOCShapeAXI_CLI/DOCShapeAXI_CLI.py:110` et `DOCShapeAXI/DOCShapeAXI.py:990` à une liste commune, avec
   comparaison insensible à la casse. Attention : `WriteSurf` ne gère que `.vtk` et `.stl`
-  (`shapeaxi/utils.py:341-354`), et un `.stl` de sortie **perdrait les tableaux GradCAM** — il faut donc
+  (`shapeaxi/utils.py:341-354`), et un `.stl` de sortie **perdrait les tableaux GradCAM** - il faut donc
   forcer l'extension de sortie à `.vtk` quelle que soit celle de l'entrée.
 - **Sélection fichier unique ou nœud MRML**, à la manière des autres modules SADT : pour tester un cas
   isolé, l'obligation de créer un dossier est pénible.

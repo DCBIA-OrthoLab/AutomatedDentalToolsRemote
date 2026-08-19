@@ -1,4 +1,4 @@
-"""Unit tests for the ASO module's client behaviour — run outside Slicer, with
+"""Unit tests for the ASO module's client behaviour - run outside Slicer, with
 `qt`/`ctk`/`slicer` stubbed (ServerToolsCore/Testing/Python/qt_stubs.py).
 
 Two things are covered, and they fail for different reasons:
@@ -6,7 +6,7 @@ Two things are covered, and they fail for different reasons:
 * **What ASO's panel derives from its schema.** ASO declares nothing but
   TOOL_NAME, so every widget, every extension filter and the result handling
   come from `GET /tools`. These tests assert that the schema really does answer
-  all of it — if the server's schema changes shape, this is what notices, and
+  all of it - if the server's schema changes shape, this is what notices, and
   they are also what would catch someone "helpfully" re-adding a FILE_INPUTS or
   RESULT_KIND override that only repeats the server.
 * **Which result files get loaded, and how.** ASO returns four kinds of file
@@ -14,7 +14,7 @@ Two things are covered, and they fail for different reasons:
 
 `ASO.py` is imported here, which needs three `slicer` submodules qt_stubs does
 not provide. That is safe for what is under test: these functions are pure
-Python and never touch `slicer` — the stub only gets the import statement past
+Python and never touch `slicer` - the stub only gets the import statement past
 a Slicer that isn't running, so the test is not measuring the stub.
 
 Usage:
@@ -48,7 +48,7 @@ def _stub_slicer_module_framework():
 
     qt_stubs leaves `slicer` deliberately empty (design.is_dark_mode() reaches
     for slicer.app.palette() inside a try/except and wants it to fail), so the
-    module framework is added here rather than there — it is ASO's import that
+    module framework is added here rather than there - it is ASO's import that
     needs it, not the core library's.
     """
     slicer = sys.modules["slicer"]
@@ -95,7 +95,7 @@ def _load_aso_module():
 
     `import ASO` is ambiguous here and resolves the wrong way: the repository
     has a directory called ASO/, which Python 3 treats as a namespace package
-    whenever the repo root is on sys.path — so the import yields an empty
+    whenever the repo root is on sys.path - so the import yields an empty
     package rather than the module inside it, whatever the working directory
     happens to be.
     """
@@ -362,7 +362,7 @@ class SchemaDrivenPanelTest(unittest.TestCase):
 
     def test_four_arguments_form_a_complete_request(self):
         """Everything mode-specific is optional, so the inactive mode cannot
-        block a request — and the defaults come from the server."""
+        block a request - and the defaults come from the server."""
         required = [
             name for name, spec in ASO_SCHEMA["arguments"].items() if spec["required"]
         ]
@@ -433,13 +433,13 @@ class ResultDiscoveryTest(unittest.TestCase):
 
     def test_results_are_found_across_the_whole_tree(self):
         """The server preserves the input's folder structure, so a cohort's
-        results are nested — a non-recursive search would find nothing."""
+        results are nested - a non-recursive search would find nothing."""
         self._write("siteA/patient1_Or.nii.gz")
         self._write("siteB/nested/patient2_Or.nii.gz")
         self.assertEqual(len(ASOWidget._findResults(self.dir)), 2)
 
     def test_a_compressed_scan_is_not_counted_twice(self):
-        """"*.nii" must not also match "patient1_Or.nii.gz" — a double count
+        """"*.nii" must not also match "patient1_Or.nii.gz" - a double count
         would halve the effective load cap and load the same file twice."""
         self._write("patient1_Or.nii.gz")
         self.assertEqual(len(ASOWidget._findResults(self.dir)), 1)
@@ -453,7 +453,7 @@ _ARGUMENTS = ASO_SCHEMA["arguments"]
 
 
 def _hidden_in(**mode) -> set:
-    """The arguments whose `visible_when` is not satisfied — exactly what
+    """The arguments whose `visible_when` is not satisfied - exactly what
     base_widget._applyVisibility computes and what collectArgs then drops."""
     return {
         name for name, spec in _ARGUMENTS.items() if not formgen.is_visible(spec, mode)
@@ -555,7 +555,7 @@ class HiddenArgumentsAreNotSentTest(unittest.TestCase):
     widget happens to hold.
 
     A multichoice is read back as the complete {option: checked} dict and the
-    server reads what it receives AS the selection — so sending `ios_teeth`
+    server reads what it receives AS the selection - so sending `ios_teeth`
     with a CBCT run states a selection the user was never shown, and freezes it
     at whatever the widget was built with even after the default changes
     server-side.
@@ -733,7 +733,7 @@ class ServerSelectablesRefreshTest(unittest.TestCase):
 
     def test_an_optional_model_dropdown_leads_with_the_automatic_entry(self):
         """`landmark_models` is optional and the server picks the bundle when
-        it is absent — but a combo box selects its first item as soon as it is
+        it is absent - but a combo box selects its first item as soon as it is
         filled, so without this entry the panel always named SOMETHING. The
         list it is filled from holds ASO's reference bundles too, so that
         something was routinely a reference: 'No CBCT landmark weights found in
@@ -797,7 +797,7 @@ class BuiltPanelTest(unittest.TestCase):
     """Builds the real panel through ServerToolWidgetBase._buildAutoUI.
 
     The tests above check the schema states the right thing; this one checks
-    the widget actually acts on it — the two used to be the same assertion only
+    the widget actually acts on it - the two used to be the same assertion only
     because there was nothing between them but a single form layout.
     """
 
@@ -846,7 +846,7 @@ class BuiltPanelTest(unittest.TestCase):
 
     def test_the_outputs_box_stays_even_though_no_argument_of_it_is_required(self):
         """It holds the output folder picker, which belongs to no schema
-        argument — a section is only empty when nothing at all is in it."""
+        argument - a section is only empty when nothing at all is in it."""
         self._setMode("IOS", "Fully-Automated")
         self.assertIn("Outputs", self._visible_sections())
         self.assertIsNotNone(self.panel._outputFolderWidget)
@@ -873,7 +873,7 @@ class BuiltPanelTest(unittest.TestCase):
     def test_every_row_is_labelled_by_the_server(self):
         """No wording in this panel is the client's. The fallback would render
         `cbct_landmarks` as "Cbct landmarks" and could never produce
-        "Scan / Landmark Folder" from `input` — so the tool declares them, and
+        "Scan / Landmark Folder" from `input` - so the tool declares them, and
         this is what notices if one goes missing server-side."""
         labels = {
             name: widgets[0].text.rstrip(" *") for name, widgets in self.panel._rows.items()

@@ -1,6 +1,6 @@
 """Error types for the tool server client.
 
-Imports neither `slicer` nor `qt` — see ARCHITECTURE.md dependency rule.
+Imports neither `slicer` nor `qt` - see ARCHITECTURE.md dependency rule.
 """
 
 
@@ -16,7 +16,7 @@ class ServerToolError(Exception):
 def error_for_status(status_code, server_message=None):
     """Map an HTTP status code to a ServerToolError with a user-facing message.
 
-    The server's own `detail` is shown verbatim whenever it sends one — it is
+    The server's own `detail` is shown verbatim whenever it sends one - it is
     consistently the more specific message, and for the argument errors it is
     the only one that can be: 422 names the offending argument and, for an
     option outside a `choice`/`multichoice` list, spells out what was expected

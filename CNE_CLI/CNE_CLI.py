@@ -32,7 +32,7 @@ _TEXT_REPLACEMENTS = {
     "“": '"',   # left double quotation mark
     "”": '"',   # right double quotation mark
     "–": "-",   # en dash
-    "—": "-",   # em dash
+    " - ": "-",   # em dash
     " ": " ",   # non-breaking space
 }
 

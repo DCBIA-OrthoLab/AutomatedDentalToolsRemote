@@ -1,4 +1,4 @@
-"""Unit tests for ServerToolsCoreLib.client — run outside Slicer, requests mocked.
+"""Unit tests for ServerToolsCoreLib.client - run outside Slicer, requests mocked.
 
 Usage:
     python3 -m unittest ServerToolsCore/Testing/Python/test_client.py
@@ -824,7 +824,7 @@ class ArgumentTypesTest(unittest.TestCase):
     """An argument may accept several types (`types`), e.g. example_tool's
     `input`: a .csv file *or* a whole folder.
 
-    These exercise the fallback path — a server that does not publish
+    These exercise the fallback path - a server that does not publish
     `extensions` (see PublishedExtensionsTest for the normal one).
     """
 
@@ -875,7 +875,7 @@ class ArgumentTypesTest(unittest.TestCase):
 
     def test_an_unknown_compound_type_name_is_not_turned_into_a_filter(self):
         # Guessing ".scan_or_mesh" from "scan_or_mesh_file" would give a file
-        # dialog matching nothing — strictly worse than not filtering. A
+        # dialog matching nothing - strictly worse than not filtering. A
         # compound name we don't know degrades to an unrestricted picker.
         self.assertEqual(file_extensions_for({"types": ["scan_or_mesh_file"]}), ())
 
@@ -883,7 +883,7 @@ class ArgumentTypesTest(unittest.TestCase):
 class RealServerSchemaTest(unittest.TestCase):
     """Regression coverage for the actual /tools payload returned by the dev
     server: file arguments are typed "nifti_file"/"zip_file", never the
-    literal "file" — see ARCHITECTURE.md."""
+    literal "file" - see ARCHITECTURE.md."""
 
     def setUp(self):
         self.client = ToolServerClient("http://localhost:8000", "dev-token")
@@ -975,7 +975,7 @@ class RealServerSchemaTest(unittest.TestCase):
 
 
 class ExampleToolRequestTest(unittest.TestCase):
-    """The full request/response round-trip for `example_tool` — the tool that
+    """The full request/response round-trip for `example_tool` - the tool that
     exercises everything the client has to do: a choice, a multichoice, an
     input accepting a file or a folder, and a multi-file (.zip) result.
 
@@ -1171,7 +1171,7 @@ class ExampleToolRequestTest(unittest.TestCase):
     @mock.patch("requests.Session.get")
     def test_optional_choice_arguments_may_be_omitted(self, mock_get):
         # Omitting a multichoice entirely is what applies the server's declared
-        # defaults — it must not be forced into the payload.
+        # defaults - it must not be forced into the payload.
         mock_get.return_value = _response(json_data=[self.EXAMPLE_TOOL])
 
         self.client._validate_against_schema(

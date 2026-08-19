@@ -1,8 +1,8 @@
-# Dé-identification côté client — module 3D Slicer
-## Spécification de conception — `slicer_client/`
+# Dé-identification côté client - module 3D Slicer
+## Spécification de conception - `slicer_client/`
 
-*Projet `slicer-remote-tool-server` — University of North Carolina at Chapel Hill*
-*Version 1.0 — juillet 2026*
+*Projet `slicer-remote-tool-server` - University of North Carolina at Chapel Hill*
+*Version 1.0 - juillet 2026*
 
 ---
 
@@ -16,11 +16,11 @@ Ce document spécifie ce qu'il faut construire côté client. Trois idées direc
 2. **Fail-closed.** Si le pipeline échoue, plante, ou détecte un doute, **l'envoi est annulé**. Jamais d'avertissement suivi d'un envoi. Jamais de case à cocher « j'ai vérifié ».
 3. **La dé-identification produit une preuve.** Chaque envoi génère un manifeste local horodaté : quel profil, quelle version, quels contrôles passés. C'est ce qui vous protège en cas d'audit et c'est ce que l'OHRE demandera.
 
-Le gros du travail n'est pas cryptographique. Il est dans l'**inventaire exhaustif des fuites**, et 3D Slicer en a beaucoup plus qu'on ne l'imagine — noms de nœuds, logs applicatifs, base DICOM locale, noms de fichiers, scènes de récupération après crash. La section 4 est la partie la plus importante de ce document.
+Le gros du travail n'est pas cryptographique. Il est dans l'**inventaire exhaustif des fuites**, et 3D Slicer en a beaucoup plus qu'on ne l'imagine - noms de nœuds, logs applicatifs, base DICOM locale, noms de fichiers, scènes de récupération après crash. La section 4 est la partie la plus importante de ce document.
 
 ---
 
-## 1. Cadre institutionnel UNC — à régler avant d'écrire du code
+## 1. Cadre institutionnel UNC - à régler avant d'écrire du code
 
 ### 1.1 Qui est qui
 
@@ -36,12 +36,12 @@ Concrètement, **avant le premier transfert** :
 
 - Protocole IRB approuvé par l'OHRE, couvrant explicitement le transfert vers un serveur de calcul distant
 - Autorisation HIPAA signée, ou waiver
-- <cite index="12-1">Formation CITI complétée, module « Research and HIPAA Privacy Protections » inclus — cette formation s'ajoute à la formation HIPAA de UNC Health Care et ne la remplace pas</cite>
+- <cite index="12-1">Formation CITI complétée, module « Research and HIPAA Privacy Protections » inclus - cette formation s'ajoute à la formation HIPAA de UNC Health Care et ne la remplace pas</cite>
 - Validation de l'architecture par le UNC Information Security Office
 
-Point important : <cite index="11-1">selon les SOP de l'IRB de UNC-Chapel Hill, pour être considérées comme dé-identifiées, les 18 catégories d'identifiants HIPAA doivent être supprimées — y compris toutes les dates, comme les dates d'intervention, et toutes les images photographiques.</cite> C'est une lecture stricte, et elle a deux conséquences directes sur votre pipeline : **aucune date ne survit au Safe Harbor** (voir §3.6), et les **images faciales sont explicitement visées** (voir §3.7).
+Point important : <cite index="11-1">selon les SOP de l'IRB de UNC-Chapel Hill, pour être considérées comme dé-identifiées, les 18 catégories d'identifiants HIPAA doivent être supprimées - y compris toutes les dates, comme les dates d'intervention, et toutes les images photographiques.</cite> C'est une lecture stricte, et elle a deux conséquences directes sur votre pipeline : **aucune date ne survit au Safe Harbor** (voir §3.6), et les **images faciales sont explicitement visées** (voir §3.7).
 
-### 1.3 Choisir un régime — par outil, pas globalement
+### 1.3 Choisir un régime - par outil, pas globalement
 
 C'est la décision structurante. Trois régimes, trois architectures différentes :
 
@@ -64,7 +64,7 @@ Vous développez depuis la France sur un projet américain. Deux règles absolue
 - **Jamais de PHI de patients UNC sur un poste de développement en France.** Ce serait une divulgation non autorisée et, accessoirement, un transfert international de données de santé.
 - **Le développement et les tests se font exclusivement sur des jeux publics** (voir §10). Le debug sur données réelles, si nécessaire, se fait par un membre de l'équipe habilité, à UNC, sur un poste UNC, avec journalisation.
 
-Si des patients européens devaient entrer dans le périmètre un jour, le RGPD et la certification HDS s'ajouteraient — mais ce n'est pas le cas ici.
+Si des patients européens devaient entrer dans le périmètre un jour, le RGPD et la certification HDS s'ajouteraient - mais ce n'est pas le cas ici.
 
 ---
 
@@ -104,7 +104,7 @@ Le principe, sans code : `run_tool()` ne reçoit plus un chemin qu'il streame. I
 Trois propriétés à garantir :
 
 1. **Aucun chemin alternatif.** Il ne doit exister aucune fonction publique du client capable d'envoyer un fichier sans passer par le préparateur. Si vous exposez un `_post_raw()` « pour le debug », il finira en production.
-2. **Fail-closed strict.** Toute exception du préparateur remonte et annule l'envoi. Pas de `except: pass`, pas de mode dégradé, pas de paramètre `skip_deid=True` — même « juste pour les tests », même caché.
+2. **Fail-closed strict.** Toute exception du préparateur remonte et annule l'envoi. Pas de `except: pass`, pas de mode dégradé, pas de paramètre `skip_deid=True` - même « juste pour les tests », même caché.
 3. **L'artefact dé-identifié vit dans un répertoire temporaire dédié**, supprimé en `finally`, y compris en cas d'erreur réseau. Même exigence que côté serveur.
 
 Le préparateur retourne trois choses : le chemin de l'artefact propre, un nom de fichier neutre à envoyer, et un manifeste.
@@ -121,7 +121,7 @@ Votre contrainte « ajouter un outil = un fichier, rien d'autre » est préserv�
 
 Avant toute chose, **restreindre ce qui peut entrer**. Une liste blanche de modalités DICOM autorisées par outil (`CT`, `MR`, `CBCT`…) et un rejet explicite du reste. Cela élimine d'emblée les modalités à haut risque de texte incrusté (`US`, `XA`, `SC`, `OT`, captures d'écran de console) plutôt que d'essayer de les nettoyer. Refuser est toujours plus sûr que nettoyer.
 
-Même logique pour les objets structurés : `SR` (Structured Report), `KO`, `PR` contiennent du texte libre rédigé par un radiologue — quasi impossible à nettoyer de façon fiable. Rejetez-les.
+Même logique pour les objets structurés : `SR` (Structured Report), `KO`, `PR` contiennent du texte libre rédigé par un radiologue - quasi impossible à nettoyer de façon fiable. Rejetez-les.
 
 ### 3.2 Normalisation du conteneur
 
@@ -141,9 +141,9 @@ Ne construisez pas votre propre liste de tags. Implémentez le **profil DICOM PS
 | Clean Descriptors | Nettoie les champs texte libre (`StudyDescription`, `SeriesDescription`, commentaires) | **Activer** |
 | Retain Longitudinal Temporal (Full / Modified) | Conserve les dates, ou les décale | Régime B uniquement |
 | Retain Patient Characteristics | Conserve âge, sexe, poids, taille | Activer avec prudence : âge > 89 doit être agrégé en « 90+ » |
-| Retain Device Identity | Conserve modèle, numéro de série, `StationName` | **Ne pas activer** — catégorie 16 du Safe Harbor |
+| Retain Device Identity | Conserve modèle, numéro de série, `StationName` | **Ne pas activer** - catégorie 16 du Safe Harbor |
 | Retain Institution Identity | Conserve nom de l'établissement | **Ne pas activer** |
-| Retain UIDs | Conserve les UIDs d'origine | **Ne pas activer** — voir §3.5 |
+| Retain UIDs | Conserve les UIDs d'origine | **Ne pas activer** - voir §3.5 |
 | Retain Safe Private | Conserve les private tags « connus sûrs » | Ne pas activer en régime A |
 | Clean Pixel Data | Masque le texte incrusté | Voir §3.7 |
 
@@ -168,22 +168,22 @@ Deux propriétés à respecter impérativement :
 - **Déterminisme** : le même UID d'entrée donne toujours le même UID de sortie, sinon deux envois successifs de la même série produisent des données incohérentes.
 - **Cohérence relationnelle** : toutes les références croisées doivent être remappées ensemble. Si un `FrameOfReferenceUID` est remappé différemment entre deux séries d'une même étude, **tout recalage spatial casse**. C'est un bug fonctionnel silencieux et pénible à diagnostiquer.
 
-La clé HMAC est un secret détenu par UNC (voir §6). Générer des UIDs aléatoires est plus simple mais casse le déterminisme — ne le faites que si vous n'avez jamais besoin de renvoyer deux fois la même donnée.
+La clé HMAC est un secret détenu par UNC (voir §6). Générer des UIDs aléatoires est plus simple mais casse le déterminisme - ne le faites que si vous n'avez jamais besoin de renvoyer deux fois la même donnée.
 
-### 3.6 Le traitement des dates — le point le plus mal compris
+### 3.6 Le traitement des dates - le point le plus mal compris
 
 <cite index="11-1">La lecture de l'IRB de UNC est explicite : toutes les dates doivent être supprimées, y compris les dates d'intervention.</cite> Sous le régime A, il n'y a pas d'aménagement : `StudyDate`, `SeriesDate`, `AcquisitionDate`, `ContentDate`, `PatientBirthDate`, et leurs équivalents `*Time` disparaissent. Seule l'**année** peut survivre dans certaines lectures, et l'**âge** en années (agrégé à « 90+ » au-delà de 89 ans).
 
-**Le date shifting — décaler toutes les dates d'un patient d'un offset aléatoire fixe, ce qui préserve les intervalles — ne relève PAS du Safe Harbor.** C'est une technique excellente et largement utilisée, mais elle conserve de l'information temporelle et relève donc soit du Limited Data Set (régime B), soit d'une Expert Determination. Ne la présentez jamais comme du Safe Harbor à votre IRB : c'est une erreur fréquente et elle sera relevée.
+**Le date shifting - décaler toutes les dates d'un patient d'un offset aléatoire fixe, ce qui préserve les intervalles - ne relève PAS du Safe Harbor.** C'est une technique excellente et largement utilisée, mais elle conserve de l'information temporelle et relève donc soit du Limited Data Set (régime B), soit d'une Expert Determination. Ne la présentez jamais comme du Safe Harbor à votre IRB : c'est une erreur fréquente et elle sera relevée.
 
 Si votre outil a besoin d'intervalles temporels (suivi longitudinal, prédiction post-opératoire), **exprimez-les en durées relatives** (« J+42 » plutôt que deux dates). Une durée n'est pas une date. C'est souvent suffisant fonctionnellement et ça vous garde en régime A.
 
 ### 3.7 Les pixels : texte incrusté et visage
 
-**Texte incrusté.** Le tag `BurnedInAnnotation` est peu fiable — souvent absent, souvent `NO` à tort. Trois approches :
-1. **Exclusion par modalité** (§3.1) — la plus sûre, la moins coûteuse. Privilégiez-la.
-2. **Masquage de régions fixes** connues par constructeur/protocole — fiable si vos protocoles d'acquisition sont standardisés, ce qui est souvent le cas en recherche.
-3. **OCR** (`pytesseract`, `easyocr`) — dernier recours, coûteux, jamais fiable à 100 %. À ne jamais utiliser seul comme unique garantie.
+**Texte incrusté.** Le tag `BurnedInAnnotation` est peu fiable - souvent absent, souvent `NO` à tort. Trois approches :
+1. **Exclusion par modalité** (§3.1) - la plus sûre, la moins coûteuse. Privilégiez-la.
+2. **Masquage de régions fixes** connues par constructeur/protocole - fiable si vos protocoles d'acquisition sont standardisés, ce qui est souvent le cas en recherche.
+3. **OCR** (`pytesseract`, `easyocr`) - dernier recours, coûteux, jamais fiable à 100 %. À ne jamais utiliser seul comme unique garantie.
 
 **Visage reconstructible.** C'est le point critique pour vous, puisque vous manipulez des volumes crâniens. Un CT ou une IRM de la tête permet la reconstruction d'une surface faciale identifiable par reconnaissance automatique. <cite index="11-1">L'IRB de UNC vise explicitement « toutes les images photographiques » dans son énumération des 18 identifiants.</cite>
 
@@ -192,7 +192,7 @@ Si votre outil a besoin d'intervalles temporels (suivi longitudinal, prédiction
 | Skull stripping | Tout hors cerveau | Modéré | **Non** |
 | `pydeface` / `mri_deface` | Voxels du visage | 30 s – 3 min/volume | **Non** |
 | `quickshear` | Demi-espace facial | 2–10 s/volume | **Non** |
-| `@afni_refacer` | Remplace par un visage synthétique | 1–5 min/volume | Partiellement — à valider cliniquement |
+| `@afni_refacer` | Remplace par un visage synthétique | 1–5 min/volume | Partiellement - à valider cliniquement |
 
 **Pour un outil comme `surg_mov_pred`, aucune de ces techniques n'est acceptable**, puisque la géométrie faciale *est* le signal. Conclusion : cet outil ne peut pas atteindre le régime A par voie technique. Documentez ce constat, et traitez-le en régime B avec DUA, ou faites financer une Expert Determination.
 
@@ -202,7 +202,7 @@ Si votre outil a besoin d'intervalles temporels (suivi longitudinal, prédiction
 
 - L'identifiant patient devient `tronqué(HMAC-SHA256(clé_UNC, MRN))`. Déterministe, non inversible sans la clé.
 - **La table de correspondance pseudonyme ↔ patient reste à UNC, chez le Covered Entity, jamais transmise, jamais sauvegardée avec les données.** Si le serveur peut faire la correspondance, la donnée redevient de la PHI (§164.514(c)).
-- **Le nom du fichier envoyé doit être neutre et généré côté client.** C'est une fuite massive et systématiquement oubliée : `SMITH_John_CBCT_pre-op_2024-03-12.nii.gz` contient un nom, une date et un contexte clinique — et il part dans l'en-tête `Content-Disposition`, dans les logs du reverse proxy, dans les métriques. Générez un UUID ou un dérivé du pseudonyme. Idem pour les noms de répertoires dans une archive.
+- **Le nom du fichier envoyé doit être neutre et généré côté client.** C'est une fuite massive et systématiquement oubliée : `SMITH_John_CBCT_pre-op_2024-03-12.nii.gz` contient un nom, une date et un contexte clinique - et il part dans l'en-tête `Content-Disposition`, dans les logs du reverse proxy, dans les métriques. Générez un UUID ou un dérivé du pseudonyme. Idem pour les noms de répertoires dans une archive.
 
 ### 3.9 Vérification post-traitement (barrière C)
 
@@ -213,7 +213,7 @@ Ne faites jamais confiance à votre propre pipeline. Après production de l'arte
 - Aucun UID d'origine (comparaison avec la source)
 - Aucune date au-delà de la granularité autorisée
 - Le nom de fichier est bien le nom neutre généré
-- Recherche de motifs dans tous les champs texte restants : chaînes ressemblant à un MRN, à un SSN, à un nom propre — `presidio-analyzer` fait ça bien
+- Recherche de motifs dans tous les champs texte restants : chaînes ressemblant à un MRN, à un SSN, à un nom propre - `presidio-analyzer` fait ça bien
 - Taille et dimensions cohérentes avec la source (détection d'une conversion ratée)
 
 En cas d'échec : **abandon, message à l'utilisateur, entrée dans le journal local, aucun envoi**. Et remontée à l'équipe : un échec de vérification signale un bug du pipeline, donc potentiellement des envois antérieurs défectueux.
@@ -255,13 +255,13 @@ Slicer attache des attributs aux nœuds, notamment `DICOM.instanceUIDs`, qui con
 
 `ctkDICOMDatabase` (par défaut sous `~/Documents/SlicerDICOMDatabase`) stocke une **copie complète et non anonymisée** de tout ce qui a été importé, dans une base SQLite en clair. C'est un stock de PHI persistant sur le poste, souvent oublié lors de la mise au rebut d'une machine.
 
-**À faire** : politique explicite — soit la base est sur un volume chiffré, soit elle est purgée après chaque session, soit l'ingestion se fait hors base DICOM.
+**À faire** : politique explicite - soit la base est sur un volume chiffré, soit elle est purgée après chaque session, soit l'ingestion se fait hors base DICOM.
 
 ### 4.4 Les logs applicatifs de Slicer
 
 `Slicer.log` et `SlicerLastSession.log` enregistrent les **chemins complets des fichiers chargés**. Ces chemins contiennent presque toujours le nom du patient. C'est de la PHI dans un fichier texte non protégé, conservé indéfiniment.
 
-**À faire** : ne jamais transmettre ces logs (support technique inclus — un développeur français qui demande « envoyez-moi le log » demande de la PHI), et prévoir une purge. Votre propre code ne doit jamais écrire de chemin d'entrée dans un log.
+**À faire** : ne jamais transmettre ces logs (support technique inclus - un développeur français qui demande « envoyez-moi le log » demande de la PHI), et prévoir une purge. Votre propre code ne doit jamais écrire de chemin d'entrée dans un log.
 
 ### 4.5 Les fichiers récents et les préférences
 
@@ -269,7 +269,7 @@ Le fichier de configuration Slicer (`.ini`) conserve la liste des fichiers réce
 
 ### 4.6 Les scènes de récupération après crash
 
-Slicer sauvegarde automatiquement des snapshots de scène pour la récupération après plantage, dans le répertoire temporaire de l'application. Ces fichiers survivent aux crashs — c'est leur raison d'être — et contiennent la scène complète, PHI incluse.
+Slicer sauvegarde automatiquement des snapshots de scène pour la récupération après plantage, dans le répertoire temporaire de l'application. Ces fichiers survivent aux crashs - c'est leur raison d'être - et contiennent la scène complète, PHI incluse.
 
 ### 4.7 Le répertoire temporaire de l'application
 
@@ -277,7 +277,7 @@ Slicer sauvegarde automatiquement des snapshots de scène pour la récupération
 
 ### 4.8 Les captures d'écran et les vues
 
-Toute capture d'écran de Slicer affiche potentiellement le nom du patient dans le coin de la vue (annotations DICOM) et dans l'arbre des données. À proscrire dans les tickets, les présentations et la documentation — sauf sur données publiques.
+Toute capture d'écran de Slicer affiche potentiellement le nom du patient dans le coin de la vue (annotations DICOM) et dans l'arbre des données. À proscrire dans les tickets, les présentations et la documentation - sauf sur données publiques.
 
 ### 4.9 Les fichiers de scène `.mrml` et `.mrb`
 
@@ -318,19 +318,19 @@ Trois secrets vivent sur le poste client, avec des sensibilités différentes :
 |---|---|---|
 | **Clé HMAC de pseudonymisation** | Génère les pseudonymes et les UIDs remappés | **Le plus sensible.** Trousseau du système d'exploitation (`keyring` : Keychain macOS, Credential Manager Windows, Secret Service Linux). Jamais dans les settings Slicer, jamais dans un `.env`, jamais dans le dépôt |
 | **Jeton / identifiants d'accès au serveur** | Authentification | Trousseau OS également ; idéalement remplacé par un flow OIDC où rien de durable n'est stocké hors refresh token |
-| **Table de correspondance** | Retrouver le patient à partir du pseudonyme | Ne vit **pas** dans le module Slicer. Système séparé, contrôlé par UNC, accès restreint — c'est le rôle typique d'un *honest broker* |
+| **Table de correspondance** | Retrouver le patient à partir du pseudonyme | Ne vit **pas** dans le module Slicer. Système séparé, contrôlé par UNC, accès restreint - c'est le rôle typique d'un *honest broker* |
 
 <cite index="13-1">Le rôle d'honest broker consiste précisément à faire écran entre l'investigateur et les informations identifiantes des sujets, en générant ou recevant un jeu de données puis en le dépouillant de ses identifiants.</cite> Si UNC dispose d'un tel service, appuyez-vous dessus : la table de correspondance n'est alors ni votre problème ni votre responsabilité, ce qui est une excellente nouvelle.
 
 **Erreurs à ne pas commettre** : dériver la clé HMAC d'une constante du code (annule tout l'intérêt) ; utiliser la même clé pour tous les établissements (permet la corrélation croisée) ; stocker la clé à côté des données pseudonymisées.
 
-Précision importante : les pseudonymes HMAC sont vulnérables à une **attaque par dictionnaire** si l'espace des entrées est petit. Un MRN à 8 chiffres, c'est 10⁸ possibilités — trivial à énumérer si la clé fuit. La clé est donc le point de défaillance unique de tout le schéma. Traitez-la comme telle.
+Précision importante : les pseudonymes HMAC sont vulnérables à une **attaque par dictionnaire** si l'espace des entrées est petit. Un MRN à 8 chiffres, c'est 10⁸ possibilités - trivial à énumérer si la clé fuit. La clé est donc le point de défaillance unique de tout le schéma. Traitez-la comme telle.
 
 ---
 
 ## 7. Contraintes techniques dans l'environnement Slicer
 
-Votre `claude.md` limite les dépendances client à `requests`, `slicer`, `qt`, `vtk`, `os`, `tempfile`. **Cette contrainte n'est pas tenable pour de la dé-identification** — il faut la desserrer de façon contrôlée.
+Votre `claude.md` limite les dépendances client à `requests`, `slicer`, `qt`, `vtk`, `os`, `tempfile`. **Cette contrainte n'est pas tenable pour de la dé-identification** - il faut la desserrer de façon contrôlée.
 
 ### 7.1 Ce dont vous disposez déjà
 
@@ -339,13 +339,13 @@ Votre `claude.md` limite les dépendances client à `requests`, `slicer`, `qt`, 
 - **DCMTK** est livré avec Slicer sous forme de binaires (`dcmdump`, `dcmodify`, `dcmconv`…) dans le répertoire `bin`. Utilisable en sous-processus, très robuste, et sans ajout de dépendance Python.
 - **CTK / `ctkDICOMDatabase`** est accessible depuis Python.
 - **SimpleITK** est disponible via l'extension du même nom.
-- Le module **DICOM Patcher** de Slicer propose une option d'anonymisation. **Elle est insuffisante pour un usage HIPAA** — pas de profil PS3.15 complet, pas de gestion cohérente des UIDs, pas de vérification. Ne vous appuyez pas dessus, mais elle peut servir de référence de lecture.
+- Le module **DICOM Patcher** de Slicer propose une option d'anonymisation. **Elle est insuffisante pour un usage HIPAA** - pas de profil PS3.15 complet, pas de gestion cohérente des UIDs, pas de vérification. Ne vous appuyez pas dessus, mais elle peut servir de référence de lecture.
 
 ### 7.2 Installation de dépendances supplémentaires
 
 `slicer.util.pip_install()` fonctionne et installe dans l'environnement Python de Slicer. Trois précautions :
 
-1. **Installer au premier lancement du module, pas à l'import**, avec un indicateur de progression — sinon Slicer semble figé.
+1. **Installer au premier lancement du module, pas à l'import**, avec un indicateur de progression - sinon Slicer semble figé.
 2. **Épingler les versions** et vérifier les empreintes. Une dépendance de dé-identification compromise est un scénario d'attaque évident.
 3. **Prévoir le cas hors ligne** : beaucoup de postes cliniques n'ont pas d'accès Internet sortant. Prévoyez un mode d'installation par paquet local, ou packagez les dépendances dans l'extension Slicer.
 
@@ -357,12 +357,12 @@ Votre `claude.md` limite les dépendances client à `requests`, `slicer`, `qt`, 
 | `dicognito` | Anonymisation cohérente, remappage d'UID | Léger |
 | `deid` (Stanford) | Recettes déclaratives, gestion des pixels | Moyen |
 | `dicom-anonymizer` | Implémentation des actions PS3.15 | Léger |
-| `presidio-analyzer` | Détection de PHI dans les champs texte | Lourd (spaCy) — envisager un mode dégradé par expressions régulières |
+| `presidio-analyzer` | Détection de PHI dans les champs texte | Lourd (spaCy) - envisager un mode dégradé par expressions régulières |
 | `nibabel` | Nettoyage de headers NIfTI | Léger |
 | `keyring` | Stockage des secrets dans le trousseau OS | Léger |
 | `pydeface` / `quickshear` | Defacing (si applicable) | Lourd, dépendances externes (FSL) |
 
-**Note sur le defacing** : `pydeface` dépend de FSL, qui n'est pas trivialement installable sur Windows. Si vos utilisateurs sont sous Windows, envisagez `quickshear` (Python pur, plus rapide, moins fin) ou une exécution du defacing côté serveur — mais côté serveur signifie que le visage a déjà traversé le réseau, donc régime B au minimum. C'est un arbitrage à documenter.
+**Note sur le defacing** : `pydeface` dépend de FSL, qui n'est pas trivialement installable sur Windows. Si vos utilisateurs sont sous Windows, envisagez `quickshear` (Python pur, plus rapide, moins fin) ou une exécution du defacing côté serveur - mais côté serveur signifie que le visage a déjà traversé le réseau, donc régime B au minimum. C'est un arbitrage à documenter.
 
 ---
 
@@ -380,7 +380,7 @@ Plutôt que du code de dé-identification dispersé, un **fichier de recette** p
 - Contrôles de vérification obligatoires
 - Version du profil
 
-Bénéfices : le profil est **relisible par un non-développeur** — votre IRB et votre Privacy Office peuvent l'auditer sans lire du Python ; il est versionné, donc traçable ; et un nouvel outil réutilise un profil existant sans écrire de code.
+Bénéfices : le profil est **relisible par un non-développeur** - votre IRB et votre Privacy Office peuvent l'auditer sans lire du Python ; il est versionné, donc traçable ; et un nouvel outil réutilise un profil existant sans écrire de code.
 
 Chaque `Tool` déclare son profil. Le serveur connaît aussi ce profil et peut vérifier la cohérence entre le régime déclaré et ce qu'il reçoit.
 
@@ -391,10 +391,10 @@ Chaque `Tool` déclare son profil. Le serveur connaît aussi ce profil et peut v
 Un contrôle de sécurité que les utilisateurs contournent est pire qu'aucun contrôle, parce qu'il donne une fausse assurance.
 
 **À faire :**
-- Anonymisation **par lot en tâche de fond**, au moment de l'ingestion — pas à chaque envoi. L'utilisateur prépare son jeu de données une fois.
+- Anonymisation **par lot en tâche de fond**, au moment de l'ingestion - pas à chaque envoi. L'utilisateur prépare son jeu de données une fois.
 - **Cache** de l'artefact dé-identifié, indexé par empreinte de la source + version du profil. Un second envoi du même volume est instantané. Purge automatique en fin de session.
-- **Indicateur visuel permanent** : la scène affiche « données dé-identifiées — profil safe_harbor_ct v3 » ou « ⚠ données identifiantes — envoi impossible ». L'état doit être évident, jamais à deviner.
-- **Messages d'erreur actionnables** : « envoi bloqué : le tag PatientBirthDate est encore présent — relancez la préparation ». Pas « erreur 422 ».
+- **Indicateur visuel permanent** : la scène affiche « données dé-identifiées - profil safe_harbor_ct v3 » ou « ⚠ données identifiantes - envoi impossible ». L'état doit être évident, jamais à deviner.
+- **Messages d'erreur actionnables** : « envoi bloqué : le tag PatientBirthDate est encore présent - relancez la préparation ». Pas « erreur 422 ».
 - **Aperçu avant envoi** : liste des champs supprimés et conservés, consultable. Ça crée la confiance et ça permet à l'utilisateur de repérer un problème que le code n'a pas vu.
 
 **À ne pas faire :**
@@ -411,9 +411,9 @@ C'est ce qui distingue un pipeline crédible d'un pipeline déclaratif. Sans val
 
 ### 10.1 Jeux de données de test
 
-- **TCIA « Pseudo-PHI-DICOM-Data »** : collection publique conçue précisément pour tester les outils de dé-identification — de la fausse PHI est injectée dans les tags *et* dans les pixels, avec une vérité terrain. C'est votre jeu de référence principal, et il est utilisable par les développeurs français sans aucun problème réglementaire.
+- **TCIA « Pseudo-PHI-DICOM-Data »** : collection publique conçue précisément pour tester les outils de dé-identification - de la fausse PHI est injectée dans les tags *et* dans les pixels, avec une vérité terrain. C'est votre jeu de référence principal, et il est utilisable par les développeurs français sans aucun problème réglementaire.
 - **MIDI (Medical Image De-Identification) benchmark** du NCI, si accessible.
-- **Vos propres cas adversariaux** : PHI en séquence imbriquée profonde, private tags Planmeca/Carestream pour le CBCT, encodages non-ASCII (`PatientName` en UTF-8 avec caractères accentués — cas typiquement mal géré), champs multi-valués, `PatientName` en composants (`Nom^Prénom^Milieu^Préfixe^Suffixe`).
+- **Vos propres cas adversariaux** : PHI en séquence imbriquée profonde, private tags Planmeca/Carestream pour le CBCT, encodages non-ASCII (`PatientName` en UTF-8 avec caractères accentués - cas typiquement mal géré), champs multi-valués, `PatientName` en composants (`Nom^Prénom^Milieu^Préfixe^Suffixe`).
 
 ### 10.2 Tests automatisés obligatoires
 
@@ -455,7 +455,7 @@ Le poste Slicer détient de la PHI : il est en périmètre HIPAA au même titre 
 | Nettoyage avec réécriture des pixels (non compressé) | 10–50 ms/coupe → **5–15 s** par série |
 | Nettoyage avec réécriture (JPEG2000 lossless) | 50–200 ms/coupe → **15–60 s** par série |
 | Conversion DICOM → NIfTI | **2–10 s** par série |
-| Remappage des UIDs (HMAC) | < 1 ms/fichier — négligeable |
+| Remappage des UIDs (HMAC) | < 1 ms/fichier - négligeable |
 | `quickshear` | **2–10 s**/volume |
 | `pydeface` | **30 s – 3 min**/volume |
 | Vérification post-traitement (barrière C) | **0,5–2 s** par série |
@@ -465,7 +465,7 @@ Le poste Slicer détient de la PHI : il est en périmètre HIPAA au même titre 
 **Ce qu'il faut en retenir :**
 
 1. **Le nettoyage des métadonnées est gratuit** à l'échelle de l'utilisateur (quelques secondes). Aucun arbitrage à faire.
-2. **Le defacing domine tout** — c'est le seul poste à optimiser. Il se parallélise très bien (multiprocessing par volume) et se met en cache. Faites-le une fois à l'ingestion, jamais à chaque envoi.
+2. **Le defacing domine tout** - c'est le seul poste à optimiser. Il se parallélise très bien (multiprocessing par volume) et se met en cache. Faites-le une fois à l'ingestion, jamais à chaque envoi.
 3. **Le chargement des modèles NLP** (`presidio`/spaCy) coûte plus cher que leur exécution. Chargez une fois par session, pas par fichier.
 4. **La bonne stratégie UX est de déplacer le coût vers l'ingestion** : l'utilisateur importe et prépare son jeu de données une fois, avec une barre de progression, puis les envois sont instantanés. Le pire design serait d'anonymiser à chaque clic sur « Apply ».
 
@@ -473,14 +473,14 @@ Le poste Slicer détient de la PHI : il est en périmètre HIPAA au même titre 
 
 ## 13. Feuille de route
 
-### Phase 0 — Réglementaire (préalable, 2–4 semaines)
+### Phase 0 - Réglementaire (préalable, 2–4 semaines)
 - [ ] Statuer avec le UNC Privacy Office sur le régime applicable **par outil**
 - [ ] Protocole IRB (OHRE) couvrant explicitement le transfert vers le serveur de calcul
 - [ ] Trancher le cas `surg_mov_pred` : régime B avec DUA, ou Expert Determination
 - [ ] Formation CITI de toute l'équipe
 - [ ] Confirmer si un service d'honest broker UNC peut porter la table de correspondance
 
-### Phase 1 — Barrière B (le bloquant, 4–6 semaines)
+### Phase 1 - Barrière B (le bloquant, 4–6 semaines)
 - [ ] Préparateur de charge utile intégré à `run_tool()`, fail-closed, sans chemin alternatif
 - [ ] Pipeline PS3.15 récursif + suppression des private tags
 - [ ] Remappage HMAC des UIDs avec cohérence relationnelle
@@ -490,7 +490,7 @@ Le poste Slicer détient de la PHI : il est en périmètre HIPAA au même titre 
 - [ ] Manifeste et journal local
 - [ ] Clé HMAC dans le trousseau OS
 
-### Phase 2 — Barrière A et durcissement Slicer (4–6 semaines)
+### Phase 2 - Barrière A et durcissement Slicer (4–6 semaines)
 - [ ] Module de préparation par lot avec cache
 - [ ] Checklist d'ingestion §4.10 automatisée
 - [ ] Purge de fin de session (base DICOM, scènes de récupération, temporaires)
@@ -498,7 +498,7 @@ Le poste Slicer détient de la PHI : il est en périmètre HIPAA au même titre 
 - [ ] Indicateur d'état permanent dans l'UI
 - [ ] Defacing si applicable
 
-### Phase 3 — Validation (4 semaines)
+### Phase 3 - Validation (4 semaines)
 - [ ] Suite de tests sur TCIA Pseudo-PHI-DICOM-Data
 - [ ] Cas adversariaux (séquences profondes, encodages, private tags constructeur)
 - [ ] Test fail-closed avec interception réseau

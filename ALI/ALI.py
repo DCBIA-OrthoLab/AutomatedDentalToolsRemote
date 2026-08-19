@@ -1,4 +1,4 @@
-"""ALI — Automatic Landmark Identification, computed on the tool server.
+"""ALI - Automatic Landmark Identification, computed on the tool server.
 
 Replaces the former local module (a Slicer widget driving the ALI_CBCT and
 ALI_IOS CLIs, a conda `shapeaxi` environment and a WSL detour on Windows).
@@ -9,12 +9,12 @@ old CLI modules are left in the tree but are no longer wired to this one.
 Three things about ALI's schema are worth knowing when reading this file:
 
 * **There is no `mode` argument.** The server inspects what the input actually
-  holds — volumes, DICOM series or surface meshes — and picks the CBCT or IOS
+  holds - volumes, DICOM series or surface meshes - and picks the CBCT or IOS
   engine itself. This module must not guess: a `.zip` can carry either kind,
   so an extension tells you nothing.
 * **Both engines' selections are always shown, and one of them is always
   inert.** The engine isn't known until the server has looked at the data, so
-  there is no field to hide the other one behind — `visible_when` needs a
+  there is no field to hide the other one behind - `visible_when` needs a
   `choice` argument to test, and ALI declares none on purpose. What the schema
   does instead is put each engine's selection in its own collapsible box
   (`section`) and repeat "CBCT only" / "IOS only" in each description, which
@@ -30,7 +30,7 @@ Three things about ALI's schema are worth knowing when reading this file:
 * **A partial run is normal and is not an error.** A landmark whose weights
   are missing from the bundle, or whose agent never converged, is reported in
   `run_report.json` while every other landmark is still written out. Surfacing
-  that report is this module's one real job — see handleResult.
+  that report is this module's one real job - see handleResult.
 """
 
 import json
@@ -92,8 +92,8 @@ class ALIWidget(ServerToolWidgetBase):
     TOOL_NAME = "ALI"
 
     # The one thing ALI's schema cannot state. `input` is typed
-    # ("volume_or_zip_file", "surface_or_zip_file") — both file types, no
-    # "folder" — so the schema-driven rule would give it a file picker only.
+    # ("volume_or_zip_file", "surface_or_zip_file") - both file types, no
+    # "folder" - so the schema-driven rule would give it a file picker only.
     # But a cohort, and *any* DICOM series, is a directory: the user picks a
     # folder, base_widget zips it, and the server extracts it. Which of the two
     # was given is read off the path at upload time, never asked.
@@ -145,7 +145,7 @@ class ALIWidget(ServerToolWidgetBase):
 
         Overriding rather than extending the base "save_as" handling: its info
         dialog would pop before the report has even been read, and the report
-        is the whole point — a landmark missing from the scene means one of two
+        is the whole point - a landmark missing from the scene means one of two
         very different things, and only `run_report.json` says which.
         """
         resultDir = os.path.dirname(result.path)

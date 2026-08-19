@@ -65,13 +65,13 @@ class ASOWidget(ServerToolWidgetBase):
     Nothing about the anatomy lives here: the landmark catalog, the tooth chart,
     which options start checked, and whether a run is CBCT or IOS, semi- or
     fully-automated, are all arguments in the server's schema rendered by
-    formgen — so a landmark added server-side appears in this panel with no
+    formgen - so a landmark added server-side appears in this panel with no
     client release.
 
     Nor does the *layout*, which is the part that used to force a hand-written
     panel. The four collapsible boxes, the landmark tabs, the tooth chart and
     the fact that a CBCT run is never asked about teeth all come from the
-    schema's presentation hints (`section`, `visible_when`, `ui`, `groups` —
+    schema's presentation hints (`section`, `visible_when`, `ui`, `groups` - 
     see ARCHITECTURE.md). The old local module spent a four-page
     QStackedWidget and ~700 lines of checkbox plumbing on the same result, with
     the tooth numbering written out twice inside the widget.
@@ -107,7 +107,7 @@ class ASOWidget(ServerToolWidgetBase):
     MAX_RESULTS_TO_LOAD = 12
     # Pattern -> how to load it. The oriented CBCT is a VOLUME, not a
     # segmentation: ASO moves a scan, it does not label one. `*.tfm` is
-    # deliberately absent — the transform is there to carry a measurement back
+    # deliberately absent - the transform is there to carry a measurement back
     # onto the acquisition, and loading it into the scene applies nothing.
     _LOADABLE = (
         ("*.nii.gz", "volume"),
@@ -158,7 +158,7 @@ class ASOWidget(ServerToolWidgetBase):
         if len(found) > self.MAX_RESULTS_TO_LOAD:
             slicer.util.infoDisplay(
                 _(
-                    "{count} result files were produced — too many to load at once.\n"
+                    "{count} result files were produced - too many to load at once.\n"
                     "They are all saved in {path}."
                 ).format(count=len(found), path=outputDir)
             )
