@@ -59,8 +59,14 @@ SlicerAutomatedDentalTools/
 │   ├── ASO.py                              # declarative, plus optional result loading
 │   ├── Testing/Python/test_aso_client.py   # ASO's schema as a fixture, same stubs
 │   └── ASO_Method/                         # former local module, left in place but unwired
+├── AREG/                                   # registration of two timepoints
+│   ├── CMakeLists.txt
+│   ├── AREG.py                             # declarative, plus optional result loading
+│   ├── Testing/Python/test_areg_client.py  # AREG's schema as a fixture, same stubs
+│   └── AREG_Method/                        # former local module, left in place but unwired
 ├── SurgMovPred_CLI/                        # left in place but unwired (see "SurgMovPred_CLI" below)
-└── ALI_CBCT/, ALI_IOS/, ASO_CBCT/, ASO_IOS/  # the CLIs they used to drive, likewise unwired
+└── ALI_CBCT/, ALI_IOS/, ASO_CBCT/, ASO_IOS/, AREG_CBCT/, AREG_IOS/, AREG_IOSCBCT/
+                                            # the CLIs they used to drive, likewise unwired
 ```
 
 ### Deviation from a literal reading of the brief
@@ -168,14 +174,33 @@ interpreter launch:
   c"`). `force_refresh` re-fetches instead of trusting the cache — used when a
   panel retries after a failure, where the cached list may be the very reason
   the tool wasn't found.
-- `is_file_type(type_name)` — `type_name == "file" or type_name.endswith("_file")`.
-  The server does **not** stick to a generic `"file"` type: the real schema
-  uses `"nifti_file"`, `"zip_file"`, and presumably more later. Every place in
-  the codebase that needs to know "is this schema argument a file upload"
-  (`client.py`, `formgen.py`, `base_widget.py`) goes through this one
-  function instead of comparing against the literal string `"file"` — so a
-  new `..._file` type the server introduces needs no client-side code change.
-  Exported from `ServerToolsCoreLib/__init__.py` alongside `get_client()`.
+- `is_file_type(type_name)` — `type_name in ("file", "path") or
+  type_name.endswith("_file")`. Every place in the codebase that needs to know
+  "is this schema argument a file upload" (`client.py`, `formgen.py`,
+  `base_widget.py`) goes through this one function instead of comparing against
+  a literal, so a new file-ish type needs no client-side change. Exported from
+  `ServerToolsCoreLib/__init__.py` alongside `get_client()`.
+
+  **`"path"` is the one that broke the rule, and it is now the normal case.**
+  A *packaged* tool — every clinical tool, since they moved to the `sadt-tools`
+  repository — declares exactly one file type, `"path"`, for every file or
+  folder it takes: its schema is generated from a `run(scans: Path, ...)`
+  signature, and a Python annotation cannot say more than "a path". It ends in
+  neither `"file"` nor `"_file"`, so before it was listed here such a tool's
+  schema reported **no file arguments at all** and the panel refused to build:
+
+      FILE_INPUTS declares ['scans'] but the server's 'AMASSS' schema
+      doesn't have them as file arguments (it has: []).
+
+  It is listed rather than pattern-matched because it is one name, fixed by the
+  tool contract; guessing at "anything not obviously scalar" would turn every
+  unknown type into a file dialog.
+
+  The `"..._file"` vocabulary below (`nifti_file`, `zip_file`,
+  `volume_or_zip_file`, …) belongs to the server's older in-process `ArgSpec`
+  path, which now carries only two demonstration tools. It is still read
+  because the client must serve both, and because nothing in the client should
+  need to know which kind of tool it is talking to.
 - **Schema-reading helpers**, next to `is_file_type` and exported the same way
   (no Qt, no HTTP — just "how do I read a schema argument", which keeps them
   unit-testable in plain CI):
@@ -206,6 +231,13 @@ interpreter launch:
     server-side, never here**. A compound name that fallback cannot read
     (underscores left once `_file` is stripped) yields no filter rather than a
     nonsensical one.
+
+    For a **packaged** tool the fallback can say nothing at all — `"path"`
+    carries no extension in its name — so `extensions` is not an optimisation
+    there, it is the only source. A tool that does not publish it gets a picker
+    filtered by the server's global `ALLOWED_EXTENSIONS`, which accepts a
+    `.nii.gz` but will not offer it; that is a gap to fix in the tool's
+    `layout.py`, not here.
 - `list_tool_data(tool_name)` → `{"models": [...], "testfiles": [...]}` — the
   file names hosted server-side for this tool (`GET /tools/{tool}/data`,
   Bearer-protected unlike `/tools`). Backs the server-selectable dropdowns
@@ -434,6 +466,31 @@ Four call sites then read `_hiddenArgs`, and each one is load-bearing:
   tool declares one today; this is what keeps that from becoming a dead-locked
   panel if one does.
 
+**Apply also ignores an OPTIONAL file argument, whether or not it is visible.**
+`all_required_filled` had always skipped `required: false` scalars, and
+`_inputReady` did not do the same for file rows — so an optional file input
+disabled Apply until something was picked for it, with nothing on the panel
+saying that empty field was what Apply was waiting for. It went unnoticed
+because every file argument of every tool was required until AREG: its
+`mgl_landmarks` exists only to *reuse* landmarks the server would otherwise
+predict, so requiring it made the ordinary run the one you could not launch.
+
+**And `_prepareOneInputFile` uploads nothing for one that is empty.** The two
+halves are one rule and were fixed together: letting Apply fire on an empty
+optional row is only correct if the upload path then leaves that argument out.
+It used to return `widget.currentPath` — the empty string — as though it were a
+path, and the next thing to touch it failed with `No such file or directory:
+''`, which names nothing a user can act on. Uploading nothing is what makes the
+server apply whatever it does when the argument is absent, which for AREG's
+`mgl_landmarks` is "predict the landmarks yourself".
+
+The consequence to keep in mind is that a rule like "Semi-Automated CBCT needs
+`t1_masks`" is **the server's** — that argument is `required: false` because the
+requirement depends on another argument's value, which the schema cannot state.
+Apply now fires, and the server answers a 422 naming the field to fill in. That
+is the right place for it: the client would otherwise have to re-implement each
+tool's cross-argument rules to grey a button out.
+
 `formgen.is_visible` **hides what it cannot evaluate** — a controlling argument
 missing from the collected values. That only happens when the schema could not
 be fetched (so the panel holds an error, not a form), since the server's
@@ -632,7 +689,7 @@ fields) into a `qt.QFormLayout`, using the type table below, and returns
 `description` becomes the tooltip; `required: true` fields get an asterisk
 label via `design.required_label`.
 
-### Presentation hints — `section`, `visible_when`, `ui`, `groups`
+### Presentation hints — `label`, `section`, `visible_when`, `options_when`, `ui`, `groups`, `hidden`
 
 Everything above answers *what* an argument is. Past a certain size that stops
 being enough: ASO declares 130 CBCT landmarks, 32 teeth, 8 landmark types and
@@ -642,17 +699,33 @@ uses one half or the other. The old local module solved that with a
 hand-written four-page `QStackedWidget`, which is exactly the
 anatomy-in-the-widget this architecture exists to remove.
 
-So the schema grew four **presentation** fields (server-side `ArgSpec`,
-published verbatim by `GET /tools`, ignored by the server's own `validate()`).
-They are all optional and all `null` on every tool declaring none — which is
-the compatibility guarantee: **a tool declaring no hint renders exactly as it
-did before they existed**, asserted for `example_tool` in `test_formgen.py`.
+So the schema grew a set of **presentation** fields, published verbatim by
+`GET /tools` and ignored by the server's own `validate()`. They are all
+optional and all `null` on every tool declaring none — which is the
+compatibility guarantee: **a tool declaring no hint renders exactly as it did
+before they existed**, asserted for `example_tool` in `test_formgen.py`.
+
+**Where they come from now.** For the two in-process demo tools they are fields
+of the server's `ArgSpec`. For every clinical tool they are written in that
+tool's own `layout.py`, in the `sadt-tools` repository, and merged into the
+generated schema by `describe.py` — derived from the same catalog the tool
+computes with, never restated. That matters here for one reason: **a landmark
+added to a catalog gets its tab with no client release**, and cannot be
+published without one.
+
+**And they travel through a server that has to name each key.** There was a
+period where the tools published these and the client read them and nothing
+arrived: the server was dropping every key it did not list. A hint the server
+does not name does not exist, which is why a new one is a change in three
+repositories rather than two.
 
 | Field | Read by | Effect |
 |---|---|---|
 | `label` | `formgen.label_for` | the text next to the widget. Absent → the argument name prettified (`output_suffix` → "Output suffix") |
 | `section` | `formgen.section_of` / `sections_of` | which `ctkCollapsibleButton` the row goes in. Absent → `formgen.DEFAULT_SECTION` (`"Inputs"`), the one box a panel has always had. Boxes are created in the order the schema first mentions them |
 | `visible_when` | `formgen.is_visible` | `{other_argument: value}` (a list means "any of these"); every entry must match. A row whose condition fails is hidden, label included |
+| `options_when` | `formgen.allowed_options` | `{other_argument: {its value: [option, ...]}}` — narrows a choice's **own options** instead of hiding the field. `AREG`'s three automation modes are all meaningful, but IOS has no "Oriented + Fully-Automated"; without this the combo box offers it and the run fails at the end |
+| `hidden` | `formgen.is_visible` | never rendered, whatever else the schema says. For arguments a clinician has no business setting — the device to run on, a tiling step size, a worker count. The tool still declares them and still applies its own defaults; they are the deployment's business |
 | `ui` | `formgen.MultiChoiceGroup` / `_make_numeric_widget` / `_make_vec2_widget` | per-type presentation: how a `multichoice`'s boxes are laid out (`"tabs"`, `"grid"`, `"inline"`), `"slider"` on a bounded int/float, `"joystick"` on a vec2 |
 | `groups` | `formgen.MultiChoiceGroup` | `{group name: [option, ...]}` for the two grouped layouts |
 
@@ -1190,14 +1263,35 @@ different things — *not in the selected bundle* (use another one) or *never
 converged* (this scan is hard) — and only the report tells them apart, so the
 summary is built around the failures and names both kinds separately.
 
+## `TOOL_NAME` is the contract, and it is exact
+
+A module's `TOOL_NAME` is what `/run/<name>` is built from, and the server
+resolves it against the tool **folder name** in the `sadt-tools` repository.
+There is no normalisation on either side: no case folding, no underscore
+stripping, no aliasing. A mismatch is a `404` before the panel has drawn
+anything, not a degraded form.
+
+The naming convention on that side is: an acronym as it stands (`ALI_CBCT`,
+`ASO`, `AMASSS`, `AREG`), anything else as capitalised words joined by
+underscores (`Batch_Dental_Seg`, `Crown_Seg`, `Surg_Mov_Pred`). The in-process
+demo tools that stayed on the server follow it too (`Test_Tool`,
+`Example_Tool`).
+
+> **Check every module against `GET /tools` after a server update.** Two are
+> known to disagree today: `SurgMovPred/SurgMovPred.py` holds
+> `TOOL_NAME = "SurgMovPred"` where the served tool is `Surg_Mov_Pred`, and
+> `ExampleTool/ExampleTool.py` holds `"example_tool"` where it is
+> `Example_Tool`. Both are one-line fixes; both are invisible until someone
+> opens the module. `ALI` is the third to watch — it is `ALI_CBCT` and
+> `ALI_IOS` now, which is a panel decision and not a rename.
+
 ## How to add a new module in 5 minutes
 
 Worked example: migrating `AMASSS` (CBCT volume in, segmentation out).
-Assume the server exposes a tool named `amasss_segmentation` with one
-file-type argument (e.g. `"file": {"type": "nifti_file", ...}` — the volume)
-plus whatever scalar options AMASSS needs (e.g. a
-`threshold` float) — no other server-side change is asked of you, only what
-the client needs:
+Assume the server exposes a tool named `AMASSS` with one file-type argument
+(`"scans": {"type": "path", "extensions": [".nii", ".nii.gz", ".nrrd"]}` — the
+volume or a folder of them) plus whatever scalar options it needs — no
+server-side change is asked of you, only what the client needs:
 
 1. **CMakeLists.txt** (`AMASSS/CMakeLists.txt`) — drop the `.ui` resource
    entry (deleted, see below), keep the icon, no other change.
