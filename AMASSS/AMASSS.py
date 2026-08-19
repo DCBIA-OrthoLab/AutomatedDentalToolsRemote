@@ -92,10 +92,10 @@ class AMASSSWidget(ServerToolWidgetBase):
     # Extension -> the slicer_io kind that loads it. Surfaces are only there
     # when the run asked for them (the schema's generate_surface).
     _LOADABLE = (
-        ("*.nii.gz", "segmentation"),
-        ("*.nii", "segmentation"),
-        ("*.nrrd", "segmentation"),
-        ("*.nrrd.gz", "segmentation"),
+        ("*.nii.gz", "labelmap"),
+        ("*.nii", "labelmap"),
+        ("*.nrrd", "labelmap"),
+        ("*.nrrd.gz", "labelmap"),
         ("*.vtk", "model"),
     )
 

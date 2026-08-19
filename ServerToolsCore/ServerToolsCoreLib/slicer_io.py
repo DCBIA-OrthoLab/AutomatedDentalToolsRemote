@@ -113,6 +113,14 @@ def unzip_folder(zip_path: str, dest_dir: str) -> str:
 
 _LOADERS = {
     "segmentation": lambda path: slicer.util.loadSegmentation(path),
+    # Labelled VOXELS, kept as voxels. A segmentation node builds a closed
+    # surface representation to show itself in 3D, so a labelmap loaded as one
+    # arrives as triangles - an appearance the tool never produced. AMASSS
+    # writes a labelled grid and generates no surface unless asked
+    # (generate_surface defaults to False), so the mesh was the panel's doing,
+    # not the tool's. The caller can still build a surface in Slicer when that
+    # is what they want.
+    "labelmap": lambda path: slicer.util.loadLabelVolume(path),
     "volume": lambda path: slicer.util.loadVolume(path),
     "model": lambda path: slicer.util.loadModel(path),
     "transform": lambda path: slicer.util.loadTransform(path),

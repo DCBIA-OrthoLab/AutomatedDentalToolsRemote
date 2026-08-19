@@ -33,7 +33,7 @@ logger = logging.getLogger("ServerToolsCore.base_widget")
 # schema cannot express — picking a volume from the MRML scene — for forcing
 # one selection kind, or ("none") for not offering an argument at all.
 _FILE_INPUT_MODES = ("auto", "single_file", "folder_zip", "file_or_folder", "volume_node", "none")
-_RESULT_KINDS = ("text", "segmentation", "volume", "model", "save_as")
+_RESULT_KINDS = ("text", "segmentation", "labelmap", "volume", "model", "save_as")
 
 # The box holding the output folder picker, which no schema argument owns. A
 # tool may still put arguments of its own in it by declaring section="Outputs"
@@ -779,7 +779,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         kind = self.resultKind
         if kind == "text":
             slicer.util.infoDisplay(result.text or "")
-        elif kind in ("segmentation", "volume", "model"):
+        elif kind in ("segmentation", "labelmap", "volume", "model"):
             slicer_io.load_result(result.path, kind)
         elif kind == "save_as":
             self._handleSaveAsResult(result)
