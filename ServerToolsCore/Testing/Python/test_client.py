@@ -1509,3 +1509,28 @@ class DownloadFileTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToolNameSpellingTest(unittest.TestCase):
+    """A rename that only moved separators must not read as a missing tool.
+
+    Found by running every Slicer module against a live server: four of six
+    named a tool the server no longer serves under that spelling, and the panel
+    said "Unknown tool 'AREG'" -- the same message a typo produces. Two of those
+    were splits, which no rule can fix; `SurgMovPred` -> `Surg_Mov_Pred` was
+    only a rename.
+    """
+
+    def setUp(self):
+        self.client = ToolServerClient("https://example.org/", "secret-token")
+        self.client._tools_cache = {"Surg_Mov_Pred": {"arguments": {}}}
+
+    def test_the_old_spelling_finds_the_renamed_tool(self):
+        schema = self.client.get_tool_schema("SurgMovPred")
+        self.assertEqual(schema, {"arguments": {}})
+
+    def test_a_name_matching_nothing_is_still_unknown(self):
+        with self.assertRaises(ServerToolError) as caught:
+            self.client.get_tool_schema("AREG")
+        self.assertIn("Unknown tool 'AREG'", str(caught.exception))
+        self.assertIn("Surg_Mov_Pred", str(caught.exception))

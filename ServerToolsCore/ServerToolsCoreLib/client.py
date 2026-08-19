@@ -79,6 +79,15 @@ def _download_message(received: int, expected: Optional[int], label: str = "resu
 PATH_TYPE = "path"
 
 
+def _canonical_tool_name(name: str) -> str:
+    """A tool name with case and separators removed, matching the server's rule.
+
+    Only for LOOKUP. Anything sent to the server, or shown to a user, stays the
+    name the schema published.
+    """
+    return "".join(character for character in name.lower() if character.isalnum())
+
+
 def is_file_type(type_name: str) -> bool:
     """Whether a schema argument `type` denotes a file upload.
 
@@ -328,10 +337,22 @@ class ToolServerClient:
         used when retrying after a failure, where the cached list may be the
         very reason the tool wasn't found."""
         tools = self.list_tools(force_refresh=force_refresh)
-        if tool_name not in tools:
-            available = ", ".join(sorted(tools)) or "none"
-            raise ServerToolError(f"Unknown tool '{tool_name}'. Available: {available}")
-        return tools[tool_name]
+        if tool_name in tools:
+            return tools[tool_name]
+
+        # Case and separators, before calling this unknown. A module names its
+        # tool in a constant, and `SurgMovPred` became `Surg_Mov_Pred` when the
+        # tool was packaged: the panel then showed "Unknown tool", which is what
+        # a typo shows, for a rename that changed nothing else. The server
+        # applies the same rule and refuses to serve two names that differ only
+        # this way, so at most one can match here.
+        canonical = _canonical_tool_name(tool_name)
+        for served, schema in tools.items():
+            if _canonical_tool_name(served) == canonical:
+                return schema
+
+        available = ", ".join(sorted(tools)) or "none"
+        raise ServerToolError(f"Unknown tool '{tool_name}'. Available: {available}")
 
     def list_tool_data(self, tool_name: str) -> dict:
         """Return {"models": [...], "testfiles": [...]} - the file names hosted
