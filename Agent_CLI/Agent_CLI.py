@@ -30,7 +30,7 @@ def build_candidates_block(candidates, include_parameters=False):
         tags = s.get("tags") or []
         tags = [str(x) for x in tags[:8]]  # At most 8 tags.
         tag_str = ", ".join(tags)
-        line = f"{i}) {name} — {desc} | tags: {tag_str}"
+        line = f"{i}) {name} - {desc} | tags: {tag_str}"
         if include_parameters:
             line += f"| parameters:{s.get('parameters', '')}"
         lines.append(line)

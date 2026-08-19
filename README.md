@@ -1,5 +1,31 @@
-# Slicer Automated Dental Tools
+# Slicer Automated Dental Tools — Cloud
 
+> **This page is inherited from the upstream extension and still describes the
+> local modules**: the conda environments they build, the models they download,
+> the CLIs they drive. **That is not what this repository is.**
+>
+> This is the **cloud client**: each module is a thin panel that discovers a
+> tool through `GET /tools` on a remote server, uploads its inputs, and loads
+> the result back into the scene. There is no local inference, no environment
+> to build and no model to download — a laptop that cannot run a segmentation
+> can still ask for one.
+>
+> - **How the client works**, file by file: [ARCHITECTURE.md](ARCHITECTURE.md)
+>   — read this one first, it is the authoritative reference.
+> - **The server**:
+>   [slicer-remote-tool-server](https://github.com/Jules-GP/slicer-remote-tool-server)
+>   — routes, auth, dispatch, the `/DATA` store. It knows no dental tool.
+> - **The tools**: [sadt-tools](https://github.com/Jules-GP/sadt-tools) — one
+>   isolated project per tool, each with its own interpreter and its own pins.
+>   What a tool computes, and what it was validated against, is in its own
+>   README there.
+> - **Upstream**:
+>   [SlicerAutomatedDentalTools](https://github.com/DCBIA-OrthoLab/SlicerAutomatedDentalTools)
+>   — the origin of every algorithm.
+>
+> The sections below remain useful as a description of what each tool *does*
+> clinically. Where they describe installation, model downloads or module
+> internals, they describe the upstream extension and not this one.
 
 The Slicer Automated Dental Tools extension provides automatic dental and craniofacial analysis capabilities. It features a user-friendly graphical interface on 3D Slicer, enabling users to perform complex tasks without any coding expertise.
 

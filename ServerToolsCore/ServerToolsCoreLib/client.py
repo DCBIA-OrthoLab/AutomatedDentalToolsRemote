@@ -1,6 +1,6 @@
 """The only class in the extension that speaks HTTP to the tool server.
 
-Imports neither `slicer` nor `qt` — see ARCHITECTURE.md dependency rule. This
+Imports neither `slicer` nor `qt` - see ARCHITECTURE.md dependency rule. This
 makes it testable in plain CI with `requests` mocked out (see
 ServerToolsCore/Testing/Python/test_client.py).
 
@@ -32,7 +32,7 @@ logger = logging.getLogger("ServerToolsCore.client")
 _HEALTH_CHECK_TIMEOUT = 10
 
 # get_tool_schema() is called synchronously from a module's setup() (building
-# the GUI needs the schema before the first paint) — a slow/unreachable server
+# the GUI needs the schema before the first paint) - a slow/unreachable server
 # must not be able to freeze Slicer for up to 600s just to open a module.
 _TOOLS_FETCH_TIMEOUT = 15
 
@@ -74,23 +74,49 @@ def _download_message(received: int, expected: Optional[int], label: str = "resu
     return f"Downloading {label}... {received_mb:.1f} / {expected_mb:.1f} MB ({percent}%)"
 
 
+# What a packaged tool declares for a file-or-folder argument. One name, from
+# the tool contract in sadt-tools; see is_file_type and accepts_folder.
+PATH_TYPE = "path"
+
+
+def _canonical_tool_name(name: str) -> str:
+    """A tool name with case and separators removed, matching the server's rule.
+
+    Only for LOOKUP. Anything sent to the server, or shown to a user, stays the
+    name the schema published.
+    """
+    return "".join(character for character in name.lower() if character.isalnum())
+
+
 def is_file_type(type_name: str) -> bool:
     """Whether a schema argument `type` denotes a file upload.
 
-    The server is not limited to a generic "file" type — it can (and does,
+    The server is not limited to a generic "file" type - it can (and does,
     e.g. "nifti_file", "zip_file") use more specific type names to hint at
     what kind of file is expected. Treating any "..._file" type (plus the
     literal "file", for tools that don't bother being specific) as a file
     argument means a new file-ish type the server introduces later needs no
-    client-side code change — the whole point of a schema-driven client.
+    client-side code change - the whole point of a schema-driven client.
+
+    "path" is the exception that rule did not survive: it is what a PACKAGED
+    tool (sadt-tools) declares for every file or folder it takes, and it ends
+    in neither. Left out, such a tool's schema reports NO file arguments at
+    all and the panel refuses to build:
+
+        FILE_INPUTS declares ['scans'] but the server's 'AMASSS' schema
+        doesn't have them as file arguments (it has: []).
+
+    It is listed rather than pattern-matched because it is one name, fixed by
+    the tool contract, and guessing at "anything not obviously scalar" would
+    turn every unknown type into a file dialog.
     """
-    return type_name == "file" or type_name.endswith("_file")
+    return type_name in ("file", PATH_TYPE) or type_name.endswith("_file")
 
 
 # Fallback only. The server publishes each file type's extensions in its
 # `types`' company (see file_extensions_for), which is the single source of
 # truth; this table is what a *pre-`extensions`* server leaves us guessing
-# with, and it is a copy of that server's own FILE_TYPES — the kind of
+# with, and it is a copy of that server's own FILE_TYPES - the kind of
 # duplication that drifts. It once did: "volume_or_zip_file" was missing here
 # and derived as ".volume_or_zip", a file dialog matching nothing.
 #
@@ -107,7 +133,7 @@ _FILE_TYPE_EXTENSIONS = {
 }
 
 # The one non-file type that may appear alongside file types in `types`: it is
-# a *local* selection kind, not something HTTP can carry — a folder is zipped
+# a *local* selection kind, not something HTTP can carry - a folder is zipped
 # client-side and uploaded as the .zip the server then unpacks.
 FOLDER_TYPE = "folder"
 
@@ -133,8 +159,8 @@ def argument_types(spec: dict) -> list:
     """Every type a schema argument accepts.
 
     The server sends both a single `type` (the primary/first one) and the full
-    `types` list; an argument accepting several — e.g. example_tool's `input`:
-    `["csv_file", "folder"]` — is only fully described by the latter. Falls
+    `types` list; an argument accepting several - e.g. example_tool's `input`:
+    `["csv_file", "folder"]` - is only fully described by the latter. Falls
     back to `[type]` so a schema predating the `types` field still works.
     """
     types = spec.get("types")
@@ -146,12 +172,18 @@ def argument_types(spec: dict) -> list:
 
 def accepts_folder(spec: dict) -> bool:
     """Whether the user may pick a whole folder for this argument (which the
-    client then zips before uploading — see slicer_io.zip_folder)."""
-    return FOLDER_TYPE in argument_types(spec)
+    client then zips before uploading - see slicer_io.zip_folder).
+
+    A packaged tool's "path" always does: the tool contract requires every path
+    argument to take a directory as readily as one file, because the server
+    pays a process start-up cost per call and a cohort of forty scans has to be
+    one run rather than forty."""
+    types = argument_types(spec)
+    return FOLDER_TYPE in types or PATH_TYPE in types
 
 
 def file_extensions_for(spec: dict) -> tuple:
-    """The extensions a file picker should offer for this argument —
+    """The extensions a file picker should offer for this argument - 
     `["csv_file", "folder"]` gives `(".csv",)`.
 
     Read from the schema's own `extensions` (`{type name: [extension, ...]}`,
@@ -242,7 +274,7 @@ class ToolServerClient:
         self._session = _pooled_session()
 
     # ------------------------------------------------------------------
-    # Live (re)configuration — e.g. from a user-facing settings panel
+    # Live (re)configuration - e.g. from a user-facing settings panel
     # ------------------------------------------------------------------
 
     @property
@@ -264,7 +296,7 @@ class ToolServerClient:
     def configure(self, server_url=None, token=None, verify_tls=None, timeout=None) -> None:
         """Update connection settings on the already-constructed singleton in
         place, so every module sharing get_client() sees the change without a
-        Slicer restart. Drops the cached /tools schema unconditionally — it
+        Slicer restart. Drops the cached /tools schema unconditionally - it
         may belong to a different server entirely once any of these change.
         """
         if server_url is not None:
@@ -301,17 +333,29 @@ class ToolServerClient:
         return self._tools_cache
 
     def get_tool_schema(self, tool_name: str, force_refresh: bool = False) -> dict:
-        """`force_refresh` re-fetches /tools instead of trusting the cache —
+        """`force_refresh` re-fetches /tools instead of trusting the cache - 
         used when retrying after a failure, where the cached list may be the
         very reason the tool wasn't found."""
         tools = self.list_tools(force_refresh=force_refresh)
-        if tool_name not in tools:
-            available = ", ".join(sorted(tools)) or "none"
-            raise ServerToolError(f"Unknown tool '{tool_name}'. Available: {available}")
-        return tools[tool_name]
+        if tool_name in tools:
+            return tools[tool_name]
+
+        # Case and separators, before calling this unknown. A module names its
+        # tool in a constant, and `SurgMovPred` became `Surg_Mov_Pred` when the
+        # tool was packaged: the panel then showed "Unknown tool", which is what
+        # a typo shows, for a rename that changed nothing else. The server
+        # applies the same rule and refuses to serve two names that differ only
+        # this way, so at most one can match here.
+        canonical = _canonical_tool_name(tool_name)
+        for served, schema in tools.items():
+            if _canonical_tool_name(served) == canonical:
+                return schema
+
+        available = ", ".join(sorted(tools)) or "none"
+        raise ServerToolError(f"Unknown tool '{tool_name}'. Available: {available}")
 
     def list_tool_data(self, tool_name: str) -> dict:
-        """Return {"models": [...], "testfiles": [...]} — the file names hosted
+        """Return {"models": [...], "testfiles": [...]} - the file names hosted
         on the server for this tool (GET /tools/{tool}/data, Bearer-protected).
 
         This is what lets a server_selectable argument (e.g. SurgMovPred's
@@ -377,7 +421,7 @@ class ToolServerClient:
     ) -> ToolResult:
         """`files`: {schema_argument_name: local_file_path}, one entry per
         `type: "file"` argument you're providing. Each is uploaded as its own
-        multipart field named after its schema argument — a tool can declare
+        multipart field named after its schema argument - a tool can declare
         several independent file arguments (e.g. SurgMovPred's "model" +
         "input"); there is no single reserved "file" key."""
         args = args or {}
@@ -825,7 +869,7 @@ class ToolServerClient:
                 # A `server_selectable` file argument has two valid shapes: an
                 # upload, or the NAME of a file the server hosts, sent as a
                 # plain form value under the same field name. Requiring an
-                # upload here would reject the second — the very shape that
+                # upload here would reject the second - the very shape that
                 # keeps a hosted test cohort from travelling.
                 satisfied = name in files or (spec.get("server_selectable") and name in args)
                 if spec.get("required") and not satisfied:

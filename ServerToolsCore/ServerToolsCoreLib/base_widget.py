@@ -33,7 +33,7 @@ logger = logging.getLogger("ServerToolsCore.base_widget")
 # schema cannot express — picking a volume from the MRML scene — for forcing
 # one selection kind, or ("none") for not offering an argument at all.
 _FILE_INPUT_MODES = ("auto", "single_file", "folder_zip", "file_or_folder", "volume_node", "none")
-_RESULT_KINDS = ("text", "segmentation", "volume", "model", "save_as")
+_RESULT_KINDS = ("text", "segmentation", "labelmap", "volume", "model", "save_as")
 
 # The box holding the output folder picker, which no schema argument owns. A
 # tool may still put arguments of its own in it by declaring section="Outputs"
@@ -400,9 +400,38 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             formgen.connect_changed(widget, self._applyVisibility)
         self._applyVisibility()
 
+    def _narrowChoices(self, name: str, allowed) -> None:
+        """Restrict one combo box to `allowed`, keeping the selection if it
+        survives. Falls back to the first option, because a QComboBox cannot be
+        empty and index 0 is what it would select anyway."""
+        widget = self._argWidgets.get(name)
+        if widget is None or not hasattr(widget, "addItems"):
+            return
+        current = widget.currentText
+        if [widget.itemText(i) for i in range(widget.count)] == list(allowed):
+            return
+        was = widget.blockSignals(True)
+        widget.clear()
+        widget.addItems(list(allowed))
+        widget.blockSignals(was)
+        index = widget.findText(current)
+        widget.setCurrentIndex(index if index >= 0 else 0)
+
     def _applyVisibility(self, *_args) -> None:
         arguments = (self._schema or {}).get("arguments", {})
         controlling = formgen.controlling_arguments(arguments)
+        values = formgen.collect(
+            {name: self._argWidgets[name] for name in controlling if name in self._argWidgets}
+        )
+
+        # Narrow the choice boxes BEFORE deciding what is visible: an option
+        # the current mode does not have must not merely fail at the end of a
+        # run, and re-selecting here can itself change what the rest of the
+        # panel shows.
+        for name, spec in arguments.items():
+            allowed = formgen.allowed_options(spec, values)
+            if allowed is not None:
+                self._narrowChoices(name, allowed)
         values = formgen.collect(
             {name: self._argWidgets[name] for name in controlling if name in self._argWidgets}
         )
@@ -476,7 +505,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # other argument; `layout` is the fallback for one that names none.
         section = formgen.section_of(spec)
         target = self._sectionLayouts.get(section, layout)
-        labelWidget = design.required_label(label)
+        labelWidget = (
+            design.required_label(label)
+            if spec.get("required")
+            else design.optional_label(label)
+        )
 
         if mode == "volume_node":
             widget = slicer.qMRMLNodeComboBox()
@@ -752,6 +785,16 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         reader = getattr(widget, "server_name", None)
         if reader and reader():
             return None
+        # Nothing chosen. That is a legitimate state for an OPTIONAL file
+        # argument -- Apply no longer waits for one (see _inputReady) -- and the
+        # answer is to upload nothing, so the server applies whatever it does
+        # when the argument is absent. Returning `widget.currentPath` here sent
+        # the empty string on as a path, and the very next thing to touch it
+        # failed with "No such file or directory: ''", naming nothing the user
+        # could act on. A required argument cannot reach this line: Apply is
+        # disabled until it has a path.
+        if mode in ("single_file", "folder_zip", "file_or_folder") and not widget.currentPath:
+            return None
         if mode == "single_file":
             return widget.currentPath
         if mode == "folder_zip":
@@ -779,7 +822,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         kind = self.resultKind
         if kind == "text":
             slicer.util.infoDisplay(result.text or "")
-        elif kind in ("segmentation", "volume", "model"):
+        elif kind in ("segmentation", "labelmap", "volume", "model"):
             slicer_io.load_result(result.path, kind)
         elif kind == "save_as":
             self._handleSaveAsResult(result)
@@ -826,10 +869,21 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.applyButton.enabled = canApply
 
     def _inputReady(self) -> bool:
+        arguments = (self._schema or {}).get("arguments", {})
         for arg_name, mode in self._inputModes.items():
             # A file input hidden by its `visible_when` is not uploaded either
             # (see _prepareOneInputFile), so it cannot be what Apply waits for.
             if arg_name in self._hiddenArgs:
+                continue
+            # Neither can an OPTIONAL one. `all_required_filled` has always
+            # skipped `required: false` scalars; this loop did not, so any
+            # optional file argument disabled Apply until something was picked
+            # for it -- with no way to tell from the panel that the field was
+            # what Apply was waiting for. AREG is the first tool to have one:
+            # its `mgl_landmarks` exists only to REUSE landmarks you already
+            # have, since the server predicts them otherwise, and requiring it
+            # made the ordinary run the one you could not launch.
+            if not arguments.get(arg_name, {}).get("required", True):
                 continue
             widget = self._inputWidgets.get(arg_name)
             if mode == "volume_node":

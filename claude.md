@@ -10,6 +10,34 @@ responsibilities, the "add a module in 5 minutes" guide, and a full list of
 debatable decisions and known limitations. Read it before making further
 changes here.
 
+### What changed on the other side of the wire, since this brief
+
+The brief below describes one server holding the tools. That is no longer what
+it is, and three consequences reach this repository:
+
+- **The tools moved out of the server**, into
+  [`sadt-tools`](https://github.com/Jules-GP/sadt-tools) — one isolated project
+  per tool, its own interpreter and its own torch, run out of process. The
+  server discovers them, publishes them and runs them without importing them.
+  Nothing about the HTTP contract changed, which was the point.
+- **A packaged tool's file arguments are typed `"path"`**, not
+  `"nifti_file"` / `"zip_file"`. Its schema is generated from a
+  `run(scans: Path, ...)` signature, and a Python annotation cannot say more
+  than "a path"; the acceptable extensions travel separately, in `extensions`.
+  The file-type bullet below is therefore **historical** — see
+  `ARCHITECTURE.md`, "`is_file_type`", for the rule as it stands.
+- **The panel hints come from the tool now.** `label`, `section`, `ui`,
+  `groups`, `visible_when`, `options_when` and `hidden` are written in the
+  tool's own `layout.py` and derived from the catalogs it computes with, so a
+  landmark added to a catalog gets its tab with **no client release**.
+
+**Tool names are the folder names in that repository**, and several changed
+shape in the move: `Surg_Mov_Pred`, `Crown_Seg`, `Batch_Dental_Seg`, and
+`ALI_CBCT` / `ALI_IOS` where there used to be one `ALI`. A module's `TOOL_NAME`
+is what `/run/<name>` is built from and must match exactly, so a rename on that
+side is a breaking change here — and it shows up as a **404**, not as a
+degraded panel.
+
 The implementation deviates from a few specifics of the brief below, based on
 what testing against the real dev server surfaced. Each is explained in
 `ARCHITECTURE.md`; summarized here:
@@ -28,16 +56,21 @@ what testing against the real dev server surfaced. Each is explained in
   `ServerToolWidgetBase` exposes this as `FILE_INPUTS = {arg_name: mode}`
   instead of a single `INPUT_MODE`.
 - **File-type detection is a naming convention, not a fixed string**: the
-  real server types file arguments as `"nifti_file"` / `"zip_file"`, never
-  the literal `"file"` used in this brief's examples. `is_file_type()`
-  treats `"file"` and any `"..._file"` type as a file upload, so a new
-  file-ish type the server introduces later needs no client-side change.
+  server typed file arguments as `"nifti_file"` / `"zip_file"`, never the
+  literal `"file"` used in this brief's examples. `is_file_type()` treats
+  `"file"` and any `"..._file"` type as a file upload, so a new file-ish type
+  the server introduces later needs no client-side change. *(Superseded: a
+  packaged tool declares `"path"`, which matches neither pattern and is now
+  listed explicitly. See above.)*
 - **The model does *not* stay purely server-side**: contrary to "modelPath
-  disappears from the client — it is server configuration" below, the real
-  `surg_mov_pred` schema requires the client to upload a model package
-  (`"model"`) on every call. If the intent is still to keep the model
-  server-side, that requires a server-side schema change, not a client-side
-  workaround.
+  disappears from the client — it is server configuration" below, the first
+  `surg_mov_pred` schema required the client to upload a model package
+  (`"model"`) on every call. *(Resolved server-side, and the brief was right.
+  An argument named `model`, `*_model` or `*_reference` is published as a
+  **name** picked from the server's own `DATA/<tool>/models/` and can never be
+  uploaded — a safety property, since a clinician must not be able to send model
+  weights from a laptop. It is derived from the argument's name, so the client
+  renders a dropdown with nothing tool-specific in it.)*
 - **Result handling bug fixed**: the first version decided whether to unpack
   a "save_as" result by sniffing its bytes for a zip signature
   (`zipfile.is_zipfile`). Since OOXML formats (`.xlsx`, `.docx`, `.ods`) are

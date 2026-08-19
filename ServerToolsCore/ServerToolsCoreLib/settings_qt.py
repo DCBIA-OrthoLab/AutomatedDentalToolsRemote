@@ -1,6 +1,6 @@
 """Persists a user-editable override of config.py's defaults via Slicer's
 native qt.QSettings (an ini/plist file on disk, independent of the Slicer
-process — survives restarts).
+process - survives restarts).
 
 Not imported by `__init__.py` on purpose: it depends on `qt`, and the package
 must stay importable outside Slicer for client.py's unit tests. Only Slicer-
@@ -51,7 +51,7 @@ def clear_overrides() -> None:
 
 def apply_saved_overrides(client) -> bool:
     """Apply whatever was saved onto `client` (e.g. get_client()). Returns
-    whether an override was found and applied — used at Slicer startup."""
+    whether an override was found and applied - used at Slicer startup."""
     overrides = load_overrides()
     if overrides:
         client.configure(**overrides)

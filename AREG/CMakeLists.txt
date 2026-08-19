@@ -2,21 +2,20 @@
 set(MODULE_NAME AREG)
 
 #-----------------------------------------------------------------------------
+# AREG_Method/ and Resources/UI/AREG.ui belonged to the former local module:
+# they built the argument dictionaries for the AREG_CBCT / AREG_IOS /
+# AREG_IOSCBCT CLIs and chained them with AMASSS, ASO, ALI and CrownSeg from
+# inside Slicer, via a conda environment and a pytorch3d wheel. The module is
+# now a thin client of the server's "AREG" tool and builds its panel from
+# GET /tools, so neither is shipped any more. The files are left in the tree
+# rather than deleted, the same way ASO_Method and ALI_Method were -- see
+# ARCHITECTURE.md.
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
-  AREG_Method/__init__.py
-  AREG_Method/CBCT.py
-  AREG_Method/install_pytorch.py
-  AREG_Method/IOS.py
-  AREG_Method/IOSCBCT.py
-  AREG_Method/Method.py
-  AREG_Method/Progress.py
-  AREG_Method/install_pytorch.py
 )
 
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
-  Resources/UI/${MODULE_NAME}.ui
 )
 
 #-----------------------------------------------------------------------------

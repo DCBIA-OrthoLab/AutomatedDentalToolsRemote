@@ -5,7 +5,7 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModule
 class ServerToolsCore(ScriptedLoadableModule):
     """Hidden module. Its only purpose is to make ServerToolsCoreLib importable
     as `from ServerToolsCoreLib import ...` by every other scripted module in
-    this extension — see ARCHITECTURE.md.
+    this extension - see ARCHITECTURE.md.
     """
 
     def __init__(self, parent):
@@ -18,11 +18,11 @@ class ServerToolsCore(ScriptedLoadableModule):
         self.parent.helpText = _(
             "Shared infrastructure for remote-server-backed tools: HTTP client, async "
             "execution, schema-driven GUI generation and shared styling. Not user-facing "
-            "— see ARCHITECTURE.md at the repository root."
+            " - see ARCHITECTURE.md at the repository root."
         )
         self.parent.acknowledgementText = ""
 
-        # Runs once, when Slicer discovers this module at startup — before any
+        # Runs once, when Slicer discovers this module at startup - before any
         # tool module is opened. Applies any server URL/API key/etc. the user
         # saved via "Server Tools Settings" in a previous session, on top of
         # config.py's compiled-in defaults.

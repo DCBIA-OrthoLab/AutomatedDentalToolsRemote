@@ -6,7 +6,7 @@ set(MODULE_NAME ALI)
 # drove the ALI_CBCT / ALI_IOS CLIs from inside Slicer. The module is now a thin
 # client of the server's "ALI" tool and builds its panel from GET /tools, so
 # neither is shipped any more. The files are left in the tree rather than
-# deleted, the same way SurgMovPred_CLI was — see ARCHITECTURE.md.
+# deleted, the same way SurgMovPred_CLI was - see ARCHITECTURE.md.
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
 )

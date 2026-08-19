@@ -59,21 +59,25 @@ class AMASSSWidget(ServerToolWidgetBase):
 
     Nothing about the anatomy lives here: the structure list, its display names
     and which ones start checked are a `multichoice` argument in the server's
-    schema, rendered by formgen — so a new model appears in this panel with no
+    schema, rendered by formgen - so a new model appears in this panel with no
     client release.
     """
 
     TOOL_NAME = "AMASSS"
-    # "auto": the schema says `input` accepts ["volume_or_zip_file", "folder"],
-    # so the panel takes either — one path field with a File and a Folder browse
-    # button — a single scan or a whole cohort, the folder being zipped before
-    # upload. Nothing here names a type, an extension, or a mode.
-    FILE_INPUTS = {"input": "auto"}
+    # "auto": the schema says `scans` is a "path", which a packaged tool uses
+    # for a file OR a folder, so the panel takes either - one path field with a
+    # File and a Folder browse button - a single scan or a whole cohort, the
+    # folder being zipped before upload. Nothing here names a type, an
+    # extension, or a mode.
+    #
+    # `scans`, not `input`: packaging renamed it. The argument name is part of
+    # what the client sends, so it has to match the tool's run() signature.
+    FILE_INPUTS = {"scans": "auto"}
     # The original module's "Download test scan" button, ported: the same
     # MG_test_scan it pointed the browser at, now downloaded in place and
     # set as the input.
     TEST_DATA = {
-        "input": "https://github.com/Maxlo24/AMASSS_CBCT/releases/download/v1.0.1/MG_test_scan.nii.gz"
+        "scans": "https://github.com/Maxlo24/AMASSS_CBCT/releases/download/v1.0.1/MG_test_scan.nii.gz"
     }
     # output_kind "files": one <scan>_<ID>_SegOut/ folder per scan plus
     # AMASSS_report.json, bundled into one .zip and unpacked into the output
@@ -88,10 +92,10 @@ class AMASSSWidget(ServerToolWidgetBase):
     # Extension -> the slicer_io kind that loads it. Surfaces are only there
     # when the run asked for them (the schema's generate_surface).
     _LOADABLE = (
-        ("*.nii.gz", "segmentation"),
-        ("*.nii", "segmentation"),
-        ("*.nrrd", "segmentation"),
-        ("*.nrrd.gz", "segmentation"),
+        ("*.nii.gz", "labelmap"),
+        ("*.nii", "labelmap"),
+        ("*.nrrd", "labelmap"),
+        ("*.nrrd.gz", "labelmap"),
         ("*.vtk", "model"),
     )
 
@@ -126,7 +130,7 @@ class AMASSSWidget(ServerToolWidgetBase):
         if len(found) > self.MAX_RESULTS_TO_LOAD:
             slicer.util.infoDisplay(
                 _(
-                    "{count} result files were produced — too many to load at once.\n"
+                    "{count} result files were produced - too many to load at once.\n"
                     "They are all saved in {path}."
                 ).format(count=len(found), path=outputDir)
             )

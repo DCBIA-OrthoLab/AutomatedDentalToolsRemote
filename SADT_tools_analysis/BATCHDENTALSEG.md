@@ -32,7 +32,7 @@ Pipeline complet (par volume) :
 
 | Entrée (UI) | Type | Valeurs / extensions réellement acceptées | Obligatoire | Référence |
 |---|---|---|---|---|
-| **Input Folder** | dossier (QFileDialog `getExistingDirectory`) | `*.nii*` (donc `.nii` et `.nii.gz`), `*.gipl`, `*.gipl.gz` — **non récursif** | Oui (contrôlé) | `SegmentationWidget.py:601-611`, validation `:656-660` |
+| **Input Folder** | dossier (QFileDialog `getExistingDirectory`) | `*.nii*` (donc `.nii` et `.nii.gz`), `*.gipl`, `*.gipl.gz` - **non récursif** | Oui (contrôlé) | `SegmentationWidget.py:601-611`, validation `:656-660` |
 | **Output Folder** | dossier | n/a | Oui *en pratique*, **non contrôlé** | `SegmentationWidget.py:560-564` |
 | **Export STL** | case à cocher | booléen, **cochée par défaut** | non | `SegmentationWidget.py:154` |
 | **Export OBJ** | case à cocher | booléen, décochée | non | `SegmentationWidget.py:155` |
@@ -62,7 +62,7 @@ Conséquences directes, lues dans le code :
 - Seuls `.nii`, `.nii.gz` (via `*.nii*`), `.gipl`, `.gipl.gz` sont pris. **Pas de `.nrrd`, `.mha`, `.mhd`, `.dcm`/DICOM**,
   alors que le chargement réel se fait par `slicer.util.loadVolume` (`SegmentationWidget.py:739`) qui, lui, saurait les lire.
 - `*.nii*` attrape aussi des fichiers parasites du type `xxx.nii.json`, `xxx.nii.gz.tmp`.
-- `list(folder.glob("*.gipl.gz"))` est redondant avec rien (le motif `*.gipl` ne matche pas `.gipl.gz`) — c'est correct, mais l'ordre final de la liste n'est pas trié : les NIfTI d'abord, puis les GIPL.
+- `list(folder.glob("*.gipl.gz"))` est redondant avec rien (le motif `*.gipl` ne matche pas `.gipl.gz`) - c'est correct, mais l'ordre final de la liste n'est pas trié : les NIfTI d'abord, puis les GIPL.
 
 **Validation à l'Apply.** `onApplyClicked` ne vérifie que le dossier d'entrée et la non-vacuité de la liste
 (`SegmentationWidget.py:656-660`). Le **dossier de sortie n'est jamais vérifié** ; `self.outputFolderPath`
@@ -88,7 +88,7 @@ Dans tous les cas : `Parameter(folds="0", modelPath=..., device=...)` ⇒ **un s
 dialogue propose le repli CPU (`SegmentationWidget.py:860-871`).
 
 **Entrées « cachées » (non exposées) :** `_minimumIslandSize_mm3 = 60` (`SegmentationWidget.py:126`) utilisé par
-`_removeSmallIsland` (`:1487-1498`) — mais ces post-traitements ne sont **jamais appelés** (`_postProcessSegments`
+`_removeSmallIsland` (`:1487-1498`) - mais ces post-traitements ne sont **jamais appelés** (`_postProcessSegments`
 est vide, `:1473-1475`). Le timeout d'urgence est fixé en dur à 5 min (`SegmentationWidget.py:307-309`).
 
 ## Sorties
@@ -115,7 +115,7 @@ directement le nœud de segmentation : il crée un tableau `numpy` de la taille 
 **segment par segment** un labelmap temporaire et y écrit la valeur de label officielle
 (`SegmentationWidget.py:1005-1050`), puis reconstruit un `vtkMRMLLabelMapVolumeNode` avec le spacing/origin/IJKtoRAS
 du volume source (`:1053-1059`) et l'écrit via `slicer.util.saveNode` (`:1061-1062`). Ce fichier est donc **toujours
-produit**, quelles que soient les cases cochées — l'UI ne le mentionne nulle part.
+produit**, quelles que soient les cases cochées - l'UI ne le mentionne nulle part.
 
 **La valeur de label écrite** provient du tag VTK `LabelValue` s'il existe, sinon du dictionnaire retourné par
 `_get_active_label_map` (`SegmentationWidget.py:877-927`), qui dépend du modèle :
@@ -126,14 +126,14 @@ produit**, quelles que soient les cases cochées — l'UI ne le mentionne nulle 
 | `NasoMaxillaDentSeg` | 6 : Upper Skull=1, Mandible=2, **Maxilla=3**, Upper Teeth=4, Lower Teeth=5, Mandibular canal=6 | `SegmentationWidget.py:907-917` |
 | `UniversalLabDentalsegmentator` | 55 : 32 dents permanentes (1-32), 20 dents temporaires (33-52), Mandible=53, Maxilla=54, Mandibular canal=55 | `SegmentationWidget.py:882-905` |
 
-Un segment dont le nom n'est pas dans le dictionnaire actif **est silencieusement ignoré** (log `[WARN] ... — skipped`,
+Un segment dont le nom n'est pas dans le dictionnaire actif **est silencieusement ignoré** (log `[WARN] ... - skipped`,
 `SegmentationWidget.py:1030-1033`) : il disparaît du NIfTI de sortie.
 
 **Cardinalité globale.** Pour N volumes d'entrée et S segments par volume (S = 5, 6 ou 55 selon le modèle) :
 `N × 1` NIfTI multi-labels **+** (`N × S` STL si coché) **+** (`N × 1` OBJ si coché) **+** (`N × S` NIfTI binaires si
 coché) **+** (`N × 1` glTF si coché) **+** (`N × S` VTK si coché) **+** (`N × 1` VTK fusionné si coché).
 Avec les valeurs par défaut (STL seul) et `UniversalLabDentalsegmentator`, on obtient donc **56 fichiers par scan**.
-Tous les fichiers sont écrits **à plat** dans l'unique dossier de sortie — aucun sous-dossier par patient n'est créé
+Tous les fichiers sont écrits **à plat** dans l'unique dossier de sortie - aucun sous-dossier par patient n'est créé
 (`SegmentationWidget.py:1061`, `:1670-1672`).
 
 **Ce qui n'est jamais écrit :**
@@ -160,7 +160,7 @@ Tous les fichiers sont écrits **à plat** dans l'unique dossier de sortie — a
 - **Sortie plate** : tous les scans écrivent dans le même dossier ; deux scans homonymes (par ex. `case1.nii` et
   `case1.nii.gz` dans le même dossier, tous deux capturés par `*.nii*`) produisent des noms de sortie en collision.
 - **Reprise** : `currentFileIndex` n'est remis à 0 que dans `selectFolder` (`SegmentationWidget.py:610`) ; après un
-  arrêt, un nouvel Apply reprend à l'index courant plutôt qu'au début — comportement non documenté dans l'UI.
+  arrêt, un nouvel Apply reprend à l'index courant plutôt qu'au début - comportement non documenté dans l'UI.
 
 ## Incohérences et pièges observés dans le code
 
@@ -189,7 +189,7 @@ Tous les fichiers sont écrits **à plat** dans l'unique dossier de sortie — a
 5. **Les segments sont renommés par ID positionnel `Segment_1..Segment_n`** (`SegmentationWidget.py:1415`, `:1432`,
    `:1448`). Si `SlicerNNUNetLib.loadSegmentation()` produit d'autres IDs (ou si une classe est absente de la
    prédiction), `segmentation.GetSegment(segmentId)` renvoie `None` et le renommage est silencieusement sauté
-   (`:1419-1420`, `:1436-1437`, `:1452-1453`) — les segments gardent alors leur nom brut et sont ensuite ignorés à
+   (`:1419-1420`, `:1436-1437`, `:1452-1453`) - les segments gardent alors leur nom brut et sont ensuite ignorés à
    l'export NIfTI.
 
 6. **`downloadWeights` efface tout `Resources/ML`.** `shutil.rmtree(self.destWeightFolder)`
@@ -209,7 +209,7 @@ Tous les fichiers sont écrits **à plat** dans l'unique dossier de sortie — a
    (ou vérifie) les poids DentalSegmentator même quand l'utilisateur a sélectionné NasoMaxilla ou UniversalLab.
 
 9. **`getLatestReleaseUrl` prend `assets[0]`** de la concaténation de toutes les releases
-   (`PythonDependencyChecker.py:88-92`) : aucune sélection par nom ni par tag — la publication d'une release
+   (`PythonDependencyChecker.py:88-92`) : aucune sélection par nom ni par tag - la publication d'une release
    contenant un asset non lié aux poids casse le téléchargement.
 
 10. **Chemins `modelPath` asymétriques.** Pour les trois modèles ajoutés, `modelPath` pointe directement sur
@@ -249,7 +249,7 @@ Tous les fichiers sont écrits **à plat** dans l'unique dossier de sortie — a
 
 17. **Écart README / code sur les extensions d'entrée.** Le README (`README.md:658-660`) parle simplement d'un
     « Input folder (containing volumes to process) » sans préciser que seuls `.nii/.nii.gz/.gipl/.gipl.gz` sont
-    acceptés — un dossier de `.nrrd` ou de DICOM produit « No valid volume file found » (`SegmentationWidget.py:659-661`).
+    acceptés - un dossier de `.nrrd` ou de DICOM produit « No valid volume file found » (`SegmentationWidget.py:659-661`).
 
 18. **Écart README / code sur les sorties.** Le README ne mentionne ni les six formats d'export, ni le fait que le
     `.nii.gz` multi-labels est écrit systématiquement, ni le nommage `<volume>_Segmentation.*`.
@@ -263,7 +263,7 @@ Tous les fichiers sont écrits **à plat** dans l'unique dossier de sortie — a
     torchvision sont (ré)installés à chaque lancement de batch, ce qui impose une connexion et allonge fortement le
     démarrage.
 
-## Avis — entrées/sorties à ajouter ou retirer
+## Avis - entrées/sorties à ajouter ou retirer
 
 **À ajouter (entrées)**
 - Un vrai **sélecteur fichier unique** (ou l'acceptation d'un nœud volume déjà chargé) : le mode « dossier obligatoire »
@@ -285,7 +285,7 @@ Tous les fichiers sont écrits **à plat** dans l'unique dossier de sortie — a
   contrôles de session interactive sans effet sur les fichiers écrits : ils brouillent une UI batch (le sélecteur
   peut même provoquer la réutilisation d'un nœud existant et donc un nom de sortie erroné, `:1203-1204`, `:1213-1218`).
 - Le bouton **Resolve Mirroring** : action manuelle post-batch dont le résultat n'est jamais écrit sur disque
-  (`:507-520`) — soit l'intégrer comme option automatique de la boucle avec export, soit le sortir dans un module dédié.
+  (`:507-520`) - soit l'intégrer comme option automatique de la boucle avec export, soit le sortir dans un module dédié.
 - Le **slider glTF reduction factor** devrait être masqué tant que la case glTF n'est pas cochée.
 
 **À ajouter (sorties)**
@@ -301,7 +301,7 @@ Tous les fichiers sont écrits **à plat** dans l'unique dossier de sortie — a
 **À retirer / rendre optionnel (sorties)**
 - Rendre le **NIfTI multi-labels explicitement optionnel** (case à cocher) ou, à défaut, l'annoncer dans l'UI :
   il est écrit inconditionnellement (`:1053-1062`) alors qu'une case « Export NIFTI » existe et fait autre chose
-  (labelmaps binaires par segment, `:1691-1694`) — dualité très trompeuse.
+  (labelmaps binaires par segment, `:1691-1694`) - dualité très trompeuse.
 - Clarifier ou supprimer l'un des deux exports VTK (`_exportVTKPerLabel` `:1800` vs `_exportMergedVTK` `:1701`),
   dont les conventions de numérotation diffèrent (cf. incohérence 14).
 - Supprimer le code mort `_saveSegmentationAsNifti` (`:569-594`) pour éviter de laisser croire à un second chemin

@@ -47,85 +47,384 @@ from ServerToolsCoreLib.errors import error_for_status
 # schema changes, these tests are what notices.
 ALI_SCHEMA = {
     "name": "ALI",
-    "output_kind": "files",
     "arguments": {
         "input": {
-            "label": "Scan or Folder", "section": "Inputs",
-            "visible_when": None, "ui": None, "groups": None,
             "type": "volume_or_zip_file",
-            "types": ["volume_or_zip_file", "surface_or_zip_file"],
+            "types": [
+                "volume_or_zip_file",
+                "surface_or_zip_file"
+            ],
             "required": True,
+            "description": "A CBCT scan (.nii/.nii.gz/.nrrd/.nrrd.gz/.gipl/.gipl.gz), an IOS surface (.vtk/.stl), or a .zip archive of a folder of either -- DICOM series are recognised inside the archive and converted automatically",
             "server_selectable": "testfile",
             "choices": None,
+            "initial": None,
             "extensions": {
-                "volume_or_zip_file": [".nii", ".nii.gz", ".nrrd", ".nrrd.gz", ".gipl", ".gipl.gz", ".zip"],
-                "surface_or_zip_file": [".vtk", ".stl", ".zip"],
+                "volume_or_zip_file": [
+                    ".nii",
+                    ".nii.gz",
+                    ".nrrd",
+                    ".nrrd.gz",
+                    ".gipl",
+                    ".gipl.gz",
+                    ".zip"
+                ],
+                "surface_or_zip_file": [
+                    ".vtk",
+                    ".stl",
+                    ".zip"
+                ]
             },
-            "description": (
-                "A CBCT scan (.nii/.nii.gz/.nrrd/.nrrd.gz/.gipl/.gipl.gz), an IOS surface "
-                "(.vtk/.stl), or a .zip archive of a folder of either -- DICOM series are "
-                "recognised inside the archive and converted automatically"
-            ),
+            "label": "Scan or Folder",
+            "section": "Inputs",
+            "visible_when": None,
+            "ui": None,
+            "groups": None
         },
-        # required: False — the server picks the hosted bundle matching the
-        # detected mode when no name is sent.
         "model": {
-            "label": "Model Bundle", "section": "Inputs",
-            "visible_when": None, "ui": None, "groups": None,
-            "type": "str", "types": ["str"], "required": False,
-            "server_selectable": "model", "choices": None, "extensions": None,
-            "description": "Name of a model bundle hosted on the server (see GET /tools/ALI/data)",
+            "type": "str",
+            "types": [
+                "str"
+            ],
+            "required": False,
+            "description": "Name of a model bundle hosted on the server (see GET /tools/ALI/data). Leave empty to let the server pick the bundle matching the detected mode. CBCT bundles hold <landmark>/<scale>/*.pth; IOS bundles hold checkpoints named with an 'O' or 'C' token and an 'Upper' or 'Lower' one, e.g. Upper_O_model.pth",
+            "server_selectable": "model",
+            "choices": None,
+            "initial": None,
+            "extensions": None,
+            "label": "Model Bundle",
+            "section": "Inputs",
+            "visible_when": None,
+            "ui": None,
+            "groups": None
         },
         "cbct_regions": {
-            "label": "Regions", "section": "CBCT landmarks",
-            "visible_when": None, "ui": "inline", "groups": None,
-            "type": "multichoice", "types": ["multichoice"], "required": False,
-            "server_selectable": None, "extensions": None,
-            "choices": {"Cranial base": True, "Upper": True, "Lower": True, "Impacted canine": True},
+            "type": "multichoice",
+            "types": [
+                "multichoice"
+            ],
+            "required": False,
             "description": "CBCT only: anatomical regions to predict",
-        },
-        # The full catalog is 119 options across the same four groups; a
-        # representative slice of each is enough here, since what these tests
-        # check is the shape — every option starts off, and the tabs are the
-        # server's own grouping.
-        "landmarks": {
-            "label": "Individual landmarks", "section": "CBCT landmarks",
-            "visible_when": None, "ui": "tabs",
-            "groups": {
-                "Cranial base": ["Ba", "S", "N", "RPo", "LPo"],
-                "Upper": ["ROr", "LOr", "ANS"],
-                "Lower": ["Me", "Gn", "Pog"],
-                "Impacted canine": ["UR3OIP"],
-            },
-            "type": "multichoice", "types": ["multichoice"], "required": False,
-            "server_selectable": None, "extensions": None,
+            "server_selectable": None,
             "choices": {
-                name: False
-                for name in ("Ba", "S", "N", "RPo", "LPo", "ROr", "LOr", "ANS",
-                             "Me", "Gn", "Pog", "UR3OIP")
+                "Cranial base": True,
+                "Upper": True,
+                "Lower": True,
+                "Impacted canine": True
             },
-            "description": (
-                "CBCT only: predict exactly these landmarks. Leave every box unchecked "
-                "to select by region instead -- naming any landmark here REPLACES the "
-                "region selection rather than narrowing it"
-            ),
+            "initial": None,
+            "extensions": None,
+            "label": "Regions",
+            "section": "CBCT landmarks",
+            "visible_when": None,
+            "ui": "inline",
+            "groups": None
+        },
+        "landmarks": {
+            "type": "multichoice",
+            "types": [
+                "multichoice"
+            ],
+            "required": False,
+            "description": "CBCT only: predict exactly these landmarks. Leave every box unchecked to select by region instead -- naming any landmark here REPLACES the region selection rather than narrowing it",
+            "server_selectable": None,
+            "choices": {
+                "Ba": False,
+                "S": False,
+                "N": False,
+                "RPo": False,
+                "LPo": False,
+                "RFZyg": False,
+                "LFZyg": False,
+                "C2": False,
+                "C3": False,
+                "C4": False,
+                "RInfOr": False,
+                "LInfOr": False,
+                "LMZyg": False,
+                "RPF": False,
+                "LPF": False,
+                "PNS": False,
+                "ANS": False,
+                "A": False,
+                "UR3O": False,
+                "UR1O": False,
+                "UL3O": False,
+                "UR6DB": False,
+                "UR6MB": False,
+                "UL6MB": False,
+                "UL6DB": False,
+                "IF": False,
+                "ROr": False,
+                "LOr": False,
+                "RMZyg": False,
+                "RNC": False,
+                "LNC": False,
+                "UR7O": False,
+                "UR5O": False,
+                "UR4O": False,
+                "UR2O": False,
+                "UL1O": False,
+                "UL2O": False,
+                "UL4O": False,
+                "UL5O": False,
+                "UL7O": False,
+                "UL7R": False,
+                "UL5R": False,
+                "UL4R": False,
+                "UL2R": False,
+                "UL1R": False,
+                "UR2R": False,
+                "UR4R": False,
+                "UR5R": False,
+                "UR7R": False,
+                "UR6MP": False,
+                "UL6MP": False,
+                "UL6R": False,
+                "UR6R": False,
+                "UR6O": False,
+                "UL6O": False,
+                "UL3R": False,
+                "UR3R": False,
+                "UR1R": False,
+                "RCo": False,
+                "RGo": False,
+                "Me": False,
+                "Gn": False,
+                "Pog": False,
+                "PogL": False,
+                "B": False,
+                "LGo": False,
+                "LCo": False,
+                "LR1O": False,
+                "LL6MB": False,
+                "LL6DB": False,
+                "LR6MB": False,
+                "LR6DB": False,
+                "LAF": False,
+                "LAE": False,
+                "RAF": False,
+                "RAE": False,
+                "LMCo": False,
+                "LLCo": False,
+                "RMCo": False,
+                "RLCo": False,
+                "RMeF": False,
+                "LMeF": False,
+                "RSig": False,
+                "RPRa": False,
+                "RARa": False,
+                "LSig": False,
+                "LARa": False,
+                "LPRa": False,
+                "LR7R": False,
+                "LR5R": False,
+                "LR4R": False,
+                "LR3R": False,
+                "LL3R": False,
+                "LL4R": False,
+                "LL5R": False,
+                "LL7R": False,
+                "LL7O": False,
+                "LL5O": False,
+                "LL4O": False,
+                "LL3O": False,
+                "LL2O": False,
+                "LL1O": False,
+                "LR2O": False,
+                "LR3O": False,
+                "LR4O": False,
+                "LR5O": False,
+                "LR7O": False,
+                "LL6R": False,
+                "LR6R": False,
+                "LL6O": False,
+                "LR6O": False,
+                "LR1R": False,
+                "LL1R": False,
+                "LL2R": False,
+                "LR2R": False,
+                "UR3OIP": False,
+                "UL3OIP": False,
+                "UR3RIP": False,
+                "UL3RIP": False
+            },
+            "initial": None,
+            "extensions": None,
+            "label": "Individual landmarks",
+            "section": "CBCT landmarks",
+            "visible_when": None,
+            "ui": "tabs",
+            "groups": {
+                "Cranial base": [
+                    "Ba",
+                    "S",
+                    "N",
+                    "RPo",
+                    "LPo",
+                    "RFZyg",
+                    "LFZyg",
+                    "C2",
+                    "C3",
+                    "C4"
+                ],
+                "Upper": [
+                    "RInfOr",
+                    "LInfOr",
+                    "LMZyg",
+                    "RPF",
+                    "LPF",
+                    "PNS",
+                    "ANS",
+                    "A",
+                    "UR3O",
+                    "UR1O",
+                    "UL3O",
+                    "UR6DB",
+                    "UR6MB",
+                    "UL6MB",
+                    "UL6DB",
+                    "IF",
+                    "ROr",
+                    "LOr",
+                    "RMZyg",
+                    "RNC",
+                    "LNC",
+                    "UR7O",
+                    "UR5O",
+                    "UR4O",
+                    "UR2O",
+                    "UL1O",
+                    "UL2O",
+                    "UL4O",
+                    "UL5O",
+                    "UL7O",
+                    "UL7R",
+                    "UL5R",
+                    "UL4R",
+                    "UL2R",
+                    "UL1R",
+                    "UR2R",
+                    "UR4R",
+                    "UR5R",
+                    "UR7R",
+                    "UR6MP",
+                    "UL6MP",
+                    "UL6R",
+                    "UR6R",
+                    "UR6O",
+                    "UL6O",
+                    "UL3R",
+                    "UR3R",
+                    "UR1R"
+                ],
+                "Lower": [
+                    "RCo",
+                    "RGo",
+                    "Me",
+                    "Gn",
+                    "Pog",
+                    "PogL",
+                    "B",
+                    "LGo",
+                    "LCo",
+                    "LR1O",
+                    "LL6MB",
+                    "LL6DB",
+                    "LR6MB",
+                    "LR6DB",
+                    "LAF",
+                    "LAE",
+                    "RAF",
+                    "RAE",
+                    "LMCo",
+                    "LLCo",
+                    "RMCo",
+                    "RLCo",
+                    "RMeF",
+                    "LMeF",
+                    "RSig",
+                    "RPRa",
+                    "RARa",
+                    "LSig",
+                    "LARa",
+                    "LPRa",
+                    "LR7R",
+                    "LR5R",
+                    "LR4R",
+                    "LR3R",
+                    "LL3R",
+                    "LL4R",
+                    "LL5R",
+                    "LL7R",
+                    "LL7O",
+                    "LL5O",
+                    "LL4O",
+                    "LL3O",
+                    "LL2O",
+                    "LL1O",
+                    "LR2O",
+                    "LR3O",
+                    "LR4O",
+                    "LR5O",
+                    "LR7O",
+                    "LL6R",
+                    "LR6R",
+                    "LL6O",
+                    "LR6O",
+                    "LR1R",
+                    "LL1R",
+                    "LL2R",
+                    "LR2R"
+                ],
+                "Impacted canine": [
+                    "UR3OIP",
+                    "UL3OIP",
+                    "UR3RIP",
+                    "UL3RIP"
+                ]
+            }
         },
         "ios_networks": {
-            "label": "Landmark families", "section": "IOS landmarks",
-            "visible_when": None, "ui": "inline", "groups": None,
-            "type": "multichoice", "types": ["multichoice"], "required": False,
-            "server_selectable": None, "extensions": None,
-            "choices": {"Occlusal": True, "Cervical": True},
+            "type": "multichoice",
+            "types": [
+                "multichoice"
+            ],
+            "required": False,
             "description": "IOS only: landmark families to predict",
+            "server_selectable": None,
+            "choices": {
+                "Occlusal": True,
+                "Cervical": True,
+                "Mucogingival": False
+            },
+            "initial": None,
+            "extensions": None,
+            "label": "Landmark families",
+            "section": "IOS landmarks",
+            "visible_when": None,
+            "ui": "inline",
+            "groups": None
         },
         "prediction_ID": {
-            "label": "Prediction ID", "section": "Outputs",
-            "visible_when": None, "ui": None, "groups": None,
-            "type": "str", "types": ["str"], "required": False,
-            "server_selectable": None, "choices": None, "extensions": None,
+            "type": "str",
+            "types": [
+                "str"
+            ],
+            "required": False,
             "description": "Suffix used in output file names, e.g. scan_lm_Pred.mrk.json",
-        },
+            "server_selectable": None,
+            "choices": None,
+            "initial": None,
+            "extensions": None,
+            "label": "Prediction ID",
+            "section": "Outputs",
+            "visible_when": None,
+            "ui": None,
+            "groups": None
+        }
     },
+    "output_kind": "files"
 }
 
 # What ALI/ALI.py declares. Asserted rather than imported — see the module
@@ -338,7 +637,13 @@ class TestSelectionGroups(unittest.TestCase):
             group = widgets[name]
             self.assertIsInstance(group, formgen.MultiChoiceGroup)
             self.assertEqual(list(group.boxes), list(_argument(name)["choices"]))
-            self.assertTrue(all(box.isChecked() for box in group.boxes.values()))
+            # Each box starts at the state the SERVER declared, not all-on:
+            # Mucogingival is off by default (one point per lower tooth, wanted
+            # by AREG's lower-arch registration and by nobody asking for crown
+            # landmarks), and a panel that ticked it anyway would add a third
+            # pass over every mesh of every run.
+            for option, checked in _argument(name)["choices"].items():
+                self.assertEqual(group.boxes[option].isChecked(), checked, option)
 
     def test_the_server_wording_is_visible_not_just_a_tooltip(self):
         # Which group applies depends on data the client has not looked at, so
@@ -368,7 +673,10 @@ class TestSelectionGroups(unittest.TestCase):
             box.setChecked(False)
         # It must reach the server, which answers 422 naming the argument to
         # fill in — that 422 is how a mode mismatch explains itself.
-        self.assertEqual(group.value(), {"Occlusal": False, "Cervical": False})
+        self.assertEqual(
+            group.value(),
+            {"Occlusal": False, "Cervical": False, "Mucogingival": False},
+        )
         self.assertTrue(formgen.all_required_filled(
             {"ios_networks": group}, {"ios_networks": _argument("ios_networks")}
         ))

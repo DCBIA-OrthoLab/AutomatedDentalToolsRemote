@@ -83,12 +83,12 @@ class PipRunner(qt.QObject):
         self._onFinished = onFinished
         self._proc       = qt.QProcess(self)           # vie = celle du runner
 
-        # — configuration process —
+        # - configuration process - 
         self._proc.setProgram(sys.executable)          # PythonSlicer
         self._proc.setArguments(["-m", "pip", "install"] + packages)
         self._proc.setProcessChannelMode(qt.QProcess.MergedChannels)
 
-        # — connect signals —
+        # - connect signals - 
         self._proc.readyReadStandardOutput.connect(self._readLines)
         self._proc.readyReadStandardError.connect(self._readLines)
         self._proc.finished.connect(self._procFinished)
@@ -420,7 +420,7 @@ class SegmentationWidget(qt.QWidget):
             else:
                 val = full_label_map.get(segment.GetName())
                 if val is None:
-                    self.onProgressInfo(f"[WARN] Unknown LabelValue for «{segment.GetName()}» — ignored.")
+                    self.onProgressInfo(f"[WARN] Unknown LabelValue for «{segment.GetName()}» - ignored.")
                     continue
 
             # b. Export THIS segment to a temporary label map
@@ -524,7 +524,7 @@ class SegmentationWidget(qt.QWidget):
         segIds_sorted    = list(correctedSeg.GetSegmentation().GetSegmentIDs())
 
         if len(unique_vals) != len(segIds_sorted):
-            self.onProgressInfo("[WARN] Number of values ​​≠ number of segments — check import.")
+            self.onProgressInfo("[WARN] Number of values ​​≠ number of segments - check import.")
 
         for val, segId in zip(unique_vals, segIds_sorted):
             segment = correctedSeg.GetSegmentation().GetSegment(segId)
@@ -980,7 +980,7 @@ class SegmentationWidget(qt.QWidget):
                         value = full_label_map.get(name)
 
                     if value is None:
-                        self.onProgressInfo(f"[WARN] unexpected segment «{name}» — ignored")
+                        self.onProgressInfo(f"[WARN] unexpected segment «{name}» - ignored")
                         continue
 
                     # Rewrite the tag to have a relevant tag
@@ -1029,7 +1029,7 @@ class SegmentationWidget(qt.QWidget):
 
                 if value is None:
                     # Si on ne trouve pas de valeur, on ignore proprement
-                    self.onProgressInfo(f"[WARN] Unknown label for segment «{name}» — skipped")
+                    self.onProgressInfo(f"[WARN] Unknown label for segment «{name}» - skipped")
                     continue
 
                 # Labelmap temporaire

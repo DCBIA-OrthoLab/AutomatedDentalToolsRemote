@@ -1,9 +1,9 @@
-"""Unit tests for ServerToolsCoreLib.formgen — run outside Slicer, `qt`/`ctk`/
+"""Unit tests for ServerToolsCoreLib.formgen - run outside Slicer, `qt`/`ctk`/
 `slicer` stubbed (see qt_stubs.py).
 
 Everything here is driven by EXAMPLE_TOOL_SCHEMA, the real `GET /tools` entry
 for `example_tool`: it is the one tool exercising every argument shape the
-panel has to render — free text, int, float, a single-choice dropdown, a
+panel has to render - free text, int, float, a single-choice dropdown, a
 multi-choice checkbox group, and a file argument that also accepts a folder.
 
 Usage:
@@ -101,6 +101,27 @@ PREFILLED_SCHEMA = {
     },
 }
 
+
+
+class HiddenArgumentTest(unittest.TestCase):
+    """`hidden` is never rendered, whatever else the panel holds.
+
+    It carries the arguments a clinician has no business being asked -- which
+    CUDA device, nnUNet's tile step size -- named by the deployment rather than
+    by the tool. The tool still declares them and still applies its own
+    defaults; the client simply does not ask.
+    """
+
+    def test_a_hidden_argument_is_not_visible(self):
+        self.assertFalse(formgen.is_visible({"type": "float", "hidden": True}, {}))
+
+    def test_hidden_beats_a_satisfied_visible_when(self):
+        spec = {"type": "float", "hidden": True, "visible_when": {"mode": "CBCT"}}
+        self.assertFalse(formgen.is_visible(spec, {"mode": "CBCT"}))
+
+    def test_an_argument_without_the_key_is_unaffected(self):
+        self.assertTrue(formgen.is_visible({"type": "float"}, {}))
+        self.assertTrue(formgen.is_visible({"type": "float", "hidden": False}, {}))
 
 class ScalarInitialValueTest(unittest.TestCase):
     """A scalar argument's `initial` reaches its widget.
@@ -359,7 +380,7 @@ class ChangeSignalTest(unittest.TestCase):
 
 
 class AutoFileModeTest(unittest.TestCase):
-    """The one rule deciding what a file argument's picker looks like — and,
+    """The one rule deciding what a file argument's picker looks like - and,
     downstream, whether base_widget zips the selection before uploading."""
 
     def test_folder_plus_a_file_type_offers_both(self):
@@ -469,7 +490,7 @@ class ResultKindTest(unittest.TestCase):
 
 
 class FileOrFolderInputTest(unittest.TestCase):
-    """The `input` argument: `types` = ["csv_file", "folder"] — one path field
+    """The `input` argument: `types` = ["csv_file", "folder"] - one path field
     taking either, with the client working out which it got."""
 
     def setUp(self):
@@ -488,7 +509,7 @@ class FileOrFolderInputTest(unittest.TestCase):
         self.assertIsInstance(self.field.pathEdit, qt.QLineEdit)
 
     def test_the_file_dialog_is_restricted_to_the_declared_extensions(self):
-        # The extensions still come from `types` — that is the whole point of
+        # The extensions still come from `types` - that is the whole point of
         # driving the dialog here rather than letting ctkPathLineEdit do it.
         self.field.fileButton.clicked.emit()
 
@@ -733,7 +754,7 @@ class LabelTest(unittest.TestCase):
 
     def test_the_fallback_is_why_labels_belong_server_side(self):
         # It cannot know that "cbct" is an acronym, nor that ASO's `input`
-        # holds the scans AND their landmarks. That is not a bug to fix here —
+        # holds the scans AND their landmarks. That is not a bug to fix here - 
         # no naming rule can recover a phrase nobody wrote down.
         self.assertEqual(formgen.label_for("cbct_landmarks", {}), "Cbct landmarks")
 

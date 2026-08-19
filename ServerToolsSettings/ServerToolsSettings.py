@@ -132,7 +132,7 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         slicer.util.showStatusMessage(_("Restored default server settings."), 3000)
 
     def _refreshStatus(self) -> None:
-        """Owned by the widget, not a local — see ServerToolWidgetBase._refreshServerStatus()."""
+        """Owned by the widget, not a local - see ServerToolWidgetBase._refreshServerStatus()."""
         if self._statusJob:
             self._statusJob.cancel()
 

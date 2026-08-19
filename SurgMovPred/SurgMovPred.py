@@ -30,11 +30,11 @@ class SurgMovPredWidget(ServerToolWidgetBase):
     """Thin GUI: everything else (HTTP, async, form generation, styling, lifecycle)
     lives in ServerToolsCoreLib. See ARCHITECTURE.md."""
 
-    TOOL_NAME = "SurgMovPred"
-    # Both attributes below are overrides — the two things this tool's schema
+    TOOL_NAME = "Surg_Mov_Pred"
+    # Both attributes below are overrides - the two things this tool's schema
     # cannot state. Everything else is derived from it: "model" is declared as
     # a server_selectable str, so the auto-UI renders it as a dropdown filled
-    # from GET /tools/SurgMovPred/data and sends the chosen model's *name* —
+    # from GET /tools/SurgMovPred/data and sends the chosen model's *name* - 
     # no model file ever leaves or reaches this machine.
     #
     # The server types "input" as a plain zip_file, so it would get a file

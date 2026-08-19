@@ -11,9 +11,9 @@ Architecture : le widget `CNEWidget` (`CNE/CNE.py:177`) collecte les paramètres
 | Nom | Type | Extensions acceptées | Fichier/Dossier | Récursif | Obligatoire | Référence |
 |---|---|---|---|---|---|---|
 | `notesFolder_input` | Dossier de notes cliniques | `.txt`, `.pdf`, `.docx` (minuscules uniquement, cf. Incohérences) | Dossier uniquement (`ctkPathLineEdit::Dirs`) | Non | Oui | `CNE/CNE.ui:78-85`, `CNE_CLI/CNE_CLI.py:24`, `CNE_CLI/CNE_CLI.py:131-133` |
-| `notesType` | Choix radio `TMJ` / `Ortho` | — | — | — | Oui (défaut `TMJ`) | `CNE/CNE.ui:98-110`, `CNE/CNE.py:171`, `CNE/CNE.py:377-382` |
-| `notesFolder_output` | Dossier de sortie | — (créé si absent) | Dossier uniquement (`ctkPathLineEdit::Dirs`) | — | Oui | `CNE/CNE.ui:132-139`, `CNE/CNE.py:578` |
-| `modelPath` (CLI, auto) | Modèle GGUF | `.gguf` | Fichier unique, résolu automatiquement par le widget | — | Oui (téléchargé automatiquement) | `CNE_CLI/CNE_CLI.xml:39-43`, `CNE/CNE.py:478-552` |
+| `notesType` | Choix radio `TMJ` / `Ortho` | - | - | - | Oui (défaut `TMJ`) | `CNE/CNE.ui:98-110`, `CNE/CNE.py:171`, `CNE/CNE.py:377-382` |
+| `notesFolder_output` | Dossier de sortie | - (créé si absent) | Dossier uniquement (`ctkPathLineEdit::Dirs`) | - | Oui | `CNE/CNE.ui:132-139`, `CNE/CNE.py:578` |
+| `modelPath` (CLI, auto) | Modèle GGUF | `.gguf` | Fichier unique, résolu automatiquement par le widget | - | Oui (téléchargé automatiquement) | `CNE_CLI/CNE_CLI.xml:39-43`, `CNE/CNE.py:478-552` |
 
 Détails :
 
@@ -37,7 +37,7 @@ Détails :
 Détails :
 
 - **Contenu** : la réponse du LLM est post-traitée. Si un bloc JSON `{...}` est trouvé, il est parsé, la clé `"extraction"` est dépliée si présente, et chaque paire est écrite `f"{key} : {value}\n"` (`CNE_CLI/CNE_CLI.py:205-218`). Sinon (pas de JSON ou JSON invalide), la réponse brute est écrite telle quelle (`CNE_CLI/CNE_CLI.py:219-224`). La structure JSON originale n'est donc **jamais conservée** sur disque.
-- **Nommage** : `output_filename = f"Extraction_{os.path.splitext(filename)[0]}.txt"` (`CNE_CLI/CNE_CLI.py:226`). La sortie est toujours `.txt`, quelle que soit l'extension d'entrée — donc `note1.pdf` et `note1.txt` dans le même dossier produisent le **même** fichier `Extraction_note1.txt` (écrasement silencieux, voir Incohérences).
+- **Nommage** : `output_filename = f"Extraction_{os.path.splitext(filename)[0]}.txt"` (`CNE_CLI/CNE_CLI.py:226`). La sortie est toujours `.txt`, quelle que soit l'extension d'entrée - donc `note1.pdf` et `note1.txt` dans le même dossier produisent le **même** fichier `Extraction_note1.txt` (écrasement silencieux, voir Incohérences).
 - **Variations selon options** : `notesType` ne change pas le format ni le nommage des sorties ; il change seulement le modèle utilisé, la taille de contexte et la présence du prompt système. Il n'existe aucune autre option influençant les sorties.
 - **Aucune sortie MRML** : rien n'est chargé dans la scène Slicer ; le CLI ne retourne aucun paramètre de sortie déclaré dans le XML (`CNE_CLI/CNE_CLI.xml:13-45`, tous les paramètres sont des `<string>` d'entrée).
 - **Dossier de sortie créé** par le widget avant lancement : `os.makedirs(notesFolder_output, exist_ok=True)` (`CNE/CNE.py:578`).
@@ -46,24 +46,24 @@ Détails :
 
 - L'entrée est **exclusivement un dossier** : le champ UI est filtré `ctkPathLineEdit::Dirs` (`CNE/CNE.ui:79-81`) et le CLI fait un `glob` sur le dossier (`CNE_CLI/CNE_CLI.py:132-133`). Il est impossible de sélectionner un fichier unique.
 - Le scan est **non récursif** : les sous-dossiers sont ignorés silencieusement.
-- Dossier vide ou sans fichier supporté : simple warning dans le log CLI puis `sys.exit(0)` avec progression forcée à 100 % (`CNE_CLI/CNE_CLI.py:135-139`) — le widget affichera quand même « Notes extraction is complete! » (`CNE/CNE.py:605-607`) sans qu'aucun fichier n'ait été écrit.
+- Dossier vide ou sans fichier supporté : simple warning dans le log CLI puis `sys.exit(0)` avec progression forcée à 100 % (`CNE_CLI/CNE_CLI.py:135-139`) - le widget affichera quand même « Notes extraction is complete! » (`CNE/CNE.py:605-607`) sans qu'aucun fichier n'ait été écrit.
 - La sortie est également un dossier ; les sorties y sont écrites à plat, sans reproduction d'arborescence (il n'y en a pas, faute de récursion).
 
 ## Incohérences et pièges observés dans le code
 
-1. **Dossiers de test de sortie manquants** : `copyTestFiles` tente de copier `output_Ortho` / `output_TMJ` (`CNE/CNE.py:440-443`) mais seuls `input_Ortho` et `input_TMJ` existent dans `CNE/Resources/testfiles/` — la copie est sautée avec un warning (`CNE/CNE.py:452-454`) et le chemin de sortie renvoyé (`CNE/CNE.py:473-476`) puis injecté dans l'UI (`CNE/CNE.py:317`) pointe vers un dossier inexistant (rattrapé de justesse par le `os.makedirs` de `CNE/CNE.py:578`).
+1. **Dossiers de test de sortie manquants** : `copyTestFiles` tente de copier `output_Ortho` / `output_TMJ` (`CNE/CNE.py:440-443`) mais seuls `input_Ortho` et `input_TMJ` existent dans `CNE/Resources/testfiles/` - la copie est sautée avec un warning (`CNE/CNE.py:452-454`) et le chemin de sortie renvoyé (`CNE/CNE.py:473-476`) puis injecté dans l'UI (`CNE/CNE.py:317`) pointe vers un dossier inexistant (rattrapé de justesse par le `os.makedirs` de `CNE/CNE.py:578`).
 2. **Placeholder trompeur sur le champ de sortie** : le dossier de sortie affiche « supported types: .docx / .pdf / .txt » (`CNE/CNE.ui:137`), copié-collé du champ d'entrée alors que la sortie est toujours du `.txt`.
-3. **XML CLI non mis à jour depuis le template** : description « Apply a Gaussian blur to an image » (`CNE_CLI/CNE_CLI.xml:6`), contributeur « Andras Lasso (PerkLab) » (`:10`), URL de doc placeholder (`:8`), descriptions de paramètres absurdes (« Replace to add to file names », `:29` ; « by to file names », `:36`), et index de paramètres discontinus 0, 2, 3, 4 (`:21,28,35,42` — l'index 1 manque).
-4. **Casse des extensions** : `glob.glob("*.txt")` est sensible à la casse sous Linux/macOS — `NOTE.TXT`, `note.PDF`, `note.Docx` sont silencieusement ignorés (`CNE_CLI/CNE_CLI.py:131-133`). `.doc` (ancien Word) n'est pas géré du tout, alors que le placeholder dit « .docx ».
+3. **XML CLI non mis à jour depuis le template** : description « Apply a Gaussian blur to an image » (`CNE_CLI/CNE_CLI.xml:6`), contributeur « Andras Lasso (PerkLab) » (`:10`), URL de doc placeholder (`:8`), descriptions de paramètres absurdes (« Replace to add to file names », `:29` ; « by to file names », `:36`), et index de paramètres discontinus 0, 2, 3, 4 (`:21,28,35,42` - l'index 1 manque).
+4. **Casse des extensions** : `glob.glob("*.txt")` est sensible à la casse sous Linux/macOS - `NOTE.TXT`, `note.PDF`, `note.Docx` sont silencieusement ignorés (`CNE_CLI/CNE_CLI.py:131-133`). `.doc` (ancien Word) n'est pas géré du tout, alors que le placeholder dit « .docx ».
 5. **Collision de noms de sortie** : deux entrées de même nom de base et d'extensions différentes écrasent la même sortie `Extraction_<nom>.txt` sans avertissement (`CNE_CLI/CNE_CLI.py:226-230`).
-6. **`notesType` non validé** : `process()` ne bloque que si les dossiers manquent (`CNE/CNE.py:558`) — `notesType` est ajouté à la liste `missing` (`:562-563`) mais ce bloc n'est jamais atteint si seuls les dossiers sont renseignés. Un `notesType` vide (aucun radio coché, `CNE/CNE.py:381-382`) atteint `getModelPath` où ni `repo_id` ni `fileName` ne sont définis → `UnboundLocalError` brut (`CNE/CNE.py:482-496`, pas de branche `else`).
+6. **`notesType` non validé** : `process()` ne bloque que si les dossiers manquent (`CNE/CNE.py:558`) - `notesType` est ajouté à la liste `missing` (`:562-563`) mais ce bloc n'est jamais atteint si seuls les dossiers sont renseignés. Un `notesType` vide (aucun radio coché, `CNE/CNE.py:381-382`) atteint `getModelPath` où ni `repo_id` ni `fileName` ne sont définis → `UnboundLocalError` brut (`CNE/CNE.py:482-496`, pas de branche `else`).
 7. **Bouton Run toujours actif** : `_checkCanApply` active inconditionnellement le bouton (`CNE/CNE.py:298-302`), aucune validation des champs côté UI.
 8. **Succès affiché même sans traitement** : dossier vide ⇒ `exit(0)` (`CNE_CLI/CNE_CLI.py:135-139`) ⇒ popup « Notes extraction is complete! » (`CNE/CNE.py:605-607`) ; de même, des fichiers individuellement en échec (`failed_files`, `CNE_CLI/CNE_CLI.py:235-239`) n'empêchent pas le statut « Completed ».
 9. **Pas de vérification d'intégrité du modèle** : un `.gguf` tronqué (crash, coupure réseau ayant contourné le nettoyage) est réutilisé tel quel puisque seul `os.path.exists` est testé (`CNE/CNE.py:513`).
 10. **README obsolète** : le README de l'extension documente MedX (« Summarize clinical notes », `README.md:41`) et ne mentionne jamais CNE, alors que MedX est désactivé dans le build (`CMakeLists.txt:42-44`).
-11. **Prompt système uniquement pour TMJ** : `INSTRUCTION_TMJ` n'a pas d'équivalent Ortho (`CNE_CLI/CNE_CLI.py:22`, `:193-194`) — voulu (modèle Ortho fine-tuné sans système ?) mais non documenté.
+11. **Prompt système uniquement pour TMJ** : `INSTRUCTION_TMJ` n'a pas d'équivalent Ortho (`CNE_CLI/CNE_CLI.py:22`, `:193-194`) - voulu (modèle Ortho fine-tuné sans système ?) mais non documenté.
 
-## Avis — entrées/sorties à ajouter ou retirer
+## Avis - entrées/sorties à ajouter ou retirer
 
 - **Ajouter une option « fichier unique »** ou accepter un chemin de fichier en entrée : pour résumer une seule note, l'utilisateur doit aujourd'hui créer un dossier dédié.
 - **Ajouter un scan insensible à la casse** (et éventuellement une option récursive) : trivial à corriger (`glob` sur `ext.lower()` du listing du dossier) et élimine des pertes silencieuses de fichiers.
