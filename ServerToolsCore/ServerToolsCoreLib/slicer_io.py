@@ -7,11 +7,16 @@ TempWorkspace so cleanup on error is never forgotten.
 
 import logging
 import os
+import re
 import shutil
 import tempfile
 import zipfile
+from typing import Optional
+from urllib.parse import urlparse
 
 import slicer
+
+from . import config
 
 logger = logging.getLogger("ServerToolsCore.slicer_io")
 
@@ -76,7 +81,27 @@ _STORED_EXTENSIONS = (
 _COMPRESS_LEVEL = 1
 
 
-def zip_folder(folder: str, dest_path: str) -> str:
+# Hosts whose link is faster than the compressor, so deflating on the way out
+# costs more than it saves (see config.ZIP_COMPRESS for the measurements).
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+
+
+def _link_is_fast(server_url: str) -> bool:
+    """Is the server close enough that compressing is a net loss?
+
+    Loopback and the private ranges only. Anything else is treated as remote,
+    which is the safe way round: guessing "fast" on a real link would spend a
+    third more bytes on the wire to save CPU that was not the constraint.
+    """
+    host = urlparse(server_url).hostname or ""
+    if host in _LOCAL_HOSTS:
+        return True
+    return host.startswith(("10.", "192.168.")) or bool(
+        re.match(r"172\.(1[6-9]|2[0-9]|3[01])\.", host)
+    )
+
+
+def zip_folder(folder: str, dest_path: str, compress: Optional[bool] = None) -> str:
     """Pack a folder for upload, choosing the compression per member.
 
     A folder argument is zipped only because HTTP has no notion of a folder --
@@ -84,11 +109,22 @@ def zip_folder(folder: str, dest_path: str) -> str:
     already-compressed members are STORED as-is and only what genuinely
     deflates is deflated, which is 14x faster to pack for exactly the same
     bytes on the wire.
+
+    `compress` decides whether the rest is deflated at all. None reads
+    config.ZIP_COMPRESS, which in turn defaults to "not against a local
+    server": deflating runs at 57 MB/s on one core, and a link faster than
+    about 27 MB/s carries the raw bytes sooner than the compressor can shrink
+    them.
     """
     if not os.path.isdir(folder):
         raise IOError(f"Not a folder: {folder}")
+    if compress is None:
+        compress = config.ZIP_COMPRESS
+    if compress is None:
+        compress = not _link_is_fast(config.SERVER_URL)
+    default_type = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
     with zipfile.ZipFile(
-        dest_path, "w", zipfile.ZIP_DEFLATED, compresslevel=_COMPRESS_LEVEL
+        dest_path, "w", default_type, compresslevel=_COMPRESS_LEVEL
     ) as archive:
         for root, _dirs, files in os.walk(folder):
             for name in files:
