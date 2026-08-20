@@ -328,9 +328,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # screen is where that corner sits in the mouth.
             columns = formgen.section_columns(arguments, sectionName)
             if columns > 1:
-                grid = qt.QGridLayout(box)
-                grid.sadtColumns = columns
-                self._sectionLayouts[sectionName] = grid
+                self._sectionLayouts[sectionName] = qt.QGridLayout(box)
             else:
                 self._sectionLayouts[sectionName] = qt.QFormLayout(box)
             self._sectionBoxes[sectionName] = box

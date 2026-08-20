@@ -955,8 +955,12 @@ def build(arguments_schema: dict, layout, sections=None, rows=None) -> dict:
             stack.setContentsMargins(0, 0, 0, 0)
             stack.addWidget(label)
             stack.addWidget(field)
+            # Read back from the schema, never stored on the layout: PythonQt
+            # forbids creating an attribute on a C++ object, so `grid.columns =
+            # 2` fails with "creating new attributes on C++ objects is not
+            # allowed" and takes the whole panel down.
             placed = target.count()
-            columns = max(1, getattr(target, "sadtColumns", 1))
+            columns = section_columns(arguments_schema, section_of(spec))
             target.addWidget(cell, placed // columns, placed % columns)
         widgets[name] = widget
         if rows is not None:
