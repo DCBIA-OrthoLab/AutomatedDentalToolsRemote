@@ -1,24 +1,20 @@
 #-----------------------------------------------------------------------------
 set(MODULE_NAME MRI2CBCT)
-set(FOLDER_LIBRARY MRI2CBCT_utils)
 
 #-----------------------------------------------------------------------------
+# MRI2CBCT_utils/ belonged to the former local module: it drove the six
+# MRI2CBCT_CLI modules from inside Slicer, downloaded the nnUNet condyle model
+# into Documents, and carried 488 lines of interactive manual approximation.
+# The module is now a thin client of the server's "MRI2CBCT" tool and builds
+# its panel from GET /tools, so neither it nor the .ui is shipped any more. The
+# files are left in the tree rather than deleted, the same way ALI_Method was -
+# see ARCHITECTURE.md.
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
-  ${FOLDER_LIBRARY}/Approx_MRI2CBCT.py
-  ${FOLDER_LIBRARY}/ManualApprox_MRI2CBCT.py
-  ${FOLDER_LIBRARY}/Method.py
-  ${FOLDER_LIBRARY}/Preprocess_CBCT_MRI.py
-  ${FOLDER_LIBRARY}/Preprocess_MRI.py
-  ${FOLDER_LIBRARY}/Reg_MRI2CBCT.py
-  ${FOLDER_LIBRARY}/LR_crop.py
-  ${FOLDER_LIBRARY}/TMJ_crop.py
-  ${FOLDER_LIBRARY}/utils_CBCT.py
   )
 
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
-  Resources/UI/${MODULE_NAME}.ui
   )
 
 #-----------------------------------------------------------------------------
