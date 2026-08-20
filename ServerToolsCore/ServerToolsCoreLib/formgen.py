@@ -806,6 +806,28 @@ def section_of(spec: dict) -> str:
     return spec.get("section") or DEFAULT_SECTION
 
 
+# A section whose arguments are laid out in a grid rather than one per row.
+# Declared per ARGUMENT (`section_columns`) because that is the only place the
+# schema has to hang a hint, and read back per section: every argument in one
+# section must agree, and the first that speaks wins.
+#
+# FlexReg is why. Its four patch corners are a 2x2 that MIRRORS THE ARCH -- left
+# column one side, right column the other, top row anterior -- so a pad's
+# position on screen is where that corner is in the mouth. Stacked one per row
+# that meaning is gone, and the panel is four identical pads in a column.
+def section_columns(arguments_schema: dict, section: str) -> int:
+    """How many columns `section` is laid out in. 1 is one argument per row."""
+    for spec in arguments_schema.values():
+        if section_of(spec) == section:
+            declared = spec.get("section_columns")
+            if declared:
+                try:
+                    return max(1, int(declared))
+                except (TypeError, ValueError):
+                    return 1
+    return 1
+
+
 def sections_of(arguments_schema: dict, extra=()) -> list:
     """Every distinct section a tool's arguments name, in the order they are
     first mentioned — the schema's declaration order, which is the tool
@@ -922,7 +944,20 @@ def build(arguments_schema: dict, layout, sections=None, rows=None) -> dict:
         label = design.required_label(text) if spec.get("required") else design.section_title(text)
         target = (sections or {}).get(section_of(spec), layout)
         field = row_widget(widget)
-        target.addRow(label, field)
+        if hasattr(target, "addRow"):
+            target.addRow(label, field)
+        else:
+            # A grid section: the caller handed a QGridLayout instead, and the
+            # label goes above its field rather than beside it, so a 2x2 of pads
+            # reads as a 2x2 rather than as four labelled rows.
+            cell = qt.QWidget()
+            stack = qt.QVBoxLayout(cell)
+            stack.setContentsMargins(0, 0, 0, 0)
+            stack.addWidget(label)
+            stack.addWidget(field)
+            placed = target.count()
+            columns = max(1, getattr(target, "sadtColumns", 1))
+            target.addWidget(cell, placed // columns, placed % columns)
         widgets[name] = widget
         if rows is not None:
             rows[name] = (label, field)

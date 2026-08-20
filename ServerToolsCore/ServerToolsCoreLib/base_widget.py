@@ -322,7 +322,17 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         for sectionName in formgen.sections_of(arguments, extraSections):
             box = ctk.ctkCollapsibleButton()
             box.text = _(sectionName)
-            self._sectionLayouts[sectionName] = qt.QFormLayout(box)
+            # A section the schema lays out in columns gets a grid; everything
+            # else keeps the one-argument-per-row form. FlexReg's four patch
+            # corners are a 2x2 that mirrors the arch, so where a pad sits on
+            # screen is where that corner sits in the mouth.
+            columns = formgen.section_columns(arguments, sectionName)
+            if columns > 1:
+                grid = qt.QGridLayout(box)
+                grid.sadtColumns = columns
+                self._sectionLayouts[sectionName] = grid
+            else:
+                self._sectionLayouts[sectionName] = qt.QFormLayout(box)
             self._sectionBoxes[sectionName] = box
             rootLayout.addWidget(box)
 
