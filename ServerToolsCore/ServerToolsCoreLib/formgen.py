@@ -815,6 +815,18 @@ def section_of(spec: dict) -> str:
 # column one side, right column the other, top row anterior -- so a pad's
 # position on screen is where that corner is in the mouth. Stacked one per row
 # that meaning is gone, and the panel is four identical pads in a column.
+def cell_of(name: str, spec: dict) -> str:
+    """Which grid cell an argument shares. Its own name when it names none.
+
+    Several arguments describing ONE thing belong together: FlexReg's anterior
+    right corner is a tooth number and a position along it, and upstream drew
+    them in one box with the pad. One argument per cell puts the four teeth in a
+    column and the four pads in another, which is a table of arguments rather
+    than a picture of an arch.
+    """
+    return spec.get("cell") or name
+
+
 def section_columns(arguments_schema: dict, section: str) -> int:
     """How many columns `section` is laid out in. 1 is one argument per row."""
     for spec in arguments_schema.values():
@@ -930,6 +942,9 @@ def build(arguments_schema: dict, layout, sections=None, rows=None) -> dict:
     field reliably across PythonQt versions.
     """
     widgets = {}
+    # {(layout, cell name): the QWidget holding that cell}, so several arguments
+    # naming one cell stack inside it instead of taking a cell each.
+    grid_cells = {}
     for name, spec in arguments_schema.items():
         if is_file_type(spec.get("type", "")):
             continue
@@ -959,9 +974,17 @@ def build(arguments_schema: dict, layout, sections=None, rows=None) -> dict:
             # forbids creating an attribute on a C++ object, so `grid.columns =
             # 2` fails with "creating new attributes on C++ objects is not
             # allowed" and takes the whole panel down.
-            placed = target.count()
             columns = section_columns(arguments_schema, section_of(spec))
-            target.addWidget(cell, placed // columns, placed % columns)
+            key = (id(target), cell_of(name, spec))
+            holder = grid_cells.get(key)
+            if holder is None:
+                holder = qt.QWidget()
+                qt.QVBoxLayout(holder).setContentsMargins(0, 0, 0, 0)
+                placed = len(
+                    [k for k in grid_cells if k[0] == id(target)])
+                target.addWidget(holder, placed // columns, placed % columns)
+                grid_cells[key] = holder
+            holder.layout().addWidget(cell)
         widgets[name] = widget
         if rows is not None:
             rows[name] = (label, field)
