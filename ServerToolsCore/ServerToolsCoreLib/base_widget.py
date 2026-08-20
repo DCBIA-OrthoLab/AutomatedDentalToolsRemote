@@ -131,7 +131,13 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # The schema-driven part lives in its own container so it can be thrown
         # away and rebuilt in place — see _buildForm.
         self._rootLayout = rootLayout
-        self._buildForm()
+        # force_refresh: the client caches GET /tools on a singleton that
+        # OUTLIVES this widget, so "Reload" rebuilt the panel from the response
+        # fetched when Slicer started. A tool whose schema changed since -- a
+        # new field, a hidden one, a different layout -- kept rendering the old
+        # one, and only restarting Slicer showed the change. Setup runs once per
+        # module load, so this costs one request per reload.
+        self._buildForm(force_refresh=True)
 
         extraLayout = qt.QVBoxLayout()
         rootLayout.addLayout(extraLayout)
