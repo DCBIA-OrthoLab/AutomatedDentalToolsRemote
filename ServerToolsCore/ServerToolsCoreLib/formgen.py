@@ -458,7 +458,17 @@ class JoystickInput:
 
 
 def _axis_spinbox(bounds, step) -> qt.QDoubleSpinBox:
+    """The number a pad is showing, read-only.
+
+    The pad IS the input: it sets both axes with one gesture, and the knob sits
+    where the point sits on the arch. A box that also accepts typing gives the
+    same value two owners and reads as a form to fill in, which is not what the
+    original was -- there the numbers report what the pad is doing.
+    """
     box = qt.QDoubleSpinBox()
+    box.setReadOnly(True)
+    box.setButtonSymbols(qt.QAbstractSpinBox.NoButtons)
+    box.setFocusPolicy(qt.Qt.NoFocus)
     low, high = sorted((float(bounds[0]), float(bounds[1])))
     box.setRange(low, high)
     box.setDecimals(_decimals_for_step(step))
