@@ -424,11 +424,11 @@ class JoystickInput:
             if pad.spring_back:
                 # The knob's offset from its rest position is a displacement
                 # dealt onto the committed base, not a value of its own.
-                self.xBox.setValue(self._base[0] + (pad.x - pad.default_x))
-                self.yBox.setValue(self._base[1] + (pad.y - pad.default_y))
+                self.xBox.setValue(self._base[0] + (pad.value_x - pad.default_x))
+                self.yBox.setValue(self._base[1] + (pad.value_y - pad.default_y))
             else:
-                self.xBox.setValue(pad.x)
-                self.yBox.setValue(pad.y)
+                self.xBox.setValue(pad.value_x)
+                self.yBox.setValue(pad.value_y)
         finally:
             self._syncing = False
 
