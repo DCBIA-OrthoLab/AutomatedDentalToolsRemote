@@ -1,21 +1,25 @@
 cff-version: 1.2.0
 message: If you use this software, please cite it using these metadata.
-title: AutomatedDentalToolsRemote: a 3D Slicer client generated from tool descriptors
-abstract: A 3D Slicer client whose panel for each tool is generated from the server's descriptor, with no per-tool interface code.
+title: 'AutomatedDentalToolsRemote: a 3D Slicer client generated from tool descriptors'
+abstract: A 3D Slicer client whose panel for each tool is generated from the server's
+  descriptor, with no per-tool interface code.
 type: software
 authors:
-  - given-names: Jules
-    family-names: Grivot Pélisson
-    affiliation: "CPE Lyon, Lyon, France; Department of Orthodontics, Adams School of Dentistry, University of North Carolina at Chapel Hill, NC, USA"
-  - given-names: Raphaël
-    family-names: Barret
-    affiliation: "CPE Lyon, Lyon, France; Department of Orthodontics, Adams School of Dentistry, University of North Carolina at Chapel Hill, NC, USA"
-  - given-names: Lucia
-    family-names: Cevidanes
-    affiliation: "Department of Orthodontics, Adams School of Dentistry, University of North Carolina at Chapel Hill, NC, USA"
-repository-code: "https://github.com/DCBIA-OrthoLab/AutomatedDentalToolsRemote"
+- given-names: Jules
+  family-names: Grivot Pélisson
+  affiliation: CPE Lyon, Lyon, France; Department of Orthodontics, Adams School of
+    Dentistry, University of North Carolina at Chapel Hill, NC, USA
+- given-names: Raphaël
+  family-names: Barret
+  affiliation: CPE Lyon, Lyon, France; Department of Orthodontics, Adams School of
+    Dentistry, University of North Carolina at Chapel Hill, NC, USA
+- given-names: Lucia
+  family-names: Cevidanes
+  affiliation: Department of Orthodontics, Adams School of Dentistry, University of
+    North Carolina at Chapel Hill, NC, USA
+repository-code: https://github.com/DCBIA-OrthoLab/AutomatedDentalToolsRemote
 keywords:
-  - reproducible research
-  - research software
-  - dental imaging
-  - dependency isolation
+- reproducible research
+- research software
+- dental imaging
+- dependency isolation
