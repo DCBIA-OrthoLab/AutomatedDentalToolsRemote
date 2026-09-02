@@ -13,9 +13,9 @@
 > - **How the client works**, file by file: [ARCHITECTURE.md](ARCHITECTURE.md)
 >   — read this one first, it is the authoritative reference.
 > - **The server**:
->   [slicer-remote-tool-server](https://github.com/Jules-GP/slicer-remote-tool-server)
+>   [VISOR-serve](https://github.com/DCBIA-OrthoLab/VISOR-serve)
 >   — routes, auth, dispatch, the `/DATA` store. It knows no dental tool.
-> - **The tools**: [sadt-tools](https://github.com/Jules-GP/sadt-tools) — one
+> - **The tools**: [sadt-tools](https://github.com/DCBIA-OrthoLab/SADT-VISOR) — one
 >   isolated project per tool, each with its own interpreter and its own pins.
 >   What a tool computes, and what it was validated against, is in its own
 >   README there.
