@@ -31,7 +31,7 @@ import urllib.request
 # How much of a failed command's output travels with its error message.
 _ERROR_TAIL_LINES = 12
 
-DEFAULT_REPO_URL = "https://github.com/Jules-GP/slicer-remote-tool-server.git"
+DEFAULT_REPO_URL = "https://github.com/DCBIA-OrthoLab/VISOR-serve.git"
 DEFAULT_BRANCH = "main"
 DEFAULT_SERVER_URL = "http://localhost:8000"
 

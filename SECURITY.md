@@ -1,7 +1,7 @@
 # Dé-identification côté client - module 3D Slicer
 ## Spécification de conception - `slicer_client/`
 
-*Projet `slicer-remote-tool-server` - University of North Carolina at Chapel Hill*
+*Projet `VISOR-serve` - University of North Carolina at Chapel Hill*
 *Version 1.0 - juillet 2026*
 
 ---
