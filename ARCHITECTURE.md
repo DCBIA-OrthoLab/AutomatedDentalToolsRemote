@@ -196,7 +196,7 @@ interpreter launch:
   `ServerToolsCoreLib/__init__.py` alongside `get_client()`.
 
   **`"path"` is the one that broke the rule, and it is now the normal case.**
-  A *packaged* tool — every clinical tool, since they moved to the `sadt-tools`
+  A *packaged* tool — every clinical tool, since they moved to the `SADT-VISOR`
   repository — declares exactly one file type, `"path"`, for every file or
   folder it takes: its schema is generated from a `run(scans: Path, ...)`
   signature, and a Python annotation cannot say more than "a path". It ends in
@@ -721,7 +721,7 @@ before they existed**, asserted for `example_tool` in `test_formgen.py`.
 
 **Where they come from now.** For the two in-process demo tools they are fields
 of the server's `ArgSpec`. For every clinical tool they are written in that
-tool's own `layout.py`, in the `sadt-tools` repository, and merged into the
+tool's own `layout.py`, in the `SADT-VISOR` repository, and merged into the
 generated schema by `describe.py` — derived from the same catalog the tool
 computes with, never restated. That matters here for one reason: **a landmark
 added to a catalog gets its tab with no client release**, and cannot be
@@ -1452,7 +1452,7 @@ summary is built around the failures and names both kinds separately.
 ## `TOOL_NAME` is the contract, and it is exact
 
 A module's `TOOL_NAME` is what `/run/<name>` is built from, and the server
-resolves it against the tool **folder name** in the `sadt-tools` repository.
+resolves it against the tool **folder name** in the `SADT-VISOR` repository.
 There is no normalisation on either side: no case folding, no underscore
 stripping, no aliasing. A mismatch is a `404` before the panel has drawn
 anything, not a degraded form.

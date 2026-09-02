@@ -15,7 +15,7 @@
 > - **The server**:
 >   [VISOR-serve](https://github.com/DCBIA-OrthoLab/VISOR-serve)
 >   — routes, auth, dispatch, the `/DATA` store. It knows no dental tool.
-> - **The tools**: [sadt-tools](https://github.com/DCBIA-OrthoLab/SADT-VISOR) — one
+> - **The tools**: [SADT-VISOR](https://github.com/DCBIA-OrthoLab/SADT-VISOR) — one
 >   isolated project per tool, each with its own interpreter and its own pins.
 >   What a tool computes, and what it was validated against, is in its own
 >   README there.
