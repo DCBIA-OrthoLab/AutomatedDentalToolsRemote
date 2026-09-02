@@ -75,7 +75,7 @@ def _download_message(received: int, expected: Optional[int], label: str = "resu
 
 
 # What a packaged tool declares for a file-or-folder argument. One name, from
-# the tool contract in sadt-tools; see is_file_type and accepts_folder.
+# the tool contract in SADT-VISOR; see is_file_type and accepts_folder.
 PATH_TYPE = "path"
 
 
@@ -99,7 +99,7 @@ def is_file_type(type_name: str) -> bool:
     client-side code change - the whole point of a schema-driven client.
 
     "path" is the exception that rule did not survive: it is what a PACKAGED
-    tool (sadt-tools) declares for every file or folder it takes, and it ends
+    tool (SADT-VISOR) declares for every file or folder it takes, and it ends
     in neither. Left out, such a tool's schema reports NO file arguments at
     all and the panel refuses to build:
 

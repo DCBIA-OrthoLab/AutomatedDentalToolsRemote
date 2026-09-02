@@ -16,7 +16,7 @@ The brief below describes one server holding the tools. That is no longer what
 it is, and three consequences reach this repository:
 
 - **The tools moved out of the server**, into
-  [`sadt-tools`](https://github.com/DCBIA-OrthoLab/SADT-VISOR) — one isolated project
+  [`SADT-VISOR`](https://github.com/DCBIA-OrthoLab/SADT-VISOR) — one isolated project
   per tool, its own interpreter and its own torch, run out of process. The
   server discovers them, publishes them and runs them without importing them.
   Nothing about the HTTP contract changed, which was the point.
