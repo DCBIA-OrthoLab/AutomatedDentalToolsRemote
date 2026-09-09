@@ -1964,34 +1964,6 @@ class ResponsiveColumnsTest(unittest.TestCase):
         space.chips = {o: qt.QPushButton(o).sizeHint.width() for o in self.SHORT}
         self.assertGreater(space.columns_for(self.SHORT), formgen._columns_for(self.SHORT))
 
-    def test_a_full_grid_reaches_the_right_hand_edge(self):
-        """A column count is a whole number, so a grid sized to the widest chip
-        always leaves a remainder -- up to one chip of empty panel at the edge,
-        however exactly the count was measured. When the rows are full that
-        remainder is shared between the columns instead of sitting in one lump
-        on the right."""
-        many = ["L%02d" % index for index in range(60)]
-        group = formgen.MultiChoiceGroup(
-            {option: False for option in many}, "",
-            layout="tabs", groups={"Landmarks": many})
-        group.container.resizeTo(700)
-        grid = self._tabs(group).tabs[0][1].layout.widgets[0].widget.layout
-        columns = max(column for _row, column in grid.cells) + 1
-        self.assertGreater(len(many), columns, "the rows have to be full")
-        self.assertEqual(sorted(grid.columnStretch), list(range(columns)))
-
-    def test_a_group_that_fits_on_one_line_stays_its_own_size(self):
-        """The other half of the rule, and the visible one: ten chips in a panel
-        wide enough for twenty-four are NOT spread across it. Filling the width
-        with a handful of options is not filling it, it is losing the group --
-        so the remainder stays at the right edge, in one lump."""
-        group = self._group()
-        group.container.resizeTo(1400)
-        grid = self._tabs(group).tabs[0][1].layout.widgets[0].widget.layout
-        # Exactly one stretch, past the last column: everything packed left.
-        self.assertEqual(len(grid.columnStretch), 1)
-        self.assertGreaterEqual(list(grid.columnStretch)[0], len(self.SHORT))
-
     def test_a_resize_that_changes_nothing_redraws_nothing(self):
         """A drag delivers a resize per pixel. Redrawing 119 options each time
         would make the panel crawl and would move chips under the cursor

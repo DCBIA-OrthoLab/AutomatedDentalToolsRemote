@@ -87,20 +87,6 @@ def _columns_for(options) -> int:
     return max(_MIN_COLUMNS, min(_MAX_COLUMNS, _GRID_BUDGET // (longest + _CHIP_OVERHEAD)))
 
 
-def _measure_width(widget) -> int:
-    """A widget's CURRENT width in pixels, or 0. Same spelling problem as below."""
-    if widget is None:
-        return 0
-    for source in (lambda: widget.width, lambda: widget.width()):
-        try:
-            value = source()
-        except Exception:  # noqa: BLE001 - trying the next spelling is the point
-            continue
-        if isinstance(value, int) and value > 0:
-            return value
-    return 0
-
-
 def _measure(widget) -> int:
     """A widget's own preferred width in pixels, or 0 if it cannot be had.
 
@@ -140,31 +126,6 @@ class _Space:
         self.spacing = design.SPACING_MD
         # Set by the tabbed builder, read across a redraw.
         self.tabs = None
-        # The grid's own page. Its width is the room the chips actually have --
-        # the container's width less the tab frame, the scroll bar and the
-        # margins -- so it is what turns `_GRID_SIDE_CHROME` from a guess into a
-        # measurement (see `learn_chrome`).
-        self.page = None
-        self.chrome = _GRID_SIDE_CHROME
-        self._last_width = 0
-
-    def learn_chrome(self, width: int) -> None:
-        """Replace the guessed chrome with the difference actually observed.
-
-        Read one event LATE on purpose. A resize propagates outside in, so when
-        the container is told its new width the page inside it still has the old
-        one -- subtracting them then would measure the drag, not the chrome. By
-        the next event the page has caught up with the width recorded here, and
-        the difference is exactly what sits between them.
-
-        A drag delivers hundreds of events, so this converges immediately; a
-        single jump (maximising the window) uses the guess once and the
-        measurement from then on.
-        """
-        page = _measure_width(self.page)
-        if self._last_width > 0 and 0 < page <= self._last_width:
-            self.chrome = self._last_width - page
-        self._last_width = width
 
     def measure(self, available: int, boxes: dict) -> bool:
         """Take the room the chips have, and the chips' own widths.
@@ -510,8 +471,7 @@ class MultiChoiceGroup:
         if width <= 0:
             return
         before = self._column_counts()
-        self._space.learn_chrome(width)
-        if not self._space.measure(width - self._space.chrome, self.boxes):
+        if not self._space.measure(width - _GRID_SIDE_CHROME, self.boxes):
             return
         if self._column_counts() == before:
             return
@@ -742,7 +702,6 @@ def _build_tabs_boxes(column, choices: dict, groups=None, space=None) -> dict:
     tabs = qt.QTabWidget()
     boxes = {}
     grouped = list(_grouped(choices, groups))
-    first_page = None
     # Per TAB, from that tab's own longest label. `Ba`, `S`, `N` fit six across
     # where `UR3OIP` fits four, and one count for the whole argument had to be
     # the worst case -- half the width wasted on every short region. It changes
@@ -750,8 +709,6 @@ def _build_tabs_boxes(column, choices: dict, groups=None, space=None) -> dict:
     for group_name, options in grouped:
         columns = _columns(options, space)
         page = qt.QWidget()
-        if first_page is None:
-            first_page = page
         grid = qt.QGridLayout(page)
         grid.setContentsMargins(design.SPACING_SM, design.SPACING_SM, design.SPACING_SM, design.SPACING_SM)
         grid.setVerticalSpacing(design.SPACING_XS)
@@ -767,9 +724,7 @@ def _build_tabs_boxes(column, choices: dict, groups=None, space=None) -> dict:
         # 20 px check boxes sat 94 px apart -- three sparse lines floating in a
         # tall empty box. A trailing row and column take the slack instead, so
         # the options pack at the top left and read as a list.
-        # Full rows fill the width; a sparse group stays its own size.
-        _pack_to_top_left(grid, rows=-(-len(options) // columns), columns=columns,
-                          fill=len(options) >= columns)
+        _pack_to_top_left(grid, rows=-(-len(options) // columns), columns=columns)
         tabs.addTab(_group_page(page, page_boxes), group_name or _UNGROUPED_LABEL)
 
     # Fixed both ways, and PER TAB. A minimum alone let the panel's spare
@@ -794,8 +749,6 @@ def _build_tabs_boxes(column, choices: dict, groups=None, space=None) -> dict:
     # QTabWidget opens on its first tab, whatever they were looking at.
     if space is not None:
         space.tabs = tabs
-        # The first tab's page stands for all of them: they share a width.
-        space.page = first_page
 
     tabs.currentChanged.connect(fit)
     fit()
@@ -855,7 +808,7 @@ def _group_page(grid_page, page_boxes):
     return container
 
 
-def _pack_to_top_left(grid, rows: int, columns: int, fill: bool = False) -> None:
+def _pack_to_top_left(grid, rows: int, columns: int) -> None:
     """Send a grid's spare space to one trailing row and column.
 
     A QGridLayout inside a resizable QScrollArea is stretched to the area's
@@ -863,26 +816,9 @@ def _pack_to_top_left(grid, rows: int, columns: int, fill: bool = False) -> None
     220 px box end up 94 px apart. Qt has no "pack" flag; an empty stretched row
     and column at the far edge is the idiom, and the same reason every
     hand-written `.ui` in this repo ends with a vertical spacer.
-
-    Vertically that is always right: a short catalogue must not be spread down a
-    tall box. HORIZONTALLY it depends on whether the row is full, which is what
-    `fill` says.
-
-    A column count is a whole number, so a grid sized to the widest chip always
-    leaves a remainder -- up to one chip's width of empty panel at the right
-    edge, however exactly the count was measured. When the options FILL their
-    rows, that remainder is shared between the columns instead of being left in
-    one lump at the edge, and the grid reaches the right-hand side. When they do
-    not -- three chips in a panel wide enough for seventeen -- they stay packed
-    left at their own size, because spreading three chips across a whole panel
-    is not "filling the width", it is losing the group.
     """
     grid.setRowStretch(max(rows, 0), 1)
-    if not fill:
-        grid.setColumnStretch(max(columns, 0), 1)
-        return
-    for column in range(max(columns, 0)):
-        grid.setColumnStretch(column, 1)
+    grid.setColumnStretch(max(columns, 0), 1)
 
 
 def _horizontal_scroll(widget):
