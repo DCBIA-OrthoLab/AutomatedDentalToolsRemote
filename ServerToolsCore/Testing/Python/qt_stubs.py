@@ -32,28 +32,6 @@ class QObject:
         self._tooltip = ""
         self._stylesheet = ""
         self._visible = True
-        self._filters = []
-        # Unlaid-out, as Qt reports it before the first show. `resizeTo` is what
-        # gives a widget a width, exactly as Qt's layout pass does.
-        self.width = 0
-
-    def installEventFilter(self, watcher):
-        """Qt's own way for a Python object to see a widget's events -- the only
-        way to react to a resize under PythonQt, which cannot subclass the C++
-        widget. Recorded rather than dispatched: a test drives the filter by
-        calling `resizeTo`, which is both simpler and closer to what Qt does
-        than a stub event loop would be."""
-        self._filters.append(watcher)
-
-    def removeEventFilter(self, watcher):
-        if watcher in self._filters:
-            self._filters.remove(watcher)
-
-    def resizeTo(self, width):
-        """Deliver a Resize event to every installed filter. Test-only."""
-        self.width = int(width)
-        for watcher in list(self._filters):
-            watcher.eventFilter(self, QEvent(QEvent.Resize, QSize(self.width)))
 
     def setVisible(self, visible):
         self._visible = bool(visible)
@@ -250,38 +228,6 @@ class QTabWidget(QWidget):
         """Emits, because the height of the box follows the tab on screen."""
         self.currentIndex = index
         self.currentChanged.emit(index)
-
-
-class QSize:
-    def __init__(self, width, height=0):
-        self._width, self._height = int(width), int(height)
-
-    def width(self):
-        return self._width
-
-    def height(self):
-        return self._height
-
-
-class QEvent:
-    """Only the type this extension reacts to. Values are Qt's own.
-
-    A resize event carries the size being applied, which is what `_width_of`
-    asks for first -- the widget may not have taken it yet."""
-
-    Resize = 14
-
-    def __init__(self, event_type, size=None):
-        self._type = event_type
-        self._size = size
-
-    def type(self):
-        return self._type
-
-    def size(self):
-        if self._size is None:
-            raise AttributeError("this event carries no size")
-        return self._size
 
 
 class QCursor:
