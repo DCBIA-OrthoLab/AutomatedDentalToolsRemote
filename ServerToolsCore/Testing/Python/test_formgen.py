@@ -1897,7 +1897,7 @@ class HostedEntryReadabilityTest(unittest.TestCase):
 
 
 class ResponsiveColumnsTest(unittest.TestCase):
-    """A wider panel gets more columns, and the usual panel is untouched.
+    """A wider panel fills its width, and the reader keeps their place.
 
     The mechanism is an event filter, because PythonQt cannot subclass the C++
     widget to override `resizeEvent` -- the same pattern `Agent.py` already uses
@@ -1905,52 +1905,73 @@ class ResponsiveColumnsTest(unittest.TestCase):
     delivers to them, which is what these tests drive.
     """
 
-    OPTIONS = ["Ba", "S", "N", "RPo", "LPo", "ROr", "LOr", "C2", "C3", "C4"]
+    SHORT = ["Ba", "S", "N", "RPo", "LPo", "ROr", "LOr", "C2", "C3", "C4"]
+    LONG = ["UR3OIP", "UL6OIP", "LR3OIP", "LL6OIP", "LR7CB", "LL7CB"]
 
-    def _group(self):
+    def _group(self, groups=None):
+        options = self.SHORT if groups is None else sum(groups.values(), [])
         return formgen.MultiChoiceGroup(
-            {option: False for option in self.OPTIONS}, "",
-            layout="tabs", groups={"Cranial base": self.OPTIONS})
+            {option: False for option in options}, "",
+            layout="tabs", groups=groups or {"Cranial base": self.SHORT})
 
-    def _columns(self, group):
-        tabs = [w for w in group.container.layout.widgets
+    def _tabs(self, group):
+        return [w for w in group.container.layout.widgets
                 if isinstance(w, qt.QTabWidget)][0]
-        grid = tabs.tabs[0][1].layout.widgets[0].widget.layout
+
+    def _columns(self, group, tab=0):
+        grid = self._tabs(group).tabs[tab][1].layout.widgets[0].widget.layout
         return max(column for _row, column in grid.cells) + 1
 
-    def test_the_panel_at_its_usual_width_is_unchanged(self):
-        """The budget was measured against this width, so scaling by the ratio
-        has to return exactly the calibrated number. Anything else is a
-        regression in the ONE case every clinician actually sees."""
+    def test_an_unlaid_out_panel_uses_the_estimate(self):
+        """A widget has no width until Qt has laid it out, so the first draw
+        has nothing to measure. It must render, and render as it always did."""
         group = self._group()
-        before = self._columns(group)
-        group.container.resizeTo(formgen._CALIBRATION_WIDTH)
-        self.assertEqual(self._columns(group), before)
+        self.assertEqual(self._columns(group), formgen._columns_for(self.SHORT))
 
     def test_a_wider_panel_gets_more_columns(self):
         group = self._group()
         before = self._columns(group)
-        group.container.resizeTo(formgen._CALIBRATION_WIDTH * 3)
+        group.container.resizeTo(1400)
         self.assertGreater(self._columns(group), before)
 
-    def test_a_narrower_panel_keeps_the_calibrated_layout(self):
-        """Growth is what was asked for. Narrowing on a ratio nothing has
-        checked would put the regression in the common case to fix the rare
-        one; `_MIN_COLUMNS` already covers a genuinely cramped panel."""
-        group = self._group()
-        before = self._columns(group)
-        group.container.resizeTo(120)
-        self.assertEqual(self._columns(group), before)
+    def test_the_columns_fill_the_width_rather_than_leaving_a_margin(self):
+        """The complaint this replaced an estimate for: a uniform "longest label
+        plus four characters" left a wide margin unused before it would concede
+        another column.
+
+        Asserted on the arithmetic rather than the grid, because a grid's column
+        count is bounded by how many options it HAS -- ten chips never occupy
+        seventeen columns however wide the panel gets, and that would hide the
+        property under test. What must hold is that the leftover is less than
+        one more chip: any more and another one fitted and was not offered.
+        """
+        space = formgen._Space()
+        chips = {option: qt.QPushButton(option).sizeHint.width() for option in self.SHORT}
+        space.measure(1000, {})
+        space.chips = chips
+
+        widest = max(chips.values())
+        columns = space.columns_for(self.SHORT)
+        used = columns * (widest + space.spacing) - space.spacing
+        self.assertLessEqual(used, space.width)
+        self.assertGreater(used + widest + space.spacing, space.width)
+
+    def test_the_estimate_left_the_margin_this_replaced(self):
+        """The regression it fixes, stated as a number: the same panel, the same
+        chips, and the estimate concedes fewer columns than actually fit."""
+        space = formgen._Space()
+        space.measure(1000, {})
+        space.chips = {o: qt.QPushButton(o).sizeHint.width() for o in self.SHORT}
+        self.assertGreater(space.columns_for(self.SHORT), formgen._columns_for(self.SHORT))
 
     def test_a_resize_that_changes_nothing_redraws_nothing(self):
         """A drag delivers a resize per pixel. Redrawing 119 options each time
         would make the panel crawl and would move chips under the cursor
         mid-click, so the COLUMN COUNT gates the redraw, not the measurement."""
         group = self._group()
-        group.container.resizeTo(formgen._CALIBRATION_WIDTH * 3)
+        group.container.resizeTo(1400)
         boxes = dict(group.boxes)
-        for width in range(formgen._CALIBRATION_WIDTH * 3,
-                           formgen._CALIBRATION_WIDTH * 3 + 20):
+        for width in range(1400, 1420):
             group.container.resizeTo(width)
         self.assertIs(group.boxes["Ba"], boxes["Ba"])
 
@@ -1959,17 +1980,33 @@ class ResponsiveColumnsTest(unittest.TestCase):
         across -- otherwise widening the panel silently clears the form."""
         group = self._group()
         group.boxes["RPo"].setChecked(True)
-        group.container.resizeTo(formgen._CALIBRATION_WIDTH * 3)
+        group.container.resizeTo(1400)
         self.assertTrue(group.boxes["RPo"].isChecked())
         self.assertEqual(sorted(k for k, v in group.value().items() if v), ["RPo"])
+
+    def test_the_open_tab_survives_a_reflow(self):
+        """A rebuilt QTabWidget opens on its first tab whatever the reader was
+        looking at, so widening the panel while reading "Lower" threw them back
+        to "Upper"."""
+        group = self._group({"Upper": self.SHORT, "Lower": self.LONG})
+        self._tabs(group).setCurrentIndex(1)
+        group.container.resizeTo(1400)
+        self.assertEqual(self._tabs(group).currentIndex, 1)
 
     def test_a_layout_with_no_columns_is_not_watched(self):
         """A flat column and an inline row do not change with the width, so
         they are not asked to recompute anything."""
         for layout in (None, "inline"):
             group = formgen.MultiChoiceGroup(
-                {option: False for option in self.OPTIONS}, "", layout=layout)
+                {option: False for option in self.SHORT}, "", layout=layout)
             self.assertEqual(group.container._filters, [], layout)
+
+    def test_a_chip_that_cannot_be_measured_falls_back_to_the_estimate(self):
+        """An unmeasurable chip must leave the panel on the estimate, never
+        collapse it to the minimum."""
+        space = formgen._Space()
+        space.measure(1400, {"Ba": object()})
+        self.assertEqual(space.columns_for(self.SHORT), formgen._columns_for(self.SHORT))
 
     def test_the_width_is_read_from_whichever_spelling_pythonqt_offers(self):
         """PythonQt exposes some getters as properties and some as slots, and
@@ -2002,12 +2039,11 @@ class ResponsiveColumnsTest(unittest.TestCase):
         group.reflow(formgen._width_of(object(), object()))
         self.assertEqual(self._columns(group), before)
 
-
     def test_the_group_still_reads_back_the_complete_state_after_a_reflow(self):
         group = self._group()
-        group.container.resizeTo(formgen._CALIBRATION_WIDTH * 3)
-        self.assertEqual(list(group.boxes), self.OPTIONS)
-        self.assertEqual(sorted(group.value()), sorted(self.OPTIONS))
+        group.container.resizeTo(1400)
+        self.assertEqual(list(group.boxes), self.SHORT)
+        self.assertEqual(sorted(group.value()), sorted(self.SHORT))
 
 
 if __name__ == "__main__":

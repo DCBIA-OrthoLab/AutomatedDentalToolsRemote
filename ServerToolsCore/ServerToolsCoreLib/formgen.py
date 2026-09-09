@@ -54,57 +54,112 @@ DEFAULT_SECTION = "Inputs"
 # be chosen for the worst case, which wasted half the width on every short
 # catalogue.
 _MIN_COLUMNS = 3
+# The four constants below are the ESTIMATE, and it is now only the fallback:
+# they answer for a panel Qt has not laid out yet, which is every first draw.
+# Once a resize event arrives the count comes from the chips' own pixel widths
+# instead (`_Space`), because this model was visibly too coarse -- a uniform
+# "longest label plus four characters" left a wide margin unused before it would
+# concede another column.
 _MAX_COLUMNS = 8
 # Roughly the character width a chip's padding and border add, in characters.
 _CHIP_OVERHEAD = 4
 # The width a tab has to spend, in characters. Calibrated against the panel at
-# its usual width -- which is what a Slicer module panel is, not resizable in
-# practice: four chips of five characters measured 225 px of the 570 the box
-# offers, so the first guess spent under half of it.
+# its usual width: four chips of five characters measured 225 px of the 570 the
+# box offers, so the first guess spent under half of it.
 _GRID_BUDGET = 64
-# The panel width that budget was measured against, in pixels. Only ever a
-# ratio: `budget_for_width` scales the two together, so the pair stays
-# meaningful if either is ever re-measured.
-_CALIBRATION_WIDTH = 570
+# What a tab spends on chrome around the grid: the tab frame, the grid's own
+# margins and the vertical scrollbar a long catalogue gets. Subtracted from
+# the container's width so the count is taken against the room the CHIPS have.
+# Deliberately generous: under-estimating costs at most one column, while
+# over-estimating puts a chip half off the edge.
+_GRID_SIDE_CHROME = 44
 
 
-def _columns_for(options, budget: int = 0) -> int:
-    """A column count the longest option still fits in.
+def _columns_for(options) -> int:
+    """A column count the longest option still fits in, ESTIMATED.
 
-    `budget` is the width to spend, in characters. Zero means "not measured
-    yet", which is every FIRST draw: a widget has no width until Qt has laid it
-    out, so the calibrated `_GRID_BUDGET` is what the panel is built with and a
-    measured budget only ever refines it afterwards (see `MultiChoiceGroup.reflow`).
+    The fallback, used only until the panel has been measured -- a widget has no
+    width until Qt has laid it out, so this is what the first draw builds with.
+    Once a resize event arrives, `_Space.columns_for` answers from the chips'
+    real pixel widths and this is not consulted again.
     """
     longest = max((len(str(option)) for option in options), default=1)
-    budget = max(budget, _GRID_BUDGET)
-    # The CEILING scales with the width too, or widening the panel buys nothing
-    # for exactly the catalogues most able to use it: ALI's cranial base is
-    # `Ba`, `S`, `N`, and ten short chips already sit at the cap in a panel of
-    # the usual width. At the calibrated budget this is `_MAX_COLUMNS` to the
-    # unit, so the panel a clinician has today is unchanged.
-    ceiling = max(_MAX_COLUMNS, _MAX_COLUMNS * budget // _GRID_BUDGET)
-    return max(_MIN_COLUMNS, min(ceiling, budget // (longest + _CHIP_OVERHEAD)))
+    return max(_MIN_COLUMNS, min(_MAX_COLUMNS, _GRID_BUDGET // (longest + _CHIP_OVERHEAD)))
 
 
-def budget_for_width(width: int) -> int:
-    """Scale the calibrated width budget to the panel's actual width.
+def _measure(widget) -> int:
+    """A widget's own preferred width in pixels, or 0 if it cannot be had.
 
-    `_GRID_BUDGET` was MEASURED against a panel `_CALIBRATION_WIDTH` px wide, so
-    scaling by the width ratio reuses that measurement rather than introducing a
-    second, unverified one. A font-metrics model would be the more general
-    answer and is the wrong trade here: it would need a chip's real padding in
-    pixels, which nothing has measured, to replace a number that was.
-
-    At the calibrated width this returns the calibrated budget exactly, so the
-    panel a clinician has today is unchanged to the pixel. `_columns_for` floors
-    the result at `_GRID_BUDGET`, so a NARROWER panel keeps that layout too --
-    growth is what was asked for, and `_MIN_COLUMNS` already covers a genuinely
-    cramped one.
+    PythonQt exposes some getters as properties and some as slots, and this
+    extension has been bitten once already: `combo.fontMetrics` is a slot, and
+    reading it as a property gave an object carrying no metrics at all. Rather
+    than bet on which kind `sizeHint` is, try each spelling.
     """
-    if width <= 0:
-        return 0
-    return int(_GRID_BUDGET * width / _CALIBRATION_WIDTH)
+    for source in (lambda: widget.sizeHint.width(), lambda: widget.sizeHint().width()):
+        try:
+            value = source()
+        except Exception:  # noqa: BLE001 - trying the next spelling is the point
+            continue
+        if isinstance(value, int) and value > 0:
+            return value
+    return 0
+
+
+class _Space:
+    """The room a multichoice has, in pixels; and what got built in it.
+
+    Two directions on purpose. It travels DOWN into the layout builders carrying
+    the panel's measured width and each chip's measured width, and comes back
+    carrying the tab widget the tabbed builder made -- which is what lets a
+    redraw put the reader back on the tab they were reading.
+
+    Measured rather than estimated because the estimate was visibly wrong: a
+    uniform "longest label plus four characters" left a wide margin unused
+    before it would concede another column. A chip's `sizeHint` already knows
+    its text, font, padding and border exactly, on the machine it is drawn on.
+    """
+
+    def __init__(self):
+        # Zero means never measured, which is every first draw.
+        self.width = 0
+        self.chips = {}
+        self.spacing = design.SPACING_MD
+        # Set by the tabbed builder, read across a redraw.
+        self.tabs = None
+
+    def measure(self, available: int, boxes: dict) -> bool:
+        """Take the room the chips have, and the chips' own widths.
+
+        True if anything changed. `available` is already net of the chrome: the
+        caller subtracts it once, so this never has to know what it is.
+        """
+        chips = {option: _measure(box) for option, box in boxes.items()}
+        chips = {option: px for option, px in chips.items() if px > 0}
+        if available == self.width and chips == self.chips:
+            return False
+        self.width = available
+        # A measurement that failed leaves the previous one in place rather than
+        # emptying it: an unmeasurable chip must not silently drop the panel
+        # back to the estimate it had before it was ever laid out.
+        if chips:
+            self.chips = chips
+        return True
+
+    def columns_for(self, options) -> int:
+        """How many of these chips actually fit, side by side."""
+        widest = max((self.chips.get(option, 0) for option in options), default=0)
+        if self.width <= 0 or widest <= 0:
+            return _columns_for(options)
+        # No ceiling on this path. `_MAX_COLUMNS` guards an ESTIMATE from
+        # running away; a count taken from real widths is exactly what fits, and
+        # capping it would put back the unused margin this replaced.
+        fits = (self.width + self.spacing) // (widest + self.spacing)
+        return max(_MIN_COLUMNS, int(fits))
+
+
+def _columns(options, space=None) -> int:
+    """The column count, measured if the panel has been, estimated otherwise."""
+    return _columns_for(options) if space is None else space.columns_for(options)
 
 
 class _ReflowOnResize(qt.QObject):
@@ -383,11 +438,11 @@ class MultiChoiceGroup:
         self._column = column
         self._layout = layout
         self._groups = groups
-        # The width to spend, in characters. Zero until Qt has laid the panel
-        # out and the first resize event measures it -- so the FIRST draw is
-        # always the calibrated default, and a panel whose resize event never
-        # arrives keeps exactly the layout it had before any of this existed.
-        self._budget = 0
+        # The room this group has, measured. Empty until Qt has laid the panel
+        # out and the first resize event fills it -- so the FIRST draw always
+        # uses the estimate, and a panel whose resize event never arrives keeps
+        # exactly the layout it had before any of this existed.
+        self._space = _Space()
         self._choices = dict(choices)
         self._draw(choices, groups)
 
@@ -404,23 +459,43 @@ class MultiChoiceGroup:
         A resize event arrives for every pixel the user drags, and redrawing a
         119-option group each time would make the panel crawl and would move
         chips under the cursor mid-click. So the measurement decides nothing on
-        its own: what gates the redraw is the COLUMN COUNTS the new budget
-        produces, which change a handful of times across the whole drag.
+        its own: what gates the redraw is the COLUMN COUNTS it produces, which
+        change a handful of times across a whole drag.
 
-        The selection survives, through `rebuild`.
+        Two things survive the redraw, because losing either is a bug a reader
+        feels immediately: the SELECTION (through `rebuild`) and the TAB they
+        were reading -- a rebuilt QTabWidget opens on its first tab, so widening
+        the panel while reading "Upper" used to throw them back to "Cranial
+        base".
         """
-        budget = budget_for_width(width)
-        if budget == self._budget:
+        if width <= 0:
             return
         before = self._column_counts()
-        self._budget = budget
+        if not self._space.measure(width - _GRID_SIDE_CHROME, self.boxes):
+            return
         if self._column_counts() == before:
             return
+        tab = self._current_tab()
         self.rebuild(self._choices, self._groups, force=True)
+        self._restore_tab(tab)
+
+    def _current_tab(self) -> int:
+        try:
+            return int(self._space.tabs.currentIndex)
+        except Exception:  # noqa: BLE001 - no tabs, or a spelling PythonQt hides
+            return 0
+
+    def _restore_tab(self, index: int) -> None:
+        if not index or self._space.tabs is None:
+            return
+        try:
+            self._space.tabs.setCurrentIndex(index)
+        except Exception:  # noqa: BLE001 - the panel matters more than the tab
+            logger.warning("could not restore the open tab after a reflow", exc_info=True)
 
     def _column_counts(self) -> tuple:
-        """The column count of each group at the current budget."""
-        return tuple(_columns_for(options, self._budget)
+        """The column count of each group, as the panel is measured now."""
+        return tuple(_columns(options, self._space)
                      for _name, options in _grouped(self._choices, self._groups))
 
     def _draw(self, choices: dict, groups) -> None:
@@ -435,7 +510,7 @@ class MultiChoiceGroup:
                     "Unknown multichoice layout '%s', falling back to a single column", layout
                 )
             builder = _build_flat_boxes
-        made = builder(column, choices, groups, self._budget)
+        made = builder(column, choices, groups, self._space)
 
         # Declaration order, whatever order the layout visited the options in.
         self.boxes = {option: made[option] for option in choices}
@@ -447,6 +522,13 @@ class MultiChoiceGroup:
         # other way to say "all of them".
         if len(choices) > 1 and layout != "tabs":
             column.addWidget(self._selectionToolbar())
+
+        # Keep the measured chip table in step with the options now on screen.
+        # A mode switch replaces every chip, and sizing the grid to widths taken
+        # from chips that are no longer in it is how a column ends up narrower
+        # than what sits in it.
+        if self._space.width > 0:
+            self._space.measure(self._space.width, self.boxes)
 
     def _selectionToolbar(self):
         """All / None / Default. Cheap here, and the difference between usable
@@ -548,7 +630,7 @@ def _grouped(choices: dict, groups) -> list:
     return [(name, options) for name, options in grouped if options]
 
 
-def _build_flat_boxes(column, choices: dict, _groups=None, _budget: int = 0) -> dict:
+def _build_flat_boxes(column, choices: dict, _groups=None, _space=None) -> dict:
     """One box per line. The default, and what every tool declaring no `ui`
     gets — unchanged from before layouts existed."""
     boxes = {}
@@ -558,7 +640,7 @@ def _build_flat_boxes(column, choices: dict, _groups=None, _budget: int = 0) -> 
     return boxes
 
 
-def _build_inline_boxes(column, choices: dict, _groups=None, _budget: int = 0) -> dict:
+def _build_inline_boxes(column, choices: dict, _groups=None, _space=None) -> dict:
     """One horizontal row. For a handful of short options (ASO's two jaws, its
     eight landmark types) that waste a line each stacked vertically."""
     row_container = qt.QWidget()
@@ -576,7 +658,7 @@ def _build_inline_boxes(column, choices: dict, _groups=None, _budget: int = 0) -
     return boxes
 
 
-def _build_grid_boxes(column, choices: dict, groups=None, budget: int = 0) -> dict:
+def _build_grid_boxes(column, choices: dict, groups=None, space=None) -> dict:
     """One row per group, options as columns — the chart layout.
 
     For options whose *position* carries meaning: ASO asks for teeth "spread
@@ -609,7 +691,7 @@ def _build_grid_boxes(column, choices: dict, groups=None, budget: int = 0) -> di
     return boxes
 
 
-def _build_tabs_boxes(column, choices: dict, groups=None, budget: int = 0) -> dict:
+def _build_tabs_boxes(column, choices: dict, groups=None, space=None) -> dict:
     """One tab per group, options in a scrollable multi-column grid.
 
     For a catalog too long to scroll through in one piece: ASO publishes 130
@@ -625,7 +707,7 @@ def _build_tabs_boxes(column, choices: dict, groups=None, budget: int = 0) -> di
     # the worst case -- half the width wasted on every short region. It changes
     # only the arrangement INSIDE the box, which already resizes with the tab.
     for group_name, options in grouped:
-        columns = _columns_for(options, budget)
+        columns = _columns(options, space)
         page = qt.QWidget()
         grid = qt.QGridLayout(page)
         grid.setContentsMargins(design.SPACING_SM, design.SPACING_SM, design.SPACING_SM, design.SPACING_SM)
@@ -654,7 +736,7 @@ def _build_tabs_boxes(column, choices: dict, groups=None, budget: int = 0) -> di
     # The heights live in this closure, never on the widget: PythonQt refuses a
     # new attribute on a C++ object ("creating new attributes on C++ objects is
     # not allowed") and takes the panel down with it.
-    heights = [design.tabs_height_for(-(-len(options) // _columns_for(options, budget)))
+    heights = [design.tabs_height_for(-(-len(options) // _columns(options, space)))
                for _name, options in grouped]
 
     def fit(index=None):
@@ -662,6 +744,11 @@ def _build_tabs_boxes(column, choices: dict, groups=None, budget: int = 0) -> di
         height = heights[chosen] if 0 <= chosen < len(heights) else max(heights, default=0)
         tabs.setMinimumHeight(height)
         tabs.setMaximumHeight(height)
+
+    # Handed back so a redraw can reopen the tab the reader was on: a rebuilt
+    # QTabWidget opens on its first tab, whatever they were looking at.
+    if space is not None:
+        space.tabs = tabs
 
     tabs.currentChanged.connect(fit)
     fit()
