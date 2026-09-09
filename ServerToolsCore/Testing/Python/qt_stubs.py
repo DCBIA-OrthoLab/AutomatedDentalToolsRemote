@@ -26,17 +26,6 @@ class Signal:
             slot(*args)
 
 
-class QSize:
-    def __init__(self, width, height=0):
-        self._width, self._height = int(width), int(height)
-
-    def width(self):
-        return self._width
-
-    def height(self):
-        return self._height
-
-
 class QObject:
     def __init__(self, *_args, **_kwargs):
         self._properties = {}
@@ -263,6 +252,17 @@ class QTabWidget(QWidget):
         self.currentChanged.emit(index)
 
 
+class QSize:
+    def __init__(self, width, height=0):
+        self._width, self._height = int(width), int(height)
+
+    def width(self):
+        return self._width
+
+    def height(self):
+        return self._height
+
+
 class QEvent:
     """Only the type this extension reacts to. Values are Qt's own.
 
@@ -352,12 +352,6 @@ class QLabel(QObject):
 
 
 class QPushButton(QObject):
-    # A chip's real width is its text plus its padding and border. Both numbers
-    # are the stub's own; what is under test is what the code does WITH a
-    # measurement, not Qt's rendering.
-    CHARACTER_WIDTH = 8
-    CHIP_PADDING = 24
-
     def __init__(self, text=""):
         QObject.__init__(self)
         self.text = text
@@ -365,13 +359,6 @@ class QPushButton(QObject):
         self.toggled = Signal()
         self._checkable = False
         self._checked = False
-
-    @property
-    def sizeHint(self):
-        """A PROPERTY, as PythonQt exposes a getter with no setter. `_measure`
-        tries this spelling first and `sizeHint()` second, precisely because
-        which one a build offers is not something to bet on."""
-        return QSize(len(self.text) * self.CHARACTER_WIDTH + self.CHIP_PADDING, 20)
 
     def setChecked(self, checked):
         """A checkable button IS the option in a dense multichoice, so it has to
