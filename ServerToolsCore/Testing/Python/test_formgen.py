@@ -1895,5 +1895,120 @@ class HostedEntryReadabilityTest(unittest.TestCase):
         self.assertIn("339", entry)
 
 
+
+class ResponsiveColumnsTest(unittest.TestCase):
+    """A wider panel gets more columns, and the usual panel is untouched.
+
+    The mechanism is an event filter, because PythonQt cannot subclass the C++
+    widget to override `resizeEvent` -- the same pattern `Agent.py` already uses
+    in this extension. The stub records installed filters and `resizeTo`
+    delivers to them, which is what these tests drive.
+    """
+
+    OPTIONS = ["Ba", "S", "N", "RPo", "LPo", "ROr", "LOr", "C2", "C3", "C4"]
+
+    def _group(self):
+        return formgen.MultiChoiceGroup(
+            {option: False for option in self.OPTIONS}, "",
+            layout="tabs", groups={"Cranial base": self.OPTIONS})
+
+    def _columns(self, group):
+        tabs = [w for w in group.container.layout.widgets
+                if isinstance(w, qt.QTabWidget)][0]
+        grid = tabs.tabs[0][1].layout.widgets[0].widget.layout
+        return max(column for _row, column in grid.cells) + 1
+
+    def test_the_panel_at_its_usual_width_is_unchanged(self):
+        """The budget was measured against this width, so scaling by the ratio
+        has to return exactly the calibrated number. Anything else is a
+        regression in the ONE case every clinician actually sees."""
+        group = self._group()
+        before = self._columns(group)
+        group.container.resizeTo(formgen._CALIBRATION_WIDTH)
+        self.assertEqual(self._columns(group), before)
+
+    def test_a_wider_panel_gets_more_columns(self):
+        group = self._group()
+        before = self._columns(group)
+        group.container.resizeTo(formgen._CALIBRATION_WIDTH * 3)
+        self.assertGreater(self._columns(group), before)
+
+    def test_a_narrower_panel_keeps_the_calibrated_layout(self):
+        """Growth is what was asked for. Narrowing on a ratio nothing has
+        checked would put the regression in the common case to fix the rare
+        one; `_MIN_COLUMNS` already covers a genuinely cramped panel."""
+        group = self._group()
+        before = self._columns(group)
+        group.container.resizeTo(120)
+        self.assertEqual(self._columns(group), before)
+
+    def test_a_resize_that_changes_nothing_redraws_nothing(self):
+        """A drag delivers a resize per pixel. Redrawing 119 options each time
+        would make the panel crawl and would move chips under the cursor
+        mid-click, so the COLUMN COUNT gates the redraw, not the measurement."""
+        group = self._group()
+        group.container.resizeTo(formgen._CALIBRATION_WIDTH * 3)
+        boxes = dict(group.boxes)
+        for width in range(formgen._CALIBRATION_WIDTH * 3,
+                           formgen._CALIBRATION_WIDTH * 3 + 20):
+            group.container.resizeTo(width)
+        self.assertIs(group.boxes["Ba"], boxes["Ba"])
+
+    def test_the_selection_survives_a_reflow(self):
+        """The whole grid is rebuilt, so what the user ticked has to be carried
+        across -- otherwise widening the panel silently clears the form."""
+        group = self._group()
+        group.boxes["RPo"].setChecked(True)
+        group.container.resizeTo(formgen._CALIBRATION_WIDTH * 3)
+        self.assertTrue(group.boxes["RPo"].isChecked())
+        self.assertEqual(sorted(k for k, v in group.value().items() if v), ["RPo"])
+
+    def test_a_layout_with_no_columns_is_not_watched(self):
+        """A flat column and an inline row do not change with the width, so
+        they are not asked to recompute anything."""
+        for layout in (None, "inline"):
+            group = formgen.MultiChoiceGroup(
+                {option: False for option in self.OPTIONS}, "", layout=layout)
+            self.assertEqual(group.container._filters, [], layout)
+
+    def test_the_width_is_read_from_whichever_spelling_pythonqt_offers(self):
+        """PythonQt exposes some getters as properties and some as slots, and
+        this extension has been bitten once already -- `combo.fontMetrics` is a
+        slot, and reading it as a property gave an object with no metrics on it.
+        Rather than bet on which kind `width` is, each spelling is tried."""
+        class NoSize:
+            def type(self):
+                return qt.QEvent.Resize
+
+            def size(self):
+                raise AttributeError("no size on this event")
+
+        class WidthIsAProperty:
+            width = 880
+
+        class WidthIsASlot:
+            def width(self):
+                return 880
+
+        for widget in (WidthIsAProperty(), WidthIsASlot()):
+            self.assertEqual(formgen._width_of(NoSize(), widget), 880,
+                             type(widget).__name__)
+
+    def test_an_unreadable_width_changes_nothing(self):
+        """A resize the code cannot measure must leave the panel exactly as it
+        was, never collapse it to the minimum."""
+        group = self._group()
+        before = self._columns(group)
+        group.reflow(formgen._width_of(object(), object()))
+        self.assertEqual(self._columns(group), before)
+
+
+    def test_the_group_still_reads_back_the_complete_state_after_a_reflow(self):
+        group = self._group()
+        group.container.resizeTo(formgen._CALIBRATION_WIDTH * 3)
+        self.assertEqual(list(group.boxes), self.OPTIONS)
+        self.assertEqual(sorted(group.value()), sorted(self.OPTIONS))
+
+
 if __name__ == "__main__":
     unittest.main()

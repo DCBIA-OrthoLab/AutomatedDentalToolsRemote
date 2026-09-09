@@ -62,12 +62,94 @@ _CHIP_OVERHEAD = 4
 # practice: four chips of five characters measured 225 px of the 570 the box
 # offers, so the first guess spent under half of it.
 _GRID_BUDGET = 64
+# The panel width that budget was measured against, in pixels. Only ever a
+# ratio: `budget_for_width` scales the two together, so the pair stays
+# meaningful if either is ever re-measured.
+_CALIBRATION_WIDTH = 570
 
 
-def _columns_for(options) -> int:
-    """A column count the longest option still fits in."""
+def _columns_for(options, budget: int = 0) -> int:
+    """A column count the longest option still fits in.
+
+    `budget` is the width to spend, in characters. Zero means "not measured
+    yet", which is every FIRST draw: a widget has no width until Qt has laid it
+    out, so the calibrated `_GRID_BUDGET` is what the panel is built with and a
+    measured budget only ever refines it afterwards (see `MultiChoiceGroup.reflow`).
+    """
     longest = max((len(str(option)) for option in options), default=1)
-    return max(_MIN_COLUMNS, min(_MAX_COLUMNS, _GRID_BUDGET // (longest + _CHIP_OVERHEAD)))
+    budget = max(budget, _GRID_BUDGET)
+    # The CEILING scales with the width too, or widening the panel buys nothing
+    # for exactly the catalogues most able to use it: ALI's cranial base is
+    # `Ba`, `S`, `N`, and ten short chips already sit at the cap in a panel of
+    # the usual width. At the calibrated budget this is `_MAX_COLUMNS` to the
+    # unit, so the panel a clinician has today is unchanged.
+    ceiling = max(_MAX_COLUMNS, _MAX_COLUMNS * budget // _GRID_BUDGET)
+    return max(_MIN_COLUMNS, min(ceiling, budget // (longest + _CHIP_OVERHEAD)))
+
+
+def budget_for_width(width: int) -> int:
+    """Scale the calibrated width budget to the panel's actual width.
+
+    `_GRID_BUDGET` was MEASURED against a panel `_CALIBRATION_WIDTH` px wide, so
+    scaling by the width ratio reuses that measurement rather than introducing a
+    second, unverified one. A font-metrics model would be the more general
+    answer and is the wrong trade here: it would need a chip's real padding in
+    pixels, which nothing has measured, to replace a number that was.
+
+    At the calibrated width this returns the calibrated budget exactly, so the
+    panel a clinician has today is unchanged to the pixel. `_columns_for` floors
+    the result at `_GRID_BUDGET`, so a NARROWER panel keeps that layout too --
+    growth is what was asked for, and `_MIN_COLUMNS` already covers a genuinely
+    cramped one.
+    """
+    if width <= 0:
+        return 0
+    return int(_GRID_BUDGET * width / _CALIBRATION_WIDTH)
+
+
+class _ReflowOnResize(qt.QObject):
+    """Recomputes a grouped multichoice's columns when its width changes.
+
+    An event filter and not a `resizeEvent` override: PythonQt cannot subclass
+    the C++ widget, and `Agent.py` already proves this path works in Slicer. It
+    must be held by a Python reference (`MultiChoiceGroup._reflow_filter`) or Qt
+    is left filtering through a deleted object.
+    """
+
+    def __init__(self, group):
+        super().__init__(group.container)
+        self._group = group
+
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt's own spelling
+        try:
+            if event.type() == qt.QEvent.Resize:
+                self._group.reflow(_width_of(event, obj))
+        except Exception:  # noqa: BLE001 - a relayout must never break the panel
+            logger.warning("could not reflow a multichoice", exc_info=True)
+        # Never consumed: the widget still has to lay itself out.
+        return False
+
+
+def _width_of(event, widget) -> int:
+    """The new width, asked of the event first and the widget second.
+
+    The EVENT is the right source: it carries the size being applied, while the
+    widget may not have taken it yet. The fallback exists because PythonQt
+    exposes some getters as properties and some as slots, and this extension has
+    already been bitten once -- `combo.fontMetrics` is a slot, and reading it as
+    a property silently produced an object with no metrics on it. Rather than
+    bet on which kind `width` is, try each and take the first plausible answer.
+    """
+    for source in (lambda: event.size().width(),
+                   lambda: widget.width,
+                   lambda: widget.width()):
+        try:
+            value = source()
+        except Exception:  # noqa: BLE001 - trying the next spelling is the point
+            continue
+        if isinstance(value, int) and value > 0:
+            return value
+    return 0
 
 # Where the leftovers go when `groups` doesn't mention every option. The server
 # rejects a group naming an option that doesn't exist, but not the reverse —
@@ -301,7 +383,45 @@ class MultiChoiceGroup:
         self._column = column
         self._layout = layout
         self._groups = groups
+        # The width to spend, in characters. Zero until Qt has laid the panel
+        # out and the first resize event measures it -- so the FIRST draw is
+        # always the calibrated default, and a panel whose resize event never
+        # arrives keeps exactly the layout it had before any of this existed.
+        self._budget = 0
+        self._choices = dict(choices)
         self._draw(choices, groups)
+
+        # Only the two grid-shaped layouts have a column count to recompute. A
+        # flat column and an inline row do not change with the width, so they
+        # are not asked to.
+        if layout in ("grid", "tabs"):
+            self._reflow_filter = _ReflowOnResize(self)
+            self.container.installEventFilter(self._reflow_filter)
+
+    def reflow(self, width: int) -> None:
+        """Redraw for a new width, if and only if the arrangement changes.
+
+        A resize event arrives for every pixel the user drags, and redrawing a
+        119-option group each time would make the panel crawl and would move
+        chips under the cursor mid-click. So the measurement decides nothing on
+        its own: what gates the redraw is the COLUMN COUNTS the new budget
+        produces, which change a handful of times across the whole drag.
+
+        The selection survives, through `rebuild`.
+        """
+        budget = budget_for_width(width)
+        if budget == self._budget:
+            return
+        before = self._column_counts()
+        self._budget = budget
+        if self._column_counts() == before:
+            return
+        self.rebuild(self._choices, self._groups, force=True)
+
+    def _column_counts(self) -> tuple:
+        """The column count of each group at the current budget."""
+        return tuple(_columns_for(options, self._budget)
+                     for _name, options in _grouped(self._choices, self._groups))
 
     def _draw(self, choices: dict, groups) -> None:
         """Lay the options out. Split from __init__ so `rebuild` can redraw a
@@ -315,7 +435,7 @@ class MultiChoiceGroup:
                     "Unknown multichoice layout '%s', falling back to a single column", layout
                 )
             builder = _build_flat_boxes
-        made = builder(column, choices, groups)
+        made = builder(column, choices, groups, self._budget)
 
         # Declaration order, whatever order the layout visited the options in.
         self.boxes = {option: made[option] for option in choices}
@@ -352,7 +472,7 @@ class MultiChoiceGroup:
         row.addStretch(1)
         return bar
 
-    def rebuild(self, choices: dict, groups=None) -> None:
+    def rebuild(self, choices: dict, groups=None, force: bool = False) -> None:
         """Draw this group again for a different set of options.
 
         A facade publishes the UNION of its engines' options and says per mode
@@ -363,7 +483,7 @@ class MultiChoiceGroup:
         """
         kept = {option: box.isChecked() for option, box in self.boxes.items()}
         wanted = {option: kept.get(option, default) for option, default in choices.items()}
-        if list(self.boxes) == list(wanted) and self._groups == groups:
+        if not force and list(self.boxes) == list(wanted) and self._groups == groups:
             return
 
         while self._column.count():
@@ -373,6 +493,7 @@ class MultiChoiceGroup:
                 widget.setParent(None)
 
         self._groups = groups
+        self._choices = dict(wanted)
         self._draw(wanted, groups)
 
     def setAll(self, checked: bool) -> None:
@@ -427,7 +548,7 @@ def _grouped(choices: dict, groups) -> list:
     return [(name, options) for name, options in grouped if options]
 
 
-def _build_flat_boxes(column, choices: dict, _groups=None) -> dict:
+def _build_flat_boxes(column, choices: dict, _groups=None, _budget: int = 0) -> dict:
     """One box per line. The default, and what every tool declaring no `ui`
     gets — unchanged from before layouts existed."""
     boxes = {}
@@ -437,7 +558,7 @@ def _build_flat_boxes(column, choices: dict, _groups=None) -> dict:
     return boxes
 
 
-def _build_inline_boxes(column, choices: dict, _groups=None) -> dict:
+def _build_inline_boxes(column, choices: dict, _groups=None, _budget: int = 0) -> dict:
     """One horizontal row. For a handful of short options (ASO's two jaws, its
     eight landmark types) that waste a line each stacked vertically."""
     row_container = qt.QWidget()
@@ -455,7 +576,7 @@ def _build_inline_boxes(column, choices: dict, _groups=None) -> dict:
     return boxes
 
 
-def _build_grid_boxes(column, choices: dict, groups=None) -> dict:
+def _build_grid_boxes(column, choices: dict, groups=None, budget: int = 0) -> dict:
     """One row per group, options as columns — the chart layout.
 
     For options whose *position* carries meaning: ASO asks for teeth "spread
@@ -488,7 +609,7 @@ def _build_grid_boxes(column, choices: dict, groups=None) -> dict:
     return boxes
 
 
-def _build_tabs_boxes(column, choices: dict, groups=None) -> dict:
+def _build_tabs_boxes(column, choices: dict, groups=None, budget: int = 0) -> dict:
     """One tab per group, options in a scrollable multi-column grid.
 
     For a catalog too long to scroll through in one piece: ASO publishes 130
@@ -504,7 +625,7 @@ def _build_tabs_boxes(column, choices: dict, groups=None) -> dict:
     # the worst case -- half the width wasted on every short region. It changes
     # only the arrangement INSIDE the box, which already resizes with the tab.
     for group_name, options in grouped:
-        columns = _columns_for(options)
+        columns = _columns_for(options, budget)
         page = qt.QWidget()
         grid = qt.QGridLayout(page)
         grid.setContentsMargins(design.SPACING_SM, design.SPACING_SM, design.SPACING_SM, design.SPACING_SM)
@@ -533,7 +654,7 @@ def _build_tabs_boxes(column, choices: dict, groups=None) -> dict:
     # The heights live in this closure, never on the widget: PythonQt refuses a
     # new attribute on a C++ object ("creating new attributes on C++ objects is
     # not allowed") and takes the panel down with it.
-    heights = [design.tabs_height_for(-(-len(options) // _columns_for(options)))
+    heights = [design.tabs_height_for(-(-len(options) // _columns_for(options, budget)))
                for _name, options in grouped]
 
     def fit(index=None):
