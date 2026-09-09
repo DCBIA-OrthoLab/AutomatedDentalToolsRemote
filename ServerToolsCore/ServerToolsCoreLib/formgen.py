@@ -124,8 +124,8 @@ class _Space:
 
     Two directions on purpose. It travels DOWN into the layout builders carrying
     the panel's measured width and each chip's measured width, and comes back
-    carrying the tab widget the tabbed builder made -- which is what lets a
-    redraw put the reader back on the tab they were reading.
+    carrying the page whose width is the room those chips have, and the closure
+    that re-places them in it.
 
     Measured rather than estimated because the estimate was visibly wrong: a
     uniform "longest label plus four characters" left a wide margin unused
@@ -138,8 +138,6 @@ class _Space:
         self.width = 0
         self.chips = {}
         self.spacing = design.SPACING_MD
-        # Set by the tabbed builder, read across a redraw.
-        self.tabs = None
         # The grid's own page. Its width is the room the chips actually have --
         # the container's width less the tab frame, the scroll bar and the
         # margins -- so it is what turns `_GRID_SIDE_CHROME` from a guess into a
@@ -147,6 +145,9 @@ class _Space:
         self.page = None
         self.chrome = _GRID_SIDE_CHROME
         self._last_width = 0
+        # Set by a grid-shaped builder: re-places the chips it made for whatever
+        # this object now measures. None means nothing here has columns to move.
+        self.relayout = None
 
     def learn_chrome(self, width: int) -> None:
         """Replace the guessed chrome with the difference actually observed.
@@ -493,21 +494,22 @@ class MultiChoiceGroup:
             self.container.installEventFilter(self._reflow_filter)
 
     def reflow(self, width: int) -> None:
-        """Redraw for a new width, if and only if the arrangement changes.
+        """Re-place the chips for a new width, if the arrangement changes.
 
-        A resize event arrives for every pixel the user drags, and redrawing a
-        119-option group each time would make the panel crawl and would move
-        chips under the cursor mid-click. So the measurement decides nothing on
-        its own: what gates the redraw is the COLUMN COUNTS it produces, which
-        change a handful of times across a whole drag.
+        It MOVES the widgets it already has. Rebuilding the group instead was
+        the first attempt and was wrong twice over: it destroyed and recreated
+        the whole tree on a resize, and tearing a visible widget out of its
+        layout is how a bare panel of orphaned check boxes ends up floating
+        above Slicer (see `rebuild`'s teardown). Moving them keeps the tab, the
+        selection and the scroll position for free, because none of them is ever
+        thrown away.
 
-        Two things survive the redraw, because losing either is a bug a reader
-        feels immediately: the SELECTION (through `rebuild`) and the TAB they
-        were reading -- a rebuilt QTabWidget opens on its first tab, so widening
-        the panel while reading "Upper" used to throw them back to "Cranial
-        base".
+        A resize event arrives for every pixel the user drags, so the
+        measurement decides nothing on its own: what gates the work is the
+        COLUMN COUNTS it produces, which change a handful of times across a
+        whole drag.
         """
-        if width <= 0:
+        if width <= 0 or self._space.relayout is None:
             return
         before = self._column_counts()
         self._space.learn_chrome(width)
@@ -515,23 +517,10 @@ class MultiChoiceGroup:
             return
         if self._column_counts() == before:
             return
-        tab = self._current_tab()
-        self.rebuild(self._choices, self._groups, force=True)
-        self._restore_tab(tab)
-
-    def _current_tab(self) -> int:
         try:
-            return int(self._space.tabs.currentIndex)
-        except Exception:  # noqa: BLE001 - no tabs, or a spelling PythonQt hides
-            return 0
-
-    def _restore_tab(self, index: int) -> None:
-        if not index or self._space.tabs is None:
-            return
-        try:
-            self._space.tabs.setCurrentIndex(index)
-        except Exception:  # noqa: BLE001 - the panel matters more than the tab
-            logger.warning("could not restore the open tab after a reflow", exc_info=True)
+            self._space.relayout()
+        except Exception:  # noqa: BLE001 - a relayout must never break the panel
+            logger.warning("could not re-place a multichoice", exc_info=True)
 
     def _column_counts(self) -> tuple:
         """The column count of each group, as the panel is measured now."""
@@ -612,7 +601,15 @@ class MultiChoiceGroup:
             item = self._column.takeAt(0)
             widget = item.widget() if hasattr(item, "widget") else None
             if widget is not None:
+                # HIDE BEFORE UNPARENTING. `setParent(None)` does not merely
+                # detach a widget in Qt, it makes it a TOP-LEVEL WINDOW -- and a
+                # visible one then floats above Slicer as a bare frameless panel
+                # of orphaned check boxes. Hidden first, and handed to Qt to
+                # delete rather than left for the garbage collector, which under
+                # PythonQt may never come.
+                widget.setVisible(False)
                 widget.setParent(None)
+                widget.deleteLater()
 
         self._groups = groups
         self._choices = dict(wanted)
@@ -743,6 +740,8 @@ def _build_tabs_boxes(column, choices: dict, groups=None, space=None) -> dict:
     boxes = {}
     grouped = list(_grouped(choices, groups))
     first_page = None
+    # Kept so a width change can MOVE these chips rather than rebuild them.
+    grids = []
     # Per TAB, from that tab's own longest label. `Ba`, `S`, `N` fit six across
     # where `UR3OIP` fits four, and one count for the whole argument had to be
     # the worst case -- half the width wasted on every short region. It changes
@@ -758,18 +757,16 @@ def _build_tabs_boxes(column, choices: dict, groups=None, space=None) -> dict:
         # Wider than tall: chips carry their own padding, so touching columns
         # read as one long word while touching rows read as a list.
         grid.setHorizontalSpacing(design.SPACING_MD)
-        for index, option in enumerate(options):
+        for option in options:
             boxes[option] = _make_chip(option, choices[option])
-            grid.addWidget(boxes[option], index // columns, index % columns)
+        grids.append((grid, options))
         page_boxes = [boxes[option] for option in options]
         # The page is stretched to the scroll area's height, and a QGridLayout
         # hands that slack to its ROWS: measured on ALI's cranial base, eleven
         # 20 px check boxes sat 94 px apart -- three sparse lines floating in a
         # tall empty box. A trailing row and column take the slack instead, so
         # the options pack at the top left and read as a list.
-        # Full rows fill the width; a sparse group stays its own size.
-        _pack_to_top_left(grid, rows=-(-len(options) // columns), columns=columns,
-                          fill=len(options) >= columns)
+        _place_in_grid(grid, options, boxes, columns)
         tabs.addTab(_group_page(page, page_boxes), group_name or _UNGROUPED_LABEL)
 
     # Fixed both ways, and PER TAB. A minimum alone let the panel's spare
@@ -792,10 +789,25 @@ def _build_tabs_boxes(column, choices: dict, groups=None, space=None) -> dict:
 
     # Handed back so a redraw can reopen the tab the reader was on: a rebuilt
     # QTabWidget opens on its first tab, whatever they were looking at.
+    def relayout():
+        """Re-place every tab's chips for the width `space` now measures.
+
+        The tabs, the pages and the chips are all left exactly where they are --
+        only their cells change. That is what keeps the open tab, the ticked
+        boxes and the scroll position across a resize, none of which is code
+        here: they survive because nothing is destroyed.
+        """
+        for grid, options in grids:
+            _clear_stretches(grid, max(len(options), _MAX_COLUMNS))
+            _place_in_grid(grid, options, boxes, _columns(options, space))
+        heights[:] = [design.tabs_height_for(-(-len(options) // _columns(options, space)))
+                      for _name, options in grouped]
+        fit()
+
     if space is not None:
-        space.tabs = tabs
         # The first tab's page stands for all of them: they share a width.
         space.page = first_page
+        space.relayout = relayout
 
     tabs.currentChanged.connect(fit)
     fit()
@@ -853,6 +865,38 @@ def _group_page(grid_page, page_boxes):
 
     column.addWidget(row)
     return container
+
+
+def _place_in_grid(grid, options, boxes, columns: int) -> None:
+    """Put `options` into `grid` at `columns` across, moving what is already in.
+
+    Qt has no "move a widget" call: `addWidget` at a new cell on a widget the
+    layout already holds leaves it registered at both, so it is removed first.
+    The widget itself is never destroyed, which is the whole point -- its
+    checked state, and the fact that it is not a floating window, both come from
+    it staying the same object.
+    """
+    for index, option in enumerate(options):
+        box = boxes[option]
+        try:
+            grid.removeWidget(box)
+        except Exception:  # noqa: BLE001 - a first placement has nothing to remove
+            pass
+        grid.addWidget(box, index // columns, index % columns)
+    _pack_to_top_left(grid, rows=-(-len(options) // columns), columns=columns,
+                      fill=len(options) >= columns)
+
+
+def _clear_stretches(grid, columns: int) -> None:
+    """Undo the column stretches a previous, wider arrangement set.
+
+    `setColumnStretch` is remembered per column for the life of the layout, so a
+    grid that once filled twenty columns keeps stretching them after it narrows
+    to eight -- eight chips spread across the panel with twelve empty columns
+    still claiming their share.
+    """
+    for column in range(max(columns, 0) + 1):
+        grid.setColumnStretch(column, 0)
 
 
 def _pack_to_top_left(grid, rows: int, columns: int, fill: bool = False) -> None:

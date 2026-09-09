@@ -145,6 +145,12 @@ class QLayout(QObject):
         QObject.__init__(self)
         self.widgets = []
         self.stretches = []
+        # The widget this layout lays out. Kept so `addWidget` can REPARENT what
+        # it is given, as Qt does -- which is what makes "is this widget still
+        # attached to something?" a question a test can ask, and that question is
+        # the difference between a check box in a panel and one floating above
+        # Slicer in a window of its own.
+        self._parent = parent
         if parent is not None:
             parent.layout = self
 
@@ -156,6 +162,8 @@ class QLayout(QObject):
 
     def addWidget(self, widget, stretch=0):
         self.widgets.append(widget)
+        if self._parent is not None and hasattr(widget, "parent"):
+            widget.parent = self._parent
 
     def addStretch(self, stretch=1):
         """Recorded, not discarded. WHERE the stretch sits is the difference
@@ -207,6 +215,16 @@ class QGridLayout(QLayout):
     def addWidget(self, widget, row=0, column=0, *_args):
         self.widgets.append(widget)
         self.cells[(row, column)] = widget
+
+    def removeWidget(self, widget):
+        """Qt has no "move"; a widget is removed and re-added at its new cell.
+        Without this the stub kept the OLD cell too, so a grid that had been
+        wider still reported the columns it no longer used."""
+        if widget in self.widgets:
+            self.widgets.remove(widget)
+        for cell, held in list(self.cells.items()):
+            if held is widget:
+                del self.cells[cell]
 
     def setVerticalSpacing(self, spacing):
         self.verticalSpacing = spacing

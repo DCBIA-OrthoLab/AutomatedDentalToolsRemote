@@ -1978,7 +1978,8 @@ class ResponsiveColumnsTest(unittest.TestCase):
         grid = self._tabs(group).tabs[0][1].layout.widgets[0].widget.layout
         columns = max(column for _row, column in grid.cells) + 1
         self.assertGreater(len(many), columns, "the rows have to be full")
-        self.assertEqual(sorted(grid.columnStretch), list(range(columns)))
+        stretched = sorted(c for c, v in grid.columnStretch.items() if v)
+        self.assertEqual(stretched, list(range(columns)))
 
     def test_a_group_that_fits_on_one_line_stays_its_own_size(self):
         """The other half of the rule, and the visible one: ten chips in a panel
@@ -1988,9 +1989,55 @@ class ResponsiveColumnsTest(unittest.TestCase):
         group = self._group()
         group.container.resizeTo(1400)
         grid = self._tabs(group).tabs[0][1].layout.widgets[0].widget.layout
-        # Exactly one stretch, past the last column: everything packed left.
-        self.assertEqual(len(grid.columnStretch), 1)
-        self.assertGreaterEqual(list(grid.columnStretch)[0], len(self.SHORT))
+        # Exactly one live stretch, past the last column: everything packed left.
+        stretched = [c for c, v in grid.columnStretch.items() if v]
+        self.assertEqual(len(stretched), 1)
+        self.assertGreaterEqual(stretched[0], len(self.SHORT))
+
+    def test_a_resize_destroys_nothing(self):
+        """The bug this replaced: a resize rebuilt the whole group, and tearing
+        a VISIBLE widget out of its layout does not merely detach it -- Qt makes
+        it a top-level window, so a bare panel of orphaned check boxes appeared
+        floating above Slicer. Nothing is destroyed now; the chips only move."""
+        group = self._group()
+        tabs, chip = self._tabs(group), group.boxes["Ba"]
+        group.container.resizeTo(1400)
+
+        self.assertIs(self._tabs(group), tabs)
+        self.assertIs(group.boxes["Ba"], chip)
+        self.assertFalse(tabs.deleted)
+        self.assertIsNotNone(tabs.parent)
+
+    def test_a_rebuild_hides_a_widget_before_it_unparents_it(self):
+        """A mode switch genuinely does replace the tree, and has the same trap:
+        `setParent(None)` on a visible widget makes it a window. Hidden first,
+        and handed to Qt to delete rather than left to a garbage collector that
+        under PythonQt may never come."""
+        group = self._group()
+        tabs = self._tabs(group)
+
+        group.rebuild({"MAND": False, "MAX": False}, {"Structures": ["MAND", "MAX"]})
+
+        self.assertFalse(tabs.isVisible(), "left visible, so it became a window")
+        self.assertIsNone(tabs.parent)
+        self.assertTrue(tabs.deleted, "never handed to Qt to delete")
+
+    def test_a_narrowed_grid_stops_stretching_the_columns_it_dropped(self):
+        """`setColumnStretch` is remembered for the life of the layout, so a
+        grid that once filled twenty columns keeps stretching them after it
+        narrows -- eight chips spread across the panel with twelve empty columns
+        still claiming their share."""
+        many = ["L%02d" % index for index in range(60)]
+        group = formgen.MultiChoiceGroup(
+            {option: False for option in many}, "",
+            layout="tabs", groups={"Landmarks": many})
+        group.container.resizeTo(1400)
+        group.container.resizeTo(400)
+
+        grid = self._tabs(group).tabs[0][1].layout.widgets[0].widget.layout
+        columns = max(column for _row, column in grid.cells) + 1
+        self.assertFalse([c for c, v in grid.columnStretch.items() if v and c > columns])
+
 
     def test_a_resize_that_changes_nothing_redraws_nothing(self):
         """A drag delivers a resize per pixel. Redrawing 119 options each time
