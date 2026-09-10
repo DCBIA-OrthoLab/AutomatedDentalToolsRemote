@@ -75,9 +75,6 @@ def _columns_for(options) -> int:
 # the tool offers.
 _UNGROUPED_LABEL = "Other"
 
-SELECT_ALL_LABEL = "All"
-SELECT_NONE_LABEL = "None"
-SELECT_DEFAULT_LABEL = "Default"
 # Per TAB. The original extension had both a per-tab `Switch group selection`
 # and a global `Select All` / `Clear All` pair (ALI.py's LandmarkTabWidget); a
 # clinician who wants the cranial base wants ten boxes ticked, not ten clicks.
@@ -294,11 +291,6 @@ class MultiChoiceGroup:
         if description:
             column.addWidget(design.hint_label(description))
 
-        # The state the server declared, kept for the "Default" button — which
-        # is the old ASO module's per-mode `Suggest()` button, now on every
-        # multichoice of every tool and with the suggestion living server-side.
-        self._defaults = dict(choices)
-
         self._column = column
         self._layout = layout
         self._groups = groups
@@ -324,37 +316,6 @@ class MultiChoiceGroup:
         # Declaration order, whatever order the layout visited the options in.
         self.boxes = {option: made[option] for option in choices}
 
-        # No global bar on a TABBED group: every tab already carries a button
-        # that takes the whole group, and the two together were three small
-        # links under a button that does the same thing one tab at a time.
-        # Every other layout keeps it -- a flat column of nine structures has no
-        # other way to say "all of them".
-        if len(choices) > 1 and layout != "tabs":
-            column.addWidget(self._selectionToolbar())
-
-    def _selectionToolbar(self):
-        """All / None / Default. Cheap here, and the difference between usable
-        and not once an argument publishes 130 options: without it, restoring
-        the server's suggested selection means remembering and re-ticking it by
-        hand."""
-        bar = qt.QWidget()
-        row = qt.QHBoxLayout(bar)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(design.SPACING_MD)
-        # Left, under the options they act on. Right-aligned they floated at the
-        # far edge of the panel with nothing to attach to -- and on ALI the
-        # `regions` bar landed directly above the LABEL OF THE NEXT FIELD, so it
-        # read as belonging to the argument below it.
-        for label, action in (
-            (SELECT_ALL_LABEL, lambda: self.setAll(True)),
-            (SELECT_NONE_LABEL, lambda: self.setAll(False)),
-            (SELECT_DEFAULT_LABEL, self.restoreDefaults),
-        ):
-            button = design.link_button(label)
-            button.clicked.connect(action)
-            row.addWidget(button)
-        row.addStretch(1)
-        return bar
 
     def rebuild(self, choices: dict, groups=None) -> None:
         """Draw this group again for a different set of options.
@@ -378,14 +339,6 @@ class MultiChoiceGroup:
 
         self._groups = groups
         self._draw(wanted, groups)
-
-    def setAll(self, checked: bool) -> None:
-        for box in self.boxes.values():
-            box.setChecked(checked)
-
-    def restoreDefaults(self) -> None:
-        for option, box in self.boxes.items():
-            box.setChecked(bool(self._defaults.get(option)))
 
     def value(self) -> dict:
         return {option: box.isChecked() for option, box in self.boxes.items()}

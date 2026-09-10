@@ -891,7 +891,8 @@ class MultiChoiceLayoutTest(unittest.TestCase):
         self.assertEqual(group.value(), _LAYOUT_CHOICES)
         group.boxes["b"].setChecked(True)
         self.assertTrue(group.value()["b"])
-        group.setAll(False)
+        for box in group.boxes.values():
+            box.setChecked(False)
         self.assertFalse(any(group.value().values()))
 
     def test_a_short_catalogue_gets_more_columns_than_a_long_one(self):
@@ -947,63 +948,18 @@ class MultiChoiceLayoutTest(unittest.TestCase):
         self.assertEqual(grid.rowStretch.get(grid.rowCount()), 1)
         self.assertEqual(grid.columnStretch, {})
 
-    def test_a_tabbed_group_has_no_global_bar_beside_its_tab_buttons(self):
-        """Every tab already carries a button that takes the whole group; the
-        two together were three small links under a button doing the same thing
-        one tab at a time."""
-        group = self._group("tabs", _LAYOUT_GROUPS)
-
-        texts = [getattr(w, "text", "") for w in group.container.layout.widgets]
-        self.assertNotIn(formgen.SELECT_ALL_LABEL, texts)
-        self.assertNotIn(formgen.SELECT_DEFAULT_LABEL, texts)
-
-    def test_every_other_layout_keeps_it(self):
-        """A flat column of nine structures has no other way to say "all of
-        them"."""
-        for layout in (None, "inline", "grid"):
-            group = self._group(layout, _LAYOUT_GROUPS if layout == "grid" else None)
-            bar = group.container.layout.widgets[-1]
-            labels = [w.text for w in bar.layout.widgets if hasattr(w, "text")]
-            self.assertIn(formgen.SELECT_ALL_LABEL, labels, layout)
-
-    def test_all_none_default_sit_under_the_options_not_at_the_far_edge(self):
-        """Right-aligned they floated at the edge of the panel with nothing to
-        attach to -- and on ALI the `regions` bar landed directly above the
-        LABEL OF THE NEXT FIELD, reading as if it belonged to that one."""
-        group = self._group(None)  # flat: still carries the bar
-        bar = group.container.layout.widgets[-1]
-
-        labels = [w.text for w in bar.layout.widgets if hasattr(w, "text")]
-        self.assertEqual(labels[:3], [formgen.SELECT_ALL_LABEL,
-                                      formgen.SELECT_NONE_LABEL,
-                                      formgen.SELECT_DEFAULT_LABEL])
-        self.assertEqual(bar.layout.stretches, [1],
-                         "one trailing stretch, so the links start at the left")
-
-    def test_grid_puts_one_group_per_row_with_its_options_as_columns(self):
-        # The chart property: ASO asks for teeth "spread across the arch", and
-        # only the positions can show whether a selection is spread.
-        group = self._group("grid", _LAYOUT_GROUPS)
-        area = group.container.layout.widgets[0]
-        grid = area.widget.layout
-        self.assertIs(grid.cells[(0, 1)], group.boxes["a"])
-        self.assertIs(grid.cells[(0, 2)], group.boxes["b"])
-        self.assertIs(grid.cells[(1, 1)], group.boxes["c"])
-
-    def test_select_all_none_and_default(self):
-        group = self._group(None)
-        group.setAll(True)
-        self.assertEqual(set(group.value().values()), {True})
-        group.setAll(False)
-        self.assertEqual(set(group.value().values()), {False})
-        # "Default" restores what the SERVER declared, which is what the old
-        # ASO module's per-mode Suggest() button did with a hardcoded list.
-        group.restoreDefaults()
-        self.assertEqual(group.value(), _LAYOUT_CHOICES)
-
-    def test_a_single_option_argument_gets_no_toolbar(self):
-        group = formgen.MultiChoiceGroup({"only": True})
-        self.assertEqual(len(group.container.layout.widgets), 1)
+    def test_no_layout_carries_a_global_selection_bar(self):
+        """`All` / `None` / `Default` were three small links under the options.
+        They read as a different control language from everything around them,
+        and on a tabbed group they duplicated the per-tab button that does the
+        same thing. A group's own widgets are now the only way to select.
+        """
+        for layout, groups in ((None, None), ("inline", None),
+                               ("grid", _LAYOUT_GROUPS), ("tabs", _LAYOUT_GROUPS)):
+            group = self._group(layout, groups)
+            texts = [getattr(w, "text", "") for w in group.container.layout.widgets]
+            for gone in ("All", "None", "Default"):
+                self.assertNotIn(gone, texts, layout)
 
     def test_the_layout_reaches_the_widget_through_the_schema(self):
         # Not just constructible by hand: _make_widget has to read `ui`/`groups`
