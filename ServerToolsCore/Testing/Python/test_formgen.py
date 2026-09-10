@@ -1961,5 +1961,61 @@ class MultiChoiceTooltipTest(unittest.TestCase):
         self.assertEqual(field.container._tooltip, "/data/patient/scan.nii.gz")
 
 
+
+class OptionHelpTest(unittest.TestCase):
+    """`option_help` -- one line per option, on the option itself.
+
+    A catalogue of CODES needs it: `Ba` and `UR1MB` tell a clinician nothing,
+    and the argument's own description covers all 236 of them at once.
+    """
+
+    CHOICES = {"Ba": False, "S": False, "N": False}
+    HELP = {"Ba": "Basion -- most anterior point of the foramen magnum"}
+
+    def _group(self, layout=None, help_texts=None, groups=None):
+        return formgen.MultiChoiceGroup(
+            self.CHOICES, "", layout=layout, groups=groups,
+            option_help=self.HELP if help_texts is None else help_texts)
+
+    def test_the_named_option_carries_its_line(self):
+        group = self._group()
+        self.assertEqual(group.boxes["Ba"].toolTip(), self.HELP["Ba"])
+
+    def test_an_option_the_table_skips_carries_nothing(self):
+        """A half-filled table is the normal state while the words are being
+        written, and it must leave the rest exactly as it was."""
+        group = self._group()
+        self.assertFalse(group.boxes["S"].toolTip())
+
+    def test_a_tool_declaring_none_is_unchanged(self):
+        group = self._group(help_texts={})
+        self.assertFalse(any(box.toolTip() for box in group.boxes.values()))
+
+    def test_every_layout_explains_identically(self):
+        """The same property as `test_every_layout_reads_back_identically`: a
+        layout changes the arrangement, never what the panel says."""
+        for layout in (None, "inline", "grid", "tabs"):
+            group = self._group(layout=layout, groups={"Cranial base": list(self.CHOICES)})
+            self.assertEqual(group.boxes["Ba"].toolTip(), self.HELP["Ba"], layout)
+
+    def test_a_malformed_table_costs_nothing(self):
+        """This is the seam between two repositories. A field that arrives as
+        something other than a mapping must leave the panel standing, not take
+        it down -- the same rule the server applies to a key it does not know."""
+        for broken in ("not a mapping", ["Ba"], {"Ba": 17}):
+            group = self._group(help_texts=broken)
+            self.assertEqual(sorted(group.boxes), sorted(self.CHOICES))
+            self.assertFalse(group.boxes["Ba"].toolTip(), repr(broken))
+
+    def test_it_reaches_the_widget_through_the_schema(self):
+        """Declared by the tool, not built here: the whole point is that a
+        landmark gains its line with no client release."""
+        spec = {"type": "multichoice",
+                "choices": {"Ba": False, "S": False},
+                "option_help": {"Ba": "Basion"}}
+        widget = formgen._make_widget("landmarks", spec)
+        self.assertEqual(widget.boxes["Ba"].toolTip(), "Basion")
+
+
 if __name__ == "__main__":
     unittest.main()

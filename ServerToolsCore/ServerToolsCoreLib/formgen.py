@@ -284,7 +284,8 @@ class MultiChoiceGroup:
     server's `ArgSpec.ui` for why they exist at all.
     """
 
-    def __init__(self, choices: dict, description: str = "", layout=None, groups=None):
+    def __init__(self, choices: dict, description: str = "", layout=None, groups=None,
+                 option_help=None):
         self.container = qt.QWidget()
         column = qt.QVBoxLayout(self.container)
         column.setContentsMargins(0, 0, 0, 0)
@@ -301,6 +302,9 @@ class MultiChoiceGroup:
         self._column = column
         self._layout = layout
         self._groups = groups
+        # {option: one line saying what it is}. The tool's own words, published
+        # per option because a catalogue of CODES cannot be read off its labels.
+        self._option_help = option_help
         self._draw(choices, groups)
 
     def _draw(self, choices: dict, groups) -> None:
@@ -315,7 +319,7 @@ class MultiChoiceGroup:
                     "Unknown multichoice layout '%s', falling back to a single column", layout
                 )
             builder = _build_flat_boxes
-        made = builder(column, choices, groups)
+        made = builder(column, choices, groups, self._option_help)
 
         # Declaration order, whatever order the layout visited the options in.
         self.boxes = {option: made[option] for option in choices}
@@ -405,18 +409,51 @@ class MultiChoiceGroup:
         """
 
 
-def _make_box(option: str, checked) -> qt.QCheckBox:
+def _make_box(option: str, checked, help_text: str = "") -> qt.QCheckBox:
     box = qt.QCheckBox(option)
     box.setChecked(bool(checked))
+    _explain(box, help_text)
     return box
 
 
-def _make_chip(option: str, checked):
+def _make_chip(option: str, checked, help_text: str = ""):
     """The dense layouts' option: the label itself, checkable (see
     design.option_chip). Reads back exactly as a check box does."""
     chip = design.option_chip(option)
     chip.setChecked(bool(checked))
+    _explain(chip, help_text)
     return chip
+
+
+def _help_for(help_texts, option: str) -> str:
+    """This option's line, or nothing. A table the tool did not send, or one
+    that arrived as something other than a mapping, must leave every widget
+    exactly as it was rather than take the panel down."""
+    if not isinstance(help_texts, dict):
+        return ""
+    text = help_texts.get(option)
+    return text if isinstance(text, str) else ""
+
+
+def _explain(widget, help_text: str) -> None:
+    """Say what THIS option is, on the option itself.
+
+    A catalogue of codes needs it and a catalogue of words does not: `Ba` and
+    `UR1MB` tell a clinician nothing, while `Mandible` already reads. So it is
+    set only where the tool named the option -- an argument declaring no
+    `option_help` leaves every widget without one, which is what it had before
+    this existed.
+
+    Never a fallback to the argument's own description: that paragraph is
+    already rendered above the options, and Qt hands a container's tooltip to
+    every child without one, so ALI's 304-character note used to pop up under
+    each of its 236 chips.
+    """
+    if not help_text:
+        return
+    setter = getattr(widget, "setToolTip", None)
+    if setter:
+        setter(help_text)
 
 
 def _grouped(choices: dict, groups) -> list:
@@ -437,17 +474,17 @@ def _grouped(choices: dict, groups) -> list:
     return [(name, options) for name, options in grouped if options]
 
 
-def _build_flat_boxes(column, choices: dict, _groups=None) -> dict:
+def _build_flat_boxes(column, choices: dict, _groups=None, help_texts=None) -> dict:
     """One box per line. The default, and what every tool declaring no `ui`
     gets — unchanged from before layouts existed."""
     boxes = {}
     for option, checked in choices.items():
-        boxes[option] = _make_box(option, checked)
+        boxes[option] = _make_box(option, checked, _help_for(help_texts, option))
         column.addWidget(boxes[option])
     return boxes
 
 
-def _build_inline_boxes(column, choices: dict, _groups=None) -> dict:
+def _build_inline_boxes(column, choices: dict, _groups=None, help_texts=None) -> dict:
     """One horizontal row. For a handful of short options (ASO's two jaws, its
     eight landmark types) that waste a line each stacked vertically."""
     row_container = qt.QWidget()
@@ -457,7 +494,7 @@ def _build_inline_boxes(column, choices: dict, _groups=None) -> dict:
 
     boxes = {}
     for option, checked in choices.items():
-        boxes[option] = _make_box(option, checked)
+        boxes[option] = _make_box(option, checked, _help_for(help_texts, option))
         row.addWidget(boxes[option])
     row.addStretch(1)
 
@@ -465,7 +502,7 @@ def _build_inline_boxes(column, choices: dict, _groups=None) -> dict:
     return boxes
 
 
-def _build_grid_boxes(column, choices: dict, groups=None) -> dict:
+def _build_grid_boxes(column, choices: dict, groups=None, help_texts=None) -> dict:
     """One row per group, options as columns — the chart layout.
 
     For options whose *position* carries meaning: ASO asks for teeth "spread
@@ -487,7 +524,8 @@ def _build_grid_boxes(column, choices: dict, groups=None) -> dict:
         if group_name:
             grid.addWidget(design.hint_label(group_name), row_index, 0)
         for offset, option in enumerate(options):
-            boxes[option] = _make_chip(option, choices[option])
+            boxes[option] = _make_chip(option, choices[option],
+                                       _help_for(help_texts, option))
             grid.addWidget(boxes[option], row_index, offset + 1)
 
     # Rows only: the COLUMNS are the arch, and letting them take the slack would
@@ -498,7 +536,7 @@ def _build_grid_boxes(column, choices: dict, groups=None) -> dict:
     return boxes
 
 
-def _build_tabs_boxes(column, choices: dict, groups=None) -> dict:
+def _build_tabs_boxes(column, choices: dict, groups=None, help_texts=None) -> dict:
     """One tab per group, options in a scrollable multi-column grid.
 
     For a catalog too long to scroll through in one piece: ASO publishes 130
@@ -523,7 +561,8 @@ def _build_tabs_boxes(column, choices: dict, groups=None) -> dict:
         # read as one long word while touching rows read as a list.
         grid.setHorizontalSpacing(design.SPACING_MD)
         for index, option in enumerate(options):
-            boxes[option] = _make_chip(option, choices[option])
+            boxes[option] = _make_chip(option, choices[option],
+                                       _help_for(help_texts, option))
             grid.addWidget(boxes[option], index // columns, index % columns)
         page_boxes = [boxes[option] for option in options]
         # The page is stretched to the scroll area's height, and a QGridLayout
@@ -1613,6 +1652,7 @@ def _make_widget(name: str, spec: dict):
             spec.get("description", ""),
             layout=spec.get("ui"),
             groups=spec.get("groups"),
+            option_help=spec.get("option_help"),
         )
     if is_file_type(arg_type):
         return file_widget(spec)
