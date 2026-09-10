@@ -9,6 +9,7 @@ See ARCHITECTURE.md, "How to add a new module in 5 minutes".
 """
 
 import logging
+import fnmatch
 import os
 import re
 import shutil
@@ -195,6 +196,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._inputWidgets = {}  # {schema_argument_name: widget}
         self._inputModes = {}  # {schema_argument_name: mode}, "auto" already resolved
         self._outputFolderWidget = None
+        # What the LAST run wrote, from the archive itself. See _loadResults.
+        self._producedFiles = []
         # Schema-driven panel layout, all rebuilt wholesale by _buildForm.
         self._sectionBoxes = {}  # {section name: ctkCollapsibleButton}
         self._sectionLayouts = {}  # {section name: QFormLayout}
@@ -1019,17 +1022,69 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._showPhase(_("Extracting results..."))
             slicer.app.processEvents()
             try:
-                slicer_io.unzip_folder(result.path, resultDir)
+                self._producedFiles = slicer_io.unzip_folder(result.path, resultDir)
             finally:
                 self._hideProgress()
             os.remove(result.path)
             slicer.util.infoDisplay(_("Results saved to {path}").format(path=resultDir))
         else:
+            self._producedFiles = [result.path]
             slicer.util.infoDisplay(_("Result saved to {path}").format(path=result.path))
 
     # ------------------------------------------------------------------
     # Apply / cancel
     # ------------------------------------------------------------------
+
+    # (glob pattern, the slicer_io kind that opens it). Declared per module,
+    # because only the module knows what its outputs ARE: AMASSS's `.nii.gz` is
+    # a LABELMAP and opens in colour, while the same extension from another tool
+    # is a plain volume in greyscale.
+    _LOADABLE = ()
+
+    # A cohort run legitimately returns hundreds of files, and a scene holding
+    # hundreds of nodes is not a result anyone can read.
+    MAX_RESULTS_TO_LOAD = 12
+
+    def _loadResults(self) -> None:
+        """Open what THIS run produced.
+
+        Reads `_producedFiles` -- the archive's own member list -- and never the
+        output folder. That distinction is the whole reason this exists: results
+        are unpacked into the folder the user picked, which is the folder their
+        EARLIER runs wrote to as well, so a recursive glob there answers "what
+        is in this folder" when the question is "what did this run make". A
+        single merged segmentation was reported as fourteen files and refused
+        for being too many.
+        """
+        found = [
+            (path, kind)
+            for path in self._producedFiles
+            for pattern, kind in self._LOADABLE
+            if fnmatch.fnmatch(os.path.basename(path), pattern)
+        ]
+        if not found:
+            slicer.util.showStatusMessage(
+                _("{tool}: no result file found to load.").format(tool=self.TOOL_NAME), 5000)
+            return
+
+        if len(found) > self.MAX_RESULTS_TO_LOAD:
+            slicer.util.infoDisplay(
+                _("{count} result files were produced - too many to load at once.\n"
+                  "They are all saved in {path}.").format(
+                      count=len(found), path=os.path.dirname(found[0][0]))
+            )
+            return
+
+        failed = []
+        for path, kind in found:
+            try:
+                slicer_io.load_result(path, kind)
+            except Exception as exc:  # one bad file must not lose the others
+                failed.append("{}: {}".format(os.path.basename(path), exc))
+        if failed:
+            slicer.util.errorDisplay(
+                _("Some results could not be loaded:\n{details}").format(
+                    details="\n".join(failed)))
 
     def _checkCanApply(self, *_args) -> None:
         if not self.applyButton:

@@ -11,7 +11,6 @@ Authors:
 - Baptiste Baquero (UoM)
 """
 
-import glob
 import os
 
 import qt
@@ -108,37 +107,4 @@ class AMASSSWidget(ServerToolWidgetBase):
 
         if not (self._loadResultsCheckBox and self._loadResultsCheckBox.isChecked()):
             return
-        outputDir = self._outputFolderWidget.currentPath if self._outputFolderWidget else None
-        if outputDir:
-            self._loadResults(outputDir)
-
-    def _loadResults(self, outputDir: str) -> None:
-        found = [
-            (path, kind)
-            for pattern, kind in self._LOADABLE
-            for path in sorted(glob.glob(os.path.join(outputDir, "**", pattern), recursive=True))
-        ]
-        if not found:
-            slicer.util.showStatusMessage(_("AMASSS: no result file found to load."), 5000)
-            return
-
-        if len(found) > self.MAX_RESULTS_TO_LOAD:
-            slicer.util.infoDisplay(
-                _(
-                    "{count} result files were produced - too many to load at once.\n"
-                    "They are all saved in {path}."
-                ).format(count=len(found), path=outputDir)
-            )
-            return
-
-        failed = []
-        for path, kind in found:
-            try:
-                slicer_io.load_result(path, kind)
-            except Exception as exc:  # one bad file must not lose the others
-                failed.append(f"{os.path.basename(path)}: {exc}")
-
-        if failed:
-            slicer.util.errorDisplay(
-                _("Some results could not be loaded:\n{details}").format(details="\n".join(failed))
-            )
+        self._loadResults()

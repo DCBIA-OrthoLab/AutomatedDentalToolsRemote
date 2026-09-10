@@ -128,7 +128,7 @@ class DOCShapeAXIWidget(ServerToolWidgetBase):
             slicer.util.showStatusMessage(self._summarize(report), 8000)
 
         if self._loadResultsCheckBox and self._loadResultsCheckBox.isChecked():
-            self._loadResults(outputDir)
+            self._loadResults()
 
     @staticmethod
     def _readRunReport(outputDir: str):
@@ -168,32 +168,3 @@ class DOCShapeAXIWidget(ServerToolWidgetBase):
             for pattern, kind in cls._LOADABLE
             for path in glob.glob(os.path.join(outputDir, "**", pattern), recursive=True)
         )
-
-    def _loadResults(self, outputDir: str) -> None:
-        found = self._findResults(outputDir)
-        if not found:
-            slicer.util.showStatusMessage(
-                _("DOCShapeAXI: no explainability surface found to load."), 5000)
-            return
-
-        if len(found) > self.MAX_RESULTS_TO_LOAD:
-            slicer.util.infoDisplay(
-                _(
-                    "{count} surfaces were produced - too many to load at once.\n"
-                    "They are all saved in {path}."
-                ).format(count=len(found), path=outputDir)
-            )
-            return
-
-        failed = []
-        for path, kind in found:
-            try:
-                slicer_io.load_result(path, kind)
-            except Exception as exc:  # one bad file must not lose the others
-                failed.append(f"{os.path.basename(path)}: {exc}")
-
-        if failed:
-            slicer.util.errorDisplay(
-                _("Some results could not be loaded:\n{details}").format(
-                    details="\n".join(failed))
-            )

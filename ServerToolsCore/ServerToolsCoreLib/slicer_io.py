@@ -140,11 +140,22 @@ def zip_folder(folder: str, dest_path: str, compress: Optional[bool] = None) -> 
     return dest_path
 
 
-def unzip_folder(zip_path: str, dest_dir: str) -> str:
+def unzip_folder(zip_path: str, dest_dir: str) -> list:
+    """Extract into `dest_dir`; return the absolute path of every FILE written.
+
+    The names matter, not just the directory. A result archive is unpacked into
+    the folder the user picked, which is the same folder their earlier runs
+    wrote to -- so "what did this run produce" cannot be answered by looking at
+    what is in there afterwards. It is answered here, by the archive itself.
+    """
     os.makedirs(dest_dir, exist_ok=True)
     with zipfile.ZipFile(zip_path, "r") as archive:
         archive.extractall(dest_dir)
-    return dest_dir
+        return [
+            os.path.join(dest_dir, member.filename)
+            for member in archive.infolist()
+            if not member.is_dir()
+        ]
 
 
 # What a downloaded test file can be shown as, by extension. The point of

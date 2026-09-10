@@ -98,6 +98,10 @@ def _stub_slicer():
         util.status_messages.append(message)
     )
     util.errorDisplay = lambda *args, **kwargs: None
+    # Recorded, because "fourteen files - too many to load" IS the message a
+    # test has to be able to catch.
+    util.infos = []
+    util.infoDisplay = lambda message="", *args, **kwargs: util.infos.append(message)
     util.loaded = []          # what a test asserts the scene received
     util.load_failures = set()  # paths the stubbed readers refuse
 
@@ -838,6 +842,63 @@ class NothingIsLeftBehindTest(HostedTestFileTest):
         self.panel.cleanup()
         self.assertIsNone(self.panel._testFileRoot)
 
+
+
+
+class LoadResultsTest(unittest.TestCase):
+    """`_loadResults` opens what THIS run produced, not what the folder holds."""
+
+    class _Panel(ServerToolWidgetBase):
+        TOOL_NAME = "AMASSS"
+        _LOADABLE = (("*.nii.gz", "labelmap"), ("*.vtk", "model"))
+
+    def setUp(self):
+        _util.loaded = []
+        _util.infos = []
+        self.panel = self._Panel.__new__(self._Panel)
+        self.panel._producedFiles = []
+
+    def test_it_opens_only_what_the_archive_held(self):
+        """The bug this fixes: results unpack into the folder the user picked,
+        which is the folder their EARLIER runs wrote to. A single merged
+        segmentation was reported as fourteen files and refused as too many."""
+        self.panel._producedFiles = ["/out/scan_Pred_MERGED.nii.gz"]
+        self.panel._loadResults()
+
+        self.assertEqual(_util.loaded, [("labelmap", "/out/scan_Pred_MERGED.nii.gz")])
+
+    def test_older_runs_in_the_same_folder_are_not_counted(self):
+        """The list comes from the ARCHIVE, so what else sits in the output
+        folder cannot reach it -- thirteen files from before plus one from now
+        is one file, and one file is never too many."""
+        self.panel._producedFiles = ["/out/scan_Pred_MERGED.nii.gz"]
+        self.panel._loadResults()
+
+        self.assertEqual(len(_util.loaded), 1)
+        self.assertEqual(_util.infos, [], "nothing was refused as too many")
+
+    def test_a_module_declares_what_its_outputs_ARE(self):
+        """Only the module knows: AMASSS's `.nii.gz` is a LABELMAP and opens in
+        colour, where the same extension elsewhere is a greyscale volume."""
+        self.panel._producedFiles = ["/out/a.nii.gz", "/out/b.vtk"]
+        self.panel._loadResults()
+
+        self.assertEqual([kind for kind, _path in _util.loaded], ["labelmap", "model"])
+
+    def test_a_file_no_pattern_claims_is_left_alone(self):
+        """`AMASSS_report.json` is a result too, and it is not a node."""
+        self.panel._producedFiles = ["/out/AMASSS_report.json"]
+        self.panel._loadResults()
+
+        self.assertEqual(_util.loaded, [])
+
+    def test_a_cohort_is_refused_rather_than_flooding_the_scene(self):
+        self.panel._producedFiles = [
+            "/out/p{:02d}/scan.nii.gz".format(i)
+            for i in range(ServerToolWidgetBase.MAX_RESULTS_TO_LOAD + 1)]
+        self.panel._loadResults()
+
+        self.assertEqual(_util.loaded, [])
 
 
 if __name__ == "__main__":

@@ -138,7 +138,7 @@ class AutoMatrixWidget(ServerToolWidgetBase):
             slicer.util.showStatusMessage(self._summarize(report), 8000)
 
         if self._loadResultsCheckBox and self._loadResultsCheckBox.isChecked():
-            self._loadResults(outputDir)
+            self._loadResults()
 
     @staticmethod
     def _readRunReport(outputDir: str):
@@ -181,37 +181,3 @@ class AutoMatrixWidget(ServerToolWidgetBase):
             for pattern, kind in cls._LOADABLE
             for path in glob.glob(os.path.join(outputDir, "**", pattern), recursive=True)
         )
-
-    def _loadResults(self, outputDir: str) -> None:
-        found = self._findResults(outputDir)
-        if not found:
-            slicer.util.showStatusMessage(_("AutoMatrix: no result file found to load."), 5000)
-            return
-
-        if len(found) > self.MAX_RESULTS_TO_LOAD:
-            slicer.util.infoDisplay(
-                _(
-                    "{count} result files were produced - too many to load at once.\n"
-                    "They are all saved in {path}."
-                ).format(count=len(found), path=outputDir)
-            )
-            return
-
-        failed = []
-        for path, kind in found:
-            try:
-                # `markups` has no entry in slicer_io's loader table, the same
-                # way it has none in ASO's: a markups node is not a result kind
-                # the server can ask for, only a file this module recognises.
-                if kind == "markups":
-                    slicer.util.loadMarkups(path)
-                else:
-                    slicer_io.load_result(path, kind)
-            except Exception as exc:  # one bad file must not lose the others
-                failed.append(f"{os.path.basename(path)}: {exc}")
-
-        if failed:
-            slicer.util.errorDisplay(
-                _("Some results could not be loaded:\n{details}").format(
-                    details="\n".join(failed))
-            )
