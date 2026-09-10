@@ -113,6 +113,7 @@ class GreedyRegWidget(ServerToolWidgetBase):
     def addExtraWidgets(self, layout) -> None:
         self._loadResultsCheckBox = qt.QCheckBox(
             _("Load the registered volumes into the scene when done"))
+        self._loadResultsCheckBox.setChecked(True)
         layout.addWidget(self._loadResultsCheckBox)
 
     # ------------------------------------------------------------------

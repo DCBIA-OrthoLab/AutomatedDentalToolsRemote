@@ -112,6 +112,7 @@ class AutoMatrixWidget(ServerToolWidgetBase):
     def addExtraWidgets(self, layout) -> None:
         self._loadResultsCheckBox = qt.QCheckBox(
             _("Load the moved scans and landmarks into the scene when done"))
+        self._loadResultsCheckBox.setChecked(True)
         layout.addWidget(self._loadResultsCheckBox)
 
     # ------------------------------------------------------------------

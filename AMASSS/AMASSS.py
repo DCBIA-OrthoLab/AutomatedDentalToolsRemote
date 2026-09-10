@@ -99,6 +99,7 @@ class AMASSSWidget(ServerToolWidgetBase):
 
     def addExtraWidgets(self, layout) -> None:
         self._loadResultsCheckBox = qt.QCheckBox(_("Load the results into the scene when done"))
+        self._loadResultsCheckBox.setChecked(True)
         layout.addWidget(self._loadResultsCheckBox)
 
     def handleResult(self, result) -> None:

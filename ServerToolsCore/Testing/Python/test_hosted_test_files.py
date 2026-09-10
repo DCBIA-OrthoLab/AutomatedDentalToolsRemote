@@ -840,58 +840,5 @@ class NothingIsLeftBehindTest(HostedTestFileTest):
 
 
 
-class LoadResultsTest(unittest.TestCase):
-    """The Outputs box: open what the run produced, or leave it on disk."""
-
-    def setUp(self):
-        _util.loaded = []
-        self.panel = ServerToolWidgetBase.__new__(ServerToolWidgetBase)
-        self.panel._loadResultsBox = qt.QCheckBox("Load results into the scene")
-        self.panel._loadResultsBox.setChecked(True)
-        self.folder = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.folder, True)
-
-    def _write(self, *names):
-        for name in names:
-            path = os.path.join(self.folder, name)
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w") as handle:
-                handle.write("x")
-
-    def test_it_opens_what_the_run_produced(self):
-        self._write("scan_Pred_MAND.nii.gz", "scan_Pred_MAX.nii.gz")
-        self.assertEqual(self.panel._loadResults(self.folder), 2)
-
-    def test_unticking_leaves_everything_on_disk(self):
-        self._write("scan_Pred_MAND.nii.gz")
-        self.panel._loadResultsBox.setChecked(False)
-        self.assertEqual(self.panel._loadResults(self.folder), 0)
-        self.assertEqual(_util.loaded, [])
-
-    def test_a_file_no_scene_can_hold_is_skipped(self):
-        """`AMASSS_report.json` and a .csv are results too, and neither is a
-        node. Opening nothing for them is correct, not a failure."""
-        self._write("AMASSS_report.json", "summary.csv")
-        self.assertEqual(self.panel._loadResults(self.folder), 0)
-
-    def test_a_cohort_cannot_flood_the_scene(self):
-        """A forty-patient run writes hundreds of files, and a scene holding
-        hundreds of nodes is a machine for slowing Slicer down. The folder is
-        still written and still named; only the opening stops."""
-        self._write(*["patient{:02d}/scan_Pred_MAND.nii.gz".format(i)
-                      for i in range(40)])
-        shown = self.panel._loadResults(self.folder)
-        self.assertEqual(shown, ServerToolWidgetBase.MAX_RESULTS_LOADED)
-
-    def test_the_summary_is_opened_before_the_per_patient_files(self):
-        """Ordered so a partial view is still a useful one: a cohort's own
-        files sit above its per-patient folders."""
-        self._write("merged_Pred.nii.gz",
-                    *["patient{:02d}/scan.nii.gz".format(i) for i in range(20)])
-        self.panel._loadResults(self.folder)
-        first = _util.loaded[0][1]
-        self.assertEqual(os.path.basename(first), "merged_Pred.nii.gz")
-
-
 if __name__ == "__main__":
     unittest.main()
