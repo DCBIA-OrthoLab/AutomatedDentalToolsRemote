@@ -201,6 +201,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._inputWidgets = {}  # {schema_argument_name: widget}
         self._inputModes = {}  # {schema_argument_name: mode}, "auto" already resolved
         self._outputFolderWidget = None
+        # The folder the PANEL proposed, so a path the user typed is never
+        # replaced by the next suggestion. See _suggestOutputFolder.
+        self._suggestedOutput = None
         # What the LAST run wrote, from the archive itself. See _loadResults.
         self._producedFiles = []
         # Schema-driven panel layout, all rebuilt wholesale by _buildForm.
@@ -531,6 +534,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._outputFolderWidget.filters = ctk.ctkPathLineEdit.Dirs
             outputsLayout.addRow(design.required_label(_("Output folder")), self._outputFolderWidget)
             formgen.connect_changed(self._outputFolderWidget, self._checkCanApply)
+            self._suggestOutputFolder()
 
             # This row belongs to no schema argument, so it must keep its
             # section on screen even when every argument in it is hidden.
@@ -1099,6 +1103,26 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 _("Some results could not be loaded:\n{details}").format(
                     details="\n".join(failed)))
 
+    def _suggestOutputFolder(self) -> None:
+        """Fill the output folder in, so Apply works on a panel nobody set up.
+
+        Only ever over a path this panel itself proposed. Someone who typed a
+        folder chose it, and having it replaced between runs -- silently, with
+        results already in it -- is worse than any convenience this buys.
+        """
+        widget = self._outputFolderWidget
+        if widget is None:
+            return
+        current = widget.currentPath
+        if current and current != self._suggestedOutput:
+            return
+        try:
+            self._suggestedOutput = slicer_io.default_output_folder()
+        except Exception:  # noqa: BLE001 - a convenience must never break a panel
+            logger.warning("could not propose an output folder", exc_info=True)
+            return
+        widget.currentPath = self._suggestedOutput
+
     def _checkCanApply(self, *_args) -> None:
         if not self.applyButton:
             return  # a widget signal fired while the panel is still being built
@@ -1322,6 +1346,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._finishRun(run)
         with slicer.util.tryWithErrorDisplay(_("Failed to handle the tool result."), waitCursor=False):
             self.handleResult(result)
+        # Move the SUGGESTION on, now that this folder holds a result. The next
+        # run then lands beside this one instead of into it, which is the whole
+        # reason the folders are numbered. A path the user chose is left alone
+        # (see _suggestOutputFolder) -- someone who picked a folder meant it.
+        self._suggestOutputFolder()
 
     def _onJobError(self, run, exc) -> None:
         """One run failing takes only that run: the rest of a cohort goes on."""

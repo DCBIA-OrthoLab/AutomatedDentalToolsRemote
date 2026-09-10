@@ -234,6 +234,19 @@ class QTabWidget(QWidget):
         self.currentChanged.emit(index)
 
 
+class QStandardPaths:
+    """Where this OS puts things. The stub answers a fixed location, which is
+    the point: a test asserts what the code does WITH the answer, never what
+    the answer is on the machine running it."""
+
+    DocumentsLocation = 1
+    documents = "/home/tester/Documents"
+
+    @staticmethod
+    def writableLocation(_location):
+        return QStandardPaths.documents
+
+
 class QCursor:
     def __init__(self, shape=0):
         self.shape = shape

@@ -14,6 +14,7 @@ import zipfile
 from typing import Optional
 from urllib.parse import urlparse
 
+import qt
 import slicer
 
 from . import config
@@ -172,6 +173,59 @@ _INPUT_LOAD_KINDS = (
     ((".nii", ".nii.gz", ".nrrd", ".nrrd.gz", ".gipl", ".gipl.gz", ".mha", ".mhd"), "volume"),
     ((".vtk", ".vtp", ".stl", ".obj", ".ply"), "model"),
 )
+
+
+# Where a run's results land when nobody says otherwise. Named rather than
+# nested under the tool, so a clinician running three tools on one patient finds
+# all three in the same place.
+OUTPUT_ROOT_NAME = "Slicer Output"
+
+# Enough that a user who never cleans up still gets a fresh folder for years,
+# small enough that the search is instant. Past it the last one is reused, which
+# is worse than a new folder and much better than a panel that cannot open.
+_MAX_OUTPUT_FOLDERS = 1000
+
+
+def documents_dir() -> str:
+    """Where THIS operating system puts a user's documents.
+
+    `~/Documents` on Linux and macOS, `C:\\Users\\<name>\\Documents` on Windows --
+    and whatever a localised Windows calls it, which is exactly why Qt is asked
+    instead of a path being built by hand. The same call every other module in
+    this extension already makes (AREG, GreedyReg, MedX, VFACE).
+
+    Falls back to the home directory: a Qt with no documents location is not a
+    reason to have no default at all.
+    """
+    try:
+        location = qt.QStandardPaths.writableLocation(qt.QStandardPaths.DocumentsLocation)
+    except Exception:  # noqa: BLE001 - a default must never break a panel
+        location = ""
+    return location or os.path.expanduser("~")
+
+
+def default_output_folder() -> str:
+    """`<documents>/Slicer Output/<n>`, the first `n` that is free.
+
+    So Apply works on a panel nobody has configured. The point is speed: a
+    clinician trying a tool should not have to decide where the results go
+    before finding out whether the tool helps them.
+
+    "Free" means absent OR empty -- an empty folder left by a run that failed
+    before writing is reusable, and skipping it would count upward forever. The
+    folder is NOT created here: this only proposes a name, and a run that never
+    happens must leave nothing behind.
+    """
+    root = os.path.join(documents_dir(), OUTPUT_ROOT_NAME)
+    for number in range(1, _MAX_OUTPUT_FOLDERS + 1):
+        candidate = os.path.join(root, str(number))
+        try:
+            if not os.path.isdir(candidate) or not os.listdir(candidate):
+                return candidate
+        except OSError:
+            # Unreadable is not free, but it is not a reason to stop either.
+            continue
+    return os.path.join(root, str(_MAX_OUTPUT_FOLDERS))
 
 
 def load_kind_for(path: str):

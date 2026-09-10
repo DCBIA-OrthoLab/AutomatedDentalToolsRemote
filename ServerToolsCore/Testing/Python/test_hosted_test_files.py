@@ -125,7 +125,7 @@ def _stub_slicer():
 
 _util = _stub_slicer()
 
-from ServerToolsCoreLib import base_widget, formgen  # noqa: E402
+from ServerToolsCoreLib import base_widget, formgen, slicer_io  # noqa: E402
 from ServerToolsCoreLib.base_widget import ServerToolWidgetBase  # noqa: E402
 from ServerToolsCoreLib.errors import ServerToolError  # noqa: E402
 
@@ -899,6 +899,48 @@ class LoadResultsTest(unittest.TestCase):
         self.panel._loadResults()
 
         self.assertEqual(_util.loaded, [])
+
+
+
+class DefaultOutputFolderTest(unittest.TestCase):
+    """`<documents>/Slicer Output/<n>` -- so Apply works on a panel nobody set
+    up, and two runs never land in the same folder."""
+
+    def setUp(self):
+        self.documents = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.documents, True)
+        self._saved = qt.QStandardPaths.documents
+        qt.QStandardPaths.documents = self.documents
+        self.addCleanup(setattr, qt.QStandardPaths, "documents", self._saved)
+        self.root = os.path.join(self.documents, slicer_io.OUTPUT_ROOT_NAME)
+
+    def test_it_starts_at_one(self):
+        self.assertEqual(slicer_io.default_output_folder(),
+                         os.path.join(self.root, "1"))
+
+    def test_it_proposes_a_name_without_creating_it(self):
+        """A run that never happens must leave nothing behind."""
+        slicer_io.default_output_folder()
+        self.assertFalse(os.path.exists(self.root))
+
+    def test_a_folder_holding_something_is_stepped_over(self):
+        os.makedirs(os.path.join(self.root, "1"))
+        open(os.path.join(self.root, "1", "result.nii.gz"), "w").close()
+        self.assertEqual(slicer_io.default_output_folder(),
+                         os.path.join(self.root, "2"))
+
+    def test_an_empty_folder_is_reused(self):
+        """Left by a run that failed before writing. Skipping it would count
+        upward forever, one number per failure."""
+        os.makedirs(os.path.join(self.root, "1"))
+        self.assertEqual(slicer_io.default_output_folder(),
+                         os.path.join(self.root, "1"))
+
+    def test_it_asks_the_operating_system_where_documents_are(self):
+        """`~/Documents` on Linux and macOS, `Users\\<name>\\Documents` on
+        Windows -- and whatever a localised Windows calls it. Built by hand it
+        would be right on one machine and wrong on the next."""
+        self.assertEqual(slicer_io.documents_dir(), self.documents)
 
 
 if __name__ == "__main__":
