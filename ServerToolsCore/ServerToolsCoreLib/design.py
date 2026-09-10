@@ -241,6 +241,13 @@ def _base_stylesheet(t: dict) -> str:
       background-color: {t['PRIMARY']};
       border-radius: 3px;
     }}
+      QToolTip {{
+        background-color: {t['SURFACE']};
+        color: {t['TEXT']};
+        border: 1px solid {t['BORDER']};
+        border-radius: 4px;
+        padding: 6px 8px;
+      }}
     {_button_stylesheet("primary", t)}
     """
 

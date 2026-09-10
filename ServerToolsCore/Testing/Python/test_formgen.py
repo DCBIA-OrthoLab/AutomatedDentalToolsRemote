@@ -12,6 +12,7 @@ Usage:
 
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -1893,6 +1894,39 @@ class HostedEntryReadabilityTest(unittest.TestCase):
         entry = [e for e in widget._entries() if "CBCT_FullyAuto" in e][0]
         self.assertIn("folder", entry)
         self.assertIn("339", entry)
+
+
+
+class ToolTipStyleTest(unittest.TestCase):
+    """The hover bubble is Qt's own until something styles it, and Qt's own is
+    an opaque pale yellow that belongs to no theme -- it reads as a system
+    warning sitting on top of the panel rather than as part of it."""
+
+    def test_the_bubble_is_styled_in_both_themes(self):
+        for theme in (design._LIGHT, design._DARK):
+            sheet = design._base_stylesheet(theme)
+            self.assertIn("QToolTip", sheet)
+
+    def test_every_colour_it_uses_comes_from_the_token_table(self):
+        """The trap this guards: a hard-coded hex survives light mode and
+        disappears in dark, which is the theme nobody tests in. Each colour the
+        rule resolves to has to be a value the token table actually holds."""
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            rule = re.search(r"QToolTip \{(.*?)\n      \}",
+                             design._base_stylesheet(theme), re.S).group(1)
+            colours = re.findall(r"#[0-9a-fA-F]{3,8}", rule)
+            self.assertTrue(colours, name)
+            for colour in colours:
+                self.assertIn(colour, theme.values(), "{} in {}".format(colour, name))
+
+    def test_the_two_themes_do_not_resolve_to_the_same_bubble(self):
+        """A rule that renders identically in both is one that took its colours
+        from somewhere other than the palette."""
+        light = re.search(r"QToolTip \{(.*?)\n      \}",
+                          design._base_stylesheet(design._LIGHT), re.S).group(1)
+        dark = re.search(r"QToolTip \{(.*?)\n      \}",
+                         design._base_stylesheet(design._DARK), re.S).group(1)
+        self.assertNotEqual(light, dark)
 
 
 if __name__ == "__main__":
