@@ -1973,5 +1973,75 @@ class OptionHelpTest(unittest.TestCase):
         self.assertEqual(widget.boxes["Ba"].toolTip(), "Basion")
 
 
+
+class ChipsLayoutTest(unittest.TestCase):
+    """`ui: "chips"` -- the tabbed grid without the tabs.
+
+    For a handful of options: AMASSS's nine structures fit on two lines, and
+    putting them behind a single tab would be a tab bar with nowhere to go.
+    """
+
+    STRUCTURES = ["MAND", "MAX", "CB", "CV", "UAW", "SKIN",
+                  "CBMASK", "MANDMASK", "MAXMASK"]
+
+    def _group(self, groups=None, help_texts=None):
+        return formgen.MultiChoiceGroup(
+            {option: False for option in self.STRUCTURES}, "",
+            layout="chips", groups=groups, option_help=help_texts)
+
+    def _grid(self, group, index=0):
+        grids = [w.layout for w in group.container.layout.widgets
+                 if isinstance(getattr(w, "layout", None), qt.QGridLayout)]
+        return grids[index]
+
+    def test_the_options_are_chips_not_check_boxes(self):
+        """The point of the layout: the label IS the control, as in the tabbed
+        catalogue -- not a column of boxes with their captions beside them."""
+        group = self._group()
+        self.assertTrue(all(isinstance(box, qt.QPushButton)
+                            for box in group.boxes.values()))
+        self.assertTrue(all(box.isCheckable() for box in group.boxes.values()))
+
+    def test_they_wrap_onto_several_lines(self):
+        """Not one long row: nine chips on one line is what `grid` does, and it
+        is a chart layout, not this."""
+        group = self._group()
+        rows = {row for row, _column in self._grid(group).cells}
+        self.assertGreater(len(rows), 1)
+
+    def test_it_carries_no_group_button(self):
+        """Nine chips are nine clicks. A control that takes all of them earns
+        its place at a hundred options, not at nine."""
+        group = self._group()
+        texts = [getattr(w, "text", "") for w in group.container.layout.widgets]
+        self.assertNotIn(formgen.SELECT_GROUP_LABEL, texts)
+        self.assertNotIn(formgen.CLEAR_GROUP_LABEL, texts)
+
+    def test_a_declared_group_becomes_a_heading_not_a_tab(self):
+        """Which keeps a two-group argument readable without hiding half of it
+        behind a click."""
+        group = self._group(groups={"Structures": self.STRUCTURES[:6],
+                                    "Masks": self.STRUCTURES[6:]})
+        titles = [getattr(w, "text", "") for w in group.container.layout.widgets]
+        self.assertIn("Structures", titles)
+        self.assertIn("Masks", titles)
+        self.assertFalse([w for w in group.container.layout.widgets
+                          if isinstance(w, qt.QTabWidget)])
+
+    def test_it_reads_back_exactly_as_every_other_layout(self):
+        """The invariant every layout here is held to: a layout may be ugly, it
+        is never wrong on the wire."""
+        group = self._group()
+        self.assertEqual(list(group.boxes), self.STRUCTURES)
+        group.boxes["MAND"].setChecked(True)
+        self.assertEqual(group.value()["MAND"], True)
+        self.assertEqual(sorted(group.value()), sorted(self.STRUCTURES))
+
+    def test_each_chip_still_carries_its_line(self):
+        group = self._group(help_texts={"MAND": "Mandible"})
+        self.assertEqual(group.boxes["MAND"].toolTip(), "Mandible")
+        self.assertFalse(group.boxes["MAX"].toolTip())
+
+
 if __name__ == "__main__":
     unittest.main()

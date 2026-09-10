@@ -20,6 +20,7 @@ its own test classes stay in its namespace and are not re-run here.
 
 import os
 import sys
+import threading
 import unittest
 
 _HERE = os.path.abspath(os.path.dirname(__file__))
@@ -44,6 +45,7 @@ if not hasattr(_slicer_util, "tryWithErrorDisplay"):
 
 from ServerToolsCoreLib import base_widget, config  # noqa: E402
 from ServerToolsCoreLib.base_widget import ServerToolWidgetBase  # noqa: E402
+from ServerToolsCoreLib.errors import RunCancelled, ServerToolError  # noqa: E402
 
 qt = sys.modules["qt"]
 
@@ -57,11 +59,14 @@ class _Job:
 
     started = []
 
-    def __init__(self, target, on_success=None, on_error=None, on_progress=None):
+    def __init__(self, target, on_success=None, on_error=None, on_progress=None, cancel_event=None):
         self.target = target
         self.on_success = on_success
         self.on_error = on_error
         self.on_progress = on_progress
+        # The real BackgroundJob makes one when the caller does not; a panel
+        # always does, because the run's watcher reads the same event.
+        self.cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self.cancelled = False
 
     def start(self):
@@ -69,15 +74,49 @@ class _Job:
 
     def cancel(self):
         self.cancelled = True
+        self.cancel_event.set()
 
     def report(self, message):
+        """One of the client's own messages: a plain string."""
         self.on_progress(message)
+
+    def emit(self, **event):
+        """One of the SERVER's progress events, which travels down the very
+        same channel (see base_widget._startRun: `event_cb=progress_cb`).
+        Defaults spell out the contract's shape so a case only states the
+        field it is about."""
+        payload = {"seq": 0, "at": 0.0, "state": "running", "phase": "running",
+                   "fraction": None, "message": "", "depth": 0}
+        payload.update(event)
+        self.on_progress(payload)
 
     def succeed(self, result="done"):
         self.on_success(result)
 
     def fail(self, error=None):
         self.on_error(error or RuntimeError("the server said no"))
+
+
+class _RecordingClient:
+    """The panel's client, recording what it was asked for.
+
+    `cancel_run` is the one method a panel calls without a job in between (see
+    base_widget._requestServerCancel), so it has to be here or a teardown fails
+    on an attribute rather than on its subject. `run` is here for the one case
+    that invokes the task closure by hand, to see what the panel puts in it.
+    """
+
+    def __init__(self):
+        self.cancelled = []
+        self.calls = []
+
+    def run(self, tool_name, **kwargs):
+        self.calls.append(dict(kwargs, tool_name=tool_name))
+        return "result"
+
+    def cancel_run(self, run_id):
+        self.cancelled.append(run_id)
+        return True
 
 
 class RunQueueTest(unittest.TestCase):
@@ -103,9 +142,20 @@ class RunQueueTest(unittest.TestCase):
         panel._statusJob = None
         panel._downloadJob = None
         panel._testFileRoot = None
+        panel._progressBar = None
+        # A real (stub) layout, not None: the per-run Cancel buttons are part
+        # of what a cohort's panel offers, so they are built here rather than
+        # skipped for want of somewhere to put them.
+        panel._runControlsLayout = qt.QVBoxLayout()
+        panel._runControlsWidget = None
         panel.applyButton = qt.QPushButton("Apply")
         panel.cancelButton = qt.QPushButton("Cancel")
         panel.client = self
+
+        # Every run id the panel asked the server to cancel, in order. The
+        # point of recording them is the runs that must NOT appear: a queued
+        # run has never been sent, so cancelling it makes no HTTP call at all.
+        self.cancelledRemotely = []
 
         # What the panel would read off its widgets. Held on the test so a case
         # can change it between two Apply clicks, which is how "the inputs are
@@ -127,6 +177,23 @@ class RunQueueTest(unittest.TestCase):
     def run_tool(self, *args, **kwargs):
         """The panel's `client.run`; never called, since the job is a stub."""
         raise AssertionError("the stub job never invokes its target")
+
+    def cancel_run(self, run_id):
+        """The panel's `client.cancel_run`, called from its own daemon thread."""
+        self.cancelledRemotely.append(run_id)
+        return True
+
+    def _remoteCancels(self):
+        """What reached `cancel_run`, once the thread that calls it has run.
+
+        Joined rather than slept on: _requestServerCancel deliberately does
+        this off the main thread, so a test that only looked would sometimes
+        look too early.
+        """
+        for thread in threading.enumerate():
+            if thread.name == "sadt-run-cancel":
+                thread.join(timeout=5)
+        return list(self.cancelledRemotely)
 
     def _apply(self, path=None, **args):
         if path is not None:
@@ -355,6 +422,214 @@ class RunQueueTest(unittest.TestCase):
         self._apply()
         self.assertEqual(self.panel._runs[0].number, 2)
 
+    # -- what the server says about a run ------------------------------
+
+    def test_every_run_carries_an_id_of_its_own(self):
+        config.CONCURRENT_RUNS = 2
+        self._apply()
+        self._apply()
+
+        first, second = self.panel._runs
+        self.assertNotEqual(first.run_id, second.run_id)
+        for run in (first, second):
+            self.assertRegex(run.run_id, r"^[A-Za-z0-9_-]{16,64}$")
+
+    def test_the_id_and_the_cancel_token_are_what_the_client_is_given(self):
+        """Both, and the event channel with them: the id makes the run
+        readable and cancellable, the token lets the client stop working for a
+        run nobody wants, and the callback is how the server's progress reaches
+        the panel through the queue the job already owns."""
+        recorder = _RecordingClient()
+        self.panel.client = recorder
+        self._apply()
+
+        _Job.started[0].target(lambda _message: None)
+
+        call = recorder.calls[0]
+        run = self.panel._runs[0]
+        self.assertEqual(call["run_id"], run.run_id)
+        self.assertIs(call["cancel_event"], run.cancel_event)
+        self.assertIsNotNone(call["event_cb"])
+
+    def test_a_phase_is_shown_in_the_clinician_s_words_not_the_server_s(self):
+        self._apply()
+        _Job.started[0].emit(phase="queued_gpu")
+
+        line = self.phases[-1]
+        self.assertIn("Waiting for the GPU", line)
+        self.assertNotIn("queued_gpu", line)
+
+    def test_the_message_and_the_percentage_ride_with_it(self):
+        self._apply()
+        _Job.started[0].emit(phase="running", fraction=0.35, message="patient 14 of 40")
+
+        line = self.phases[-1]
+        self.assertIn("Running on the server", line)
+        self.assertIn("patient 14 of 40", line)
+        self.assertIn("35%", line)
+
+    def test_no_percentage_is_invented_when_the_tool_gave_none(self):
+        self._apply()
+        _Job.started[0].emit(phase="running", message="segmenting")
+
+        self.assertNotIn("%", self.phases[-1])
+
+    def test_a_phase_this_client_has_never_heard_of_is_still_shown(self):
+        """The seam between two repositories: a phase added server-side must
+        degrade to a slightly technical word, never to a run that looks like it
+        stopped saying anything."""
+        self._apply()
+        _Job.started[0].emit(phase="uploading_to_pacs")
+
+        self.assertIn("uploading_to_pacs", self.phases[-1])
+
+    def test_a_supervised_chain_reads_as_one(self):
+        """AREG drives ASO drives ALI. Depth is all the contract carries -- the
+        child's NAME is not in it -- so nesting is shown as nesting."""
+        self._apply()
+        _Job.started[0].emit(phase="running", depth=2, message="orienting")
+
+        self.assertIn("\u2192 \u2192 ", self.phases[-1])
+
+    def test_the_client_s_own_news_replaces_the_server_s_older_word(self):
+        """"Downloading results" comes AFTER "packaging"; showing both would
+        leave the older of the two on the panel next to the newer."""
+        self._apply()
+        _Job.started[0].emit(phase="packaging")
+        _Job.started[0].report("Downloading results... 8.2 MB")
+
+        line = self.phases[-1]
+        self.assertIn("Downloading results", line)
+        self.assertNotIn("Packaging", line)
+
+    def test_the_bar_follows_a_real_fraction_and_hides_without_one(self):
+        self.panel._progressBar = qt.QProgressBar()
+        self._apply()
+
+        _Job.started[0].emit(fraction=0.42)
+        self.assertTrue(self.panel._progressBar.isVisible())
+        self.assertEqual(self.panel._progressBar.value, 42)
+
+        _Job.started[0].emit(seq=1, fraction=None)
+        self.assertFalse(self.panel._progressBar.isVisible())
+
+    # -- cancelling, and who hears about it ----------------------------
+
+    def test_cancelling_a_queued_run_makes_no_http_call_at_all(self):
+        """It was never sent, so there is nothing on the server to withdraw --
+        which also means a queue can be emptied with the server unreachable."""
+        self._apply()
+        self._apply()
+        queued = self.panel._runs[1]
+
+        self.panel._cancelRun(queued)
+
+        self.assertNotIn(queued.run_id, self._remoteCancels())
+        self.assertNotIn(queued, self.panel._runs)
+
+    def test_cancelling_a_running_run_asks_the_server_to_stop_it(self):
+        self._apply()
+        run = self.panel._runs[0]
+
+        self.panel._cancelRun(run)
+
+        self.assertEqual(self._remoteCancels(), [run.run_id])
+        self.assertTrue(run.cancel_event.is_set())
+
+    def test_cancel_all_withdraws_every_run_that_reached_the_server(self):
+        config.CONCURRENT_RUNS = 2
+        self._apply()
+        self._apply()
+        self._apply()
+        started = [run.run_id for run in self.panel._runs if run.started_at is not None]
+
+        self.panel.onCancelButton()
+
+        self.assertEqual(sorted(self._remoteCancels()), sorted(started))
+        self.assertEqual(len(started), 2, "the third was queued and never sent")
+
+    def test_cancelling_one_of_several_lets_the_queue_move_on(self):
+        self._apply()
+        self._apply()
+
+        self.panel._cancelRun(self.panel._runs[0])
+
+        self.assertEqual(len(self.panel._runs), 1)
+        self.assertTrue(self.panel._runs[0].running, "the queue stalled behind a cancellation")
+
+    def test_a_cancelled_run_closes_quietly(self):
+        """A 499 is not a failure. The user asked for this, and an error dialog
+        would be the panel arguing with them about it."""
+        errors = self._recordErrorDisplays()
+        self._apply()
+
+        _Job.started[0].fail(RunCancelled("'AREG' was cancelled.", 499))
+
+        self.assertEqual(errors, [])
+        self.assertEqual(self.panel._runs, [])
+
+    def test_a_real_failure_is_still_shown(self):
+        """The contrast that makes the case above mean something."""
+        errors = self._recordErrorDisplays()
+        self._apply()
+
+        _Job.started[0].fail(ServerToolError("The tool failed on the server.", 500))
+
+        self.assertEqual(len(errors), 1)
+
+    def _recordErrorDisplays(self):
+        recorded = []
+        self.addCleanup(setattr, _slicer_util, "errorDisplay", _slicer_util.errorDisplay)
+        _slicer_util.errorDisplay = lambda *args, **kwargs: recorded.append(args)
+        return recorded
+
+    # -- one Cancel per run --------------------------------------------
+
+    def _runButtons(self):
+        host = self.panel._runControlsWidget
+        return list(host.layout.widgets) if host is not None else []
+
+    def test_a_single_run_gets_no_button_of_its_own(self):
+        """The panel's own Cancel already cancels exactly that run; a second
+        button saying the same thing under it is noise."""
+        self._apply()
+        self.assertEqual(self._runButtons(), [])
+
+    def test_several_runs_each_get_one_naming_what_it_would_abandon(self):
+        config.CONCURRENT_RUNS = 2
+        self._apply(path="/data/patient_01.nii.gz")
+        self._apply(path="/data/patient_02.nii.gz")
+
+        labels = [button.text for button in self._runButtons()]
+        self.assertEqual(len(labels), 2)
+        self.assertIn("patient_01.nii.gz", labels[0])
+        self.assertIn("patient_02.nii.gz", labels[1])
+
+    def test_a_run_s_own_button_cancels_that_run_and_no_other(self):
+        config.CONCURRENT_RUNS = 2
+        self._apply(path="/data/patient_01.nii.gz")
+        self._apply(path="/data/patient_02.nii.gz")
+        first, second = self.panel._runs
+
+        self._runButtons()[1].clicked.emit()
+
+        self.assertEqual(self.panel._runs, [first])
+        self.assertTrue(second.cancel_event.is_set())
+        self.assertFalse(first.cancel_event.is_set())
+
+    def test_the_buttons_of_a_finished_set_do_not_outlive_it(self):
+        """Rebuilt wholesale rather than edited, so a button can never be left
+        bound to a run that is gone."""
+        config.CONCURRENT_RUNS = 2
+        self._apply()
+        self._apply()
+        stale = self.panel._runControlsWidget
+
+        _Job.started[0].succeed()
+
+        self.assertIsNot(self.panel._runControlsWidget, stale)
+        self.assertTrue(stale.deleted, "the old buttons were left in the layout")
+
 
 class OneJobPerToolTest(unittest.TestCase):
     """The default shape: one run at a time per tool, several tools at once.
@@ -382,6 +657,10 @@ class OneJobPerToolTest(unittest.TestCase):
         panel._runsStarted = 0
         panel._elapsedTimer = None
         panel._outputFolderWidget = None
+        panel._progressBar = None
+        panel._runControlsLayout = None
+        panel._runControlsWidget = None
+        panel.client = _RecordingClient()
         panel.applyButton = qt.QPushButton("Apply")
         panel.cancelButton = qt.QPushButton("Cancel")
         panel.prepareInputFiles = lambda workspace: {"t1": "/data/" + tool_name + ".nii.gz"}

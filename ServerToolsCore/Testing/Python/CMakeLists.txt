@@ -50,3 +50,30 @@ add_test(
   COMMAND ${Python3_EXECUTABLE} -m unittest test_joystick
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
+
+# test_run_progress.py: the run's progress stream and its cancellation. Like
+# test_transfer.py it runs against a real ThreadingHTTPServer on a loopback
+# socket rather than a mock, because what it has to show is a SECOND connection
+# held open while the first one is blocked inside the POST -- a barrier neither
+# request can pass alone. requests + stdlib only, no Slicer interpreter.
+add_test(
+  NAME ServerToolsCore_test_run_progress
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_run_progress
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+
+# test_runs.py and test_worker.py were written before this file listed them and
+# so had never run in CI: the run queue, the two timers, the cancel token and
+# the panel's half of the progress stream. Both use the same stand-ins as
+# test_formgen.py and need no Slicer interpreter either.
+add_test(
+  NAME ServerToolsCore_test_runs
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_runs
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+
+add_test(
+  NAME ServerToolsCore_test_worker
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_worker
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )

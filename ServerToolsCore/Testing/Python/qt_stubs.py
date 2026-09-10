@@ -306,6 +306,11 @@ class QPushButton(QObject):
         self._checkable = False
         self._checked = False
 
+    def isCheckable(self):
+        """Whether this button IS an option rather than an action -- the whole
+        distinction between a chip and a plain button."""
+        return self._checkable
+
     def setChecked(self, checked):
         """A checkable button IS the option in a dense multichoice, so it has to
         read back exactly as a check box does (see design.option_chip)."""

@@ -455,6 +455,50 @@ def _build_inline_boxes(column, choices: dict, _groups=None, help_texts=None) ->
     return boxes
 
 
+def _build_chips_boxes(column, choices: dict, groups=None, help_texts=None) -> dict:
+    """Options as chips, wrapped over as many lines as they need.
+
+    The tabbed layout's grid without the tabs, and it exists because the two
+    answer different problems. `tabs` is for a CATALOGUE -- ALI's 119 landmarks,
+    which nobody reads in one piece and which needs a per-tab button to be
+    usable at all. This is for a handful: AMASSS's nine structures fit on two
+    lines, and putting them behind a single tab would be a tab bar with nowhere
+    to go.
+
+    So it carries no group button either. Nine chips are nine clicks, and a
+    control that takes all of them earns its place at a hundred, not at nine.
+
+    Groups, when a tool declares them, become a heading and a grid of their own
+    rather than a tab -- which keeps a two-group argument readable without
+    hiding half of it behind a click.
+    """
+    boxes = {}
+    for group_name, options in _grouped(choices, groups):
+        if group_name and (groups or {}):
+            column.addWidget(design.section_title(group_name))
+
+        page = qt.QWidget()
+        grid = qt.QGridLayout(page)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setVerticalSpacing(design.SPACING_XS)
+        # Wider than tall, for the same reason as the tabbed grid: chips carry
+        # their own padding, so touching columns read as one long word while
+        # touching rows read as a list.
+        grid.setHorizontalSpacing(design.SPACING_MD)
+
+        columns = _columns_for(options)
+        for index, option in enumerate(options):
+            boxes[option] = _make_chip(option, choices[option],
+                                       _help_for(help_texts, option))
+            grid.addWidget(boxes[option], index // columns, index % columns)
+        # No scroll area here, so the height follows the chips; only the spare
+        # WIDTH needs somewhere to go, or the columns stretch apart.
+        _pack_to_top_left(grid, rows=-(-len(options) // columns), columns=columns)
+        column.addWidget(page)
+
+    return boxes
+
+
 def _build_grid_boxes(column, choices: dict, groups=None, help_texts=None) -> dict:
     """One row per group, options as columns — the chart layout.
 
@@ -642,6 +686,7 @@ def _vertical_scroll(widget):
 _LAYOUT_BUILDERS = {
     None: _build_flat_boxes,
     "inline": _build_inline_boxes,
+    "chips": _build_chips_boxes,
     "grid": _build_grid_boxes,
     "tabs": _build_tabs_boxes,
 }

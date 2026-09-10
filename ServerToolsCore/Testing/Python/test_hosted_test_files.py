@@ -268,6 +268,12 @@ class HostedTestFileTest(unittest.TestCase):
         panel._testFileRoot = None
         panel._testFileCache = {}
         panel._progressLabel = None
+        panel._progressBar = None
+        # The per-run Cancel buttons have no home on a panel built without
+        # setup(); None is what _rebuildRunCancelButtons reads as "nowhere to
+        # put them" and skips.
+        panel._runControlsLayout = None
+        panel._runControlsWidget = None
         # What the panel told the user, in order. `_showPhase` is the one
         # channel a run and a download share.
         panel.phases = []
