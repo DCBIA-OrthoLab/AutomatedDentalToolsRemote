@@ -391,8 +391,18 @@ class MultiChoiceGroup:
     def setProperty(self, name, value) -> None:
         self.container.setProperty(name, value)
 
-    def setToolTip(self, text) -> None:
-        self.container.setToolTip(text)
+    def setToolTip(self, _text) -> None:
+        """Deliberately nothing. The group ALREADY SHOWS its description.
+
+        `__init__` renders it as a hint label above the options, so accepting it
+        here as well put the same paragraph on the container -- and Qt hands a
+        container's tooltip to every child that has none, so ALI's 304-character
+        note on `landmarks` popped up under each of its 236 chips. Printed and
+        hovered at once, and the hovered copy is the one nobody asked for.
+
+        A chip's own tooltip is a different thing: it says what THAT landmark is
+        and where it goes, which the schema cannot express yet.
+        """
 
 
 def _make_box(option: str, checked) -> qt.QCheckBox:

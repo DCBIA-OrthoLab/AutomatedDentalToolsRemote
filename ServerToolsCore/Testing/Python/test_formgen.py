@@ -260,8 +260,15 @@ class MultiChoiceWidgetTest(unittest.TestCase):
             {"summary": False, "preview": False, "columns": False},
         )
 
-    def test_description_becomes_the_tooltip(self):
-        self.assertEqual(self.group.container.toolTip(), "Which result files to produce")
+    def test_the_description_is_shown_rather_than_hovered(self):
+        """It used to be BOTH: rendered as a hint label above the options and
+        set as the container's tooltip. Qt hands a container's tooltip to every
+        child that has none, so ALI's 304-character note on `landmarks` popped
+        up under each of its 236 chips."""
+        shown = [w for w in self.group.container.layout.widgets
+                 if getattr(w, "text", None) == "Which result files to produce"]
+        self.assertEqual(len(shown), 1)
+        self.assertFalse(self.group.container.toolTip())
 
 
 class MultiChoiceEncodingTest(unittest.TestCase):
@@ -1927,6 +1934,31 @@ class ToolTipStyleTest(unittest.TestCase):
         dark = re.search(r"QToolTip \{(.*?)\n      \}",
                          design._base_stylesheet(design._DARK), re.S).group(1)
         self.assertNotEqual(light, dark)
+
+
+
+class MultiChoiceTooltipTest(unittest.TestCase):
+    """A group's description is shown, not hovered."""
+
+    CHOICES = {"Ba": False, "S": False, "N": False}
+    NOTE = ("Predict exactly these landmarks -- naming any of them REPLACES the "
+            "region selection rather than narrowing it, which is what lets a "
+            "caller ask for the seven points it needs.")
+
+    def test_it_is_not_also_put_on_the_container(self):
+        """Qt hands a container's tooltip to every child that has none, so this
+        paragraph popped up under each of ALI's 236 chips -- printed and hovered
+        at once, and the hovered copy is the one nobody asked for."""
+        group = formgen.MultiChoiceGroup(self.CHOICES, self.NOTE)
+        group.setToolTip(self.NOTE)
+        self.assertFalse(group.container._tooltip)
+
+    def test_every_other_composite_still_takes_one(self):
+        """Only the multichoice shows its description already. A file picker's
+        tooltip says which path it holds, and nothing else says that."""
+        field = formgen.FileOrFolderInput()
+        field.setToolTip("/data/patient/scan.nii.gz")
+        self.assertEqual(field.container._tooltip, "/data/patient/scan.nii.gz")
 
 
 if __name__ == "__main__":
