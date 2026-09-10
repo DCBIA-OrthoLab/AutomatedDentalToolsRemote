@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import shutil
+import threading
 import time
 import zipfile
 
@@ -22,8 +23,8 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleWidget
 from slicer.util import VTKObservationMixin
 
-from . import config, design, formgen, is_file_type, slicer_io, testfile_entries
-from .errors import ServerToolError
+from . import config, design, formgen, is_file_type, new_run_id, slicer_io, testfile_entries
+from .errors import RunCancelled, ServerToolError
 from .worker import BackgroundJob
 
 logger = logging.getLogger("ServerToolsCore.base_widget")
@@ -80,11 +81,55 @@ class _Run:
         self.phase = ""
         self.started_at = None  # None while the run is still queued
 
+        # Minted here, before anything is sent, because the id has to be known
+        # to both sides while the request is still in flight -- which is the
+        # whole point: a server-assigned id could only travel in the response,
+        # and the response is the last thing that happens. It is also a
+        # capability (it plus the token is what authorises reading this run's
+        # progress and cancelling it), hence a CSPRNG rather than the run
+        # number sitting right above it.
+        self.run_id = new_run_id()
+        # Set when the user withdraws this run. Shared by the worker thread and
+        # the progress watcher, so cancelling closes both.
+        self.cancel_event = threading.Event()
+
+        # The last thing the SERVER said about this run, kept apart from
+        # `phase` (which is what the CLIENT is doing). Both are rendered, and
+        # neither can stand in for the other: only the client knows it is
+        # uploading, and only the server knows it has been queued for the GPU
+        # for four minutes.
+        self.server_phase = ""
+        self.server_message = ""
+        self.fraction = None  # 0.0..1.0, or None for "the tool did not say"
+        self.depth = 0  # 0 is the tool that was asked for; deeper is a chain
+
     @property
     def running(self) -> bool:
         return self.job is not None
 
+    def clear_server_progress(self) -> None:
+        """Forget what the server last said.
+
+        Called when the CLIENT reports something of its own, because by then
+        the server's last word is behind us: "Downloading results" comes after
+        "packaging", and showing both would leave the older of the two on the
+        panel. The newest information wins, whichever side it came from.
+        """
+        self.server_phase = ""
+        self.server_message = ""
+        self.fraction = None
+
     def cancel(self) -> None:
+        """Withdraw this run locally: nothing further is delivered, the worker
+        and its watcher are told to stop, and the scratch directory goes.
+
+        This does NOT stop the run on the server -- that is
+        `client.cancel_run`, which the panel issues alongside (see
+        ServerToolWidgetBase._cancelRun). Kept separate on purpose: this half
+        must work with no server at all, and the queued half of a cancel has
+        no server-side existence to withdraw.
+        """
+        self.cancel_event.set()
         if self.job:
             self.job.cancel()
             self.job = None
@@ -165,6 +210,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # clicked once must not still be on their disk next month.
         self._testFileRoot = None
         self._testFileCache = {}  # {hosted name: local path already fetched}
+        # {argument: path already put in the scene}, so re-picking the same
+        # file does not stack a second copy of it on the first.
+        self._scenePreviews = {}
         self._sceneVolumes = {}  # {display name: vtkMRMLScalarVolumeNode}
         self._schemaError = None  # set while the panel could not be built from a schema
         self._rootLayout = None
@@ -173,6 +221,12 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.cancelButton = None
         self.uiWidget = None
         self._progressLabel = None
+        self._progressBar = None  # determinate, and only while a tool reports a fraction
+        # One Cancel per run, rebuilt whenever the set of runs changes. The
+        # host widget stays put in the layout; only its single child is
+        # replaced, the same swap _buildForm makes for the schema-driven part.
+        self._runControlsLayout = None
+        self._runControlsWidget = None
         self._elapsedTimer = None  # ticks once a second while any run is active
 
     # ------------------------------------------------------------------
@@ -213,6 +267,15 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._progressLabel = design.progress_label()
         rootLayout.addWidget(self._progressLabel)
 
+        self._progressBar = design.progress_bar()
+        rootLayout.addWidget(self._progressBar)
+
+        runControlsHost = qt.QWidget()
+        self._runControlsLayout = qt.QVBoxLayout(runControlsHost)
+        self._runControlsLayout.setContentsMargins(0, 0, 0, 0)
+        self._runControlsLayout.setSpacing(design.SPACING_XS)
+        rootLayout.addWidget(runControlsHost)
+
         self.applyButton.clicked.connect(self.onApplyButton)
         self.cancelButton.clicked.connect(self.onCancelButton)
 
@@ -243,9 +306,16 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def cleanup(self) -> None:
         self.removeObservers()
+        # Server-side too, not only locally. This panel is going away (a module
+        # reload, Slicer closing), so nothing here can ever collect these
+        # results -- leaving an inference holding the card for an hour on
+        # behalf of a widget that no longer exists is pure waste, and the GPU
+        # is shared with every other client.
+        running = [run.run_id for run in self._runs if run.started_at is not None]
         for run in list(self._runs):
             run.cancel()
         self._runs = []
+        self._requestServerCancel(running)
         if self._statusJob:
             self._statusJob.cancel()
             self._statusJob = None
@@ -478,11 +548,20 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             formgen.connect_changed(widget, self._applyVisibility)
         self._applyVisibility()
 
-    def _narrowChoices(self, name: str, allowed) -> None:
-        """Restrict one combo box to `allowed`, keeping the selection if it
+    def _narrowChoices(self, name: str, allowed, groups=None) -> None:
+        """Restrict one choice argument to `allowed`, keeping the selection if it
         survives. Falls back to the first option, because a QComboBox cannot be
         empty and index 0 is what it would select anyway."""
         widget = self._argWidgets.get(name)
+        if isinstance(widget, formgen.MultiChoiceGroup):
+            # A facade publishes the UNION of its engines' options; the mode says
+            # which apply, and which tabs they belong in. Only combo boxes were
+            # narrowed here, so ALI's intraoral landmarks arrived in the CBCT
+            # panel's four anatomical tabs -- every option offered, laid out
+            # under a region that does not exist in an intraoral scan.
+            declared = self._schemaArgument(name).get("choices") or {}
+            widget.rebuild({option: bool(declared.get(option)) for option in allowed}, groups)
+            return
         if widget is None or not hasattr(widget, "addItems"):
             return
         current = widget.currentText
@@ -508,8 +587,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # panel shows.
         for name, spec in arguments.items():
             allowed = formgen.allowed_options(spec, values)
+            groups = formgen.allowed_groups(spec, values)
             if allowed is not None:
-                self._narrowChoices(name, allowed)
+                self._narrowChoices(name, allowed, groups)
         values = formgen.collect(
             {name: self._argWidgets[name] for name in controlling if name in self._argWidgets}
         )
@@ -602,6 +682,12 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             field = formgen.row_widget(widget)
             target.addRow(labelWidget, field)
             formgen.connect_changed(widget, self._checkCanApply)
+            # Choosing a scan should show it, the way choosing a hosted test
+            # file already does -- a clinician picks a file in order to look at
+            # it, and having to open it a second time through Add Data is a step
+            # the panel can spare them.
+            formgen.connect_changed(
+                widget, lambda arg=arg_name: self._previewPickedFile(arg))
             # Picking one of the tool's hosted test files is an action, not a
             # value: this is where it lands, and the download that follows is
             # why formgen hands the choice back instead of acting on it.
@@ -1060,12 +1146,23 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def _startRun(self, run) -> None:
         def task(progress_cb):
+            # `event_cb=progress_cb` funnels the server's progress events into
+            # the SAME queue the client's own messages already use. The events
+            # arrive on a second thread (the client opens one for the run's
+            # event stream, since this thread is blocked inside the POST for
+            # the whole inference), and a second cross-thread mechanism is
+            # exactly what must not be introduced: BackgroundJob's queue plus
+            # its main-thread timer is the one place Qt is touched from.
+            # _onJobProgress tells the two apart by type.
             return self.client.run(
                 self.TOOL_NAME,
                 args=run.args,
                 files=run.files,
                 output_dir=run.output_dir,
                 progress_cb=progress_cb,
+                run_id=run.run_id,
+                event_cb=progress_cb,
+                cancel_event=run.cancel_event,
             )
 
         run.phase = _("Sending request...")
@@ -1077,6 +1174,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             on_success=lambda result, run=run: self._onJobSuccess(run, result),
             on_error=lambda exc, run=run: self._onJobError(run, exc),
             on_progress=lambda message, run=run: self._onJobProgress(run, message),
+            # The run's own event, not the job's: the watcher inside
+            # client.run() reads it too, so cancelling closes the progress
+            # stream in the same gesture that stops the work.
+            cancel_event=run.cancel_event,
         )
         run.job.start()
         self._startElapsedTimer()
@@ -1084,17 +1185,69 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onCancelButton(self) -> None:
         """Cancel everything in flight, queued runs included.
 
-        One button for the lot rather than one per line: a user who wants out
-        wants out of all of it, and the in-flight HTTP request cannot be
-        interrupted anyway (see ARCHITECTURE.md limitations).
+        The panel-wide button, kept as the lot: a user who wants out usually
+        wants out of all of it. One run out of several is the per-run button
+        _rebuildRunCancelButtons puts beside each line.
         """
-        for run in list(self._runs):
-            run.cancel()
-        self._runs = []
-        self._stopElapsedTimer()
-        self._syncRunControls()
-        self._checkCanApply()
+        self._cancelRuns(list(self._runs))
         slicer.util.showStatusMessage(_("Cancelled."), 3000)
+
+    def _cancelRun(self, run) -> None:
+        """Cancel exactly one run, leaving the rest of a cohort alone."""
+        self._cancelRuns([run])
+        slicer.util.showStatusMessage(
+            _("Run {number} cancelled.").format(number=run.number), 3000)
+
+    def _cancelRuns(self, runs) -> None:
+        """Withdraw these runs, locally and (where there is one) server-side.
+
+        A run that is still QUEUED here has never been sent, so there is
+        nothing on the server to withdraw and NO HTTP call is made for it --
+        which also means cancelling a queue works with the server unreachable,
+        unplugged or gone.
+        """
+        server_ids = [run.run_id for run in runs if run.started_at is not None]
+        for run in runs:
+            run.cancel()
+            if run in self._runs:
+                self._runs.remove(run)
+        self._requestServerCancel(server_ids)
+        if not self._runs:
+            self._stopElapsedTimer()
+        # Admission frees up as these leave, exactly as when one finishes: a
+        # cancelled run must let the next queued one start rather than leaving
+        # the queue stalled behind it.
+        self._pumpRuns()
+        self._checkCanApply()
+
+    def _requestServerCancel(self, run_ids) -> None:
+        """DELETE /runs/{id} for each, from a thread of its own.
+
+        Off the main thread because a Cancel click must be instant. The call is
+        a few milliseconds against a healthy server and up to the connect
+        timeout against one that is not answering -- and "not answering" is a
+        state in which people press Cancel. Multiplied by a cohort, that is a
+        frozen Slicer at the exact moment the user asked to be let go.
+
+        A plain daemon thread rather than a BackgroundJob, deliberately: there
+        is no outcome to deliver and nothing to render, so there is nothing for
+        the queue-and-timer machinery to carry, and this thread touches neither
+        Qt nor the scene. Failure is not reported either -- the panel has
+        already released the run, the server reaps an abandoned one on its own
+        idle timeout, and there is nothing the user could do with the news.
+        """
+        if not run_ids:
+            return
+        client = self.client
+
+        def cancel_all():
+            for run_id in run_ids:
+                try:
+                    client.cancel_run(run_id)
+                except Exception:
+                    logger.debug("Server-side cancel failed", exc_info=True)
+
+        threading.Thread(target=cancel_all, name="sadt-run-cancel", daemon=True).start()
 
     def _onJobSuccess(self, run, result) -> None:
         self._finishRun(run)
@@ -1104,13 +1257,55 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _onJobError(self, run, exc) -> None:
         """One run failing takes only that run: the rest of a cohort goes on."""
         self._finishRun(run)
+        if isinstance(exc, RunCancelled):
+            # 499: the user asked for this. A cancellation is not a failure and
+            # must never open an error dialog -- the panel simply closes the
+            # run, which is what the user pressed the button to see. It can
+            # arrive without anyone having pressed anything here (someone else
+            # holding the run id, an operator stopping a job on the server), so
+            # it is answered on its own merits rather than by checking whether
+            # we were the ones who asked.
+            logger.info("Run %d of '%s' was cancelled", run.number, self.TOOL_NAME)
+            slicer.util.showStatusMessage(
+                _("Run {number} cancelled.").format(number=run.number), 3000)
+            return
         slicer.util.errorDisplay(str(exc))
 
-    def _onJobProgress(self, run, message) -> None:
+    def _onJobProgress(self, run, payload) -> None:
+        """What the run has to say, from either side of the wire.
+
+        A dict is one of the server's progress events, delivered by the
+        watcher thread through the job's own queue; anything else is the
+        client narrating what IT is doing. One channel for both, because
+        BackgroundJob's queue plus its main-thread timer is the only mechanism
+        in this file allowed to cross a thread boundary, and a second one would
+        be a second way to get Qt wrong.
+        """
+        if isinstance(payload, dict):
+            self._onRunEvent(run, payload)
+            return
         # Kept as the phase, not printed once and forgotten: the elapsed-time
         # tick below re-renders it every second, so the panel keeps saying what
         # it is doing rather than showing a message frozen minutes ago.
-        run.phase = message
+        run.phase = payload
+        # The client has moved past whatever the server last said -- "Processing
+        # response" comes after "packaging" -- so the older half is dropped
+        # rather than left on the panel beside the newer one.
+        run.clear_server_progress()
+        self._renderProgress()
+
+    def _onRunEvent(self, run, event) -> None:
+        """One progress event from the server (see client.normalise_run_event).
+
+        Nothing is logged from it. A progress message is written by a tool and
+        may name a file, which on this extension's data means it may name a
+        patient; it is rendered on the panel of the person who started the run
+        and goes nowhere else.
+        """
+        run.server_phase = event.get("phase") or ""
+        run.server_message = event.get("message") or ""
+        run.fraction = event.get("fraction")
+        run.depth = event.get("depth") or 0
         self._renderProgress()
 
     def _finishRun(self, run) -> None:
@@ -1132,7 +1327,61 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.cancelButton.setText(_("Cancel all") if len(self._runs) > 1 else _("Cancel"))
         if self.applyButton is not None:
             self.applyButton.setVisible(True)
+        self._rebuildRunCancelButtons()
         self._renderProgress()
+
+    def _rebuildRunCancelButtons(self) -> None:
+        """One Cancel per run -- but only once there is more than one run.
+
+        With a single run the panel's own Cancel button already cancels exactly
+        that run, and a second button saying the same thing under it is noise;
+        the same reasoning that keeps _describeRun from prefixing a lone line
+        with "Run 1". With a cohort it is the difference between abandoning the
+        patient that is stuck and abandoning the afternoon.
+
+        Rebuilt wholesale into a fresh child rather than by clearing a layout,
+        which is the swap _buildForm already makes and for the same reason: no
+        widget of the previous set survives, so a button can never outlive the
+        run it was bound to. Called only from _syncRunControls, i.e. when the
+        set of runs actually changes -- never from the one-second render tick,
+        which would destroy a button under the pointer that is about to click
+        it.
+        """
+        if self._runControlsLayout is None:
+            # A panel built without setup() (the unit tests do exactly that)
+            # has nowhere to put them, and nothing to show them on.
+            return
+
+        host = qt.QWidget()
+        layout = qt.QVBoxLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(design.SPACING_XS)
+        if len(self._runs) > 1:
+            for run in self._runs:
+                button = design.compact_danger_button(
+                    _("Cancel run {number} ({label})").format(
+                        number=run.number, label=run.label)
+                )
+                # `run=run` for the same reason the job callbacks do it: bound
+                # at definition time, or every button cancels the last run.
+                # `_checked` swallows the bool a QPushButton's clicked signal
+                # sends, which PythonQt passes positionally.
+                button.clicked.connect(
+                    lambda _checked=False, run=run: self._cancelRun(run))
+                layout.addWidget(button)
+
+        self._runControlsLayout.addWidget(host)
+        previous = self._runControlsWidget
+        self._runControlsWidget = host
+        if previous is not None:
+            # Reparenting is what takes it out of the layout; the deletion is
+            # deferred because this can run from a signal emitted by one of
+            # these very buttons -- a button that cancels its own run destroys
+            # the set it belongs to, and it has to survive the click it is
+            # handling.
+            previous.setVisible(False)
+            previous.setParent(None)
+            previous.deleteLater()
 
     # ------------------------------------------------------------------
     # "Still working" feedback
@@ -1164,6 +1413,39 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._elapsedTimer = None
         self._hideProgress()
 
+    def _previewPickedFile(self, arg_name: str) -> None:
+        """Put a picked single file in the scene, once.
+
+        Three things it deliberately does not do. It never loads a FOLDER: a
+        forty-patient cohort would put hundreds of nodes in the scene, which is
+        worse than showing nothing -- batches are the run's job, not the
+        picker's. It never loads the same path twice for one argument, or
+        re-picking would stack copies. And it never fails a pick:
+        `slicer_io.load_input` swallows a reader Slicer refuses, because the
+        input is already filled in and the run works either way.
+
+        The phase message is not decoration. Slicer spends around twenty
+        seconds decompressing and building a 94 MB scan, on the main thread;
+        without a line saying so, choosing a file looks like a freeze.
+        """
+        widget = self._inputWidgets.get(arg_name)
+        path = getattr(widget, "currentPath", "") if widget is not None else ""
+        if not path or os.path.isdir(path):
+            return
+        if self._scenePreviews.get(arg_name) == path:
+            return
+        if slicer_io.load_kind_for(path) is None:
+            # A .zip, a .csv, a DICOM directory: nothing a scene can hold, and
+            # saying "Loading..." about it would be a lie.
+            return
+
+        self._scenePreviews[arg_name] = path
+        self._showPhase(_("Loading {name} into the scene...").format(
+            name=os.path.basename(path)))
+        slicer.app.processEvents()
+        slicer_io.load_input(path)
+        self._showPhase("")
+
     def _showPhase(self, message: str) -> None:
         """Put a message on the panel immediately, timer running or not.
 
@@ -1182,11 +1464,36 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self._progressLabel:
             self._progressLabel.setVisible(False)
             self._progressLabel.setText("")
+        if self._progressBar:
+            # Together with the label, always. A bar left at 40% under a blank
+            # line is a run that looks stuck at 40% forever.
+            self._progressBar.setVisible(False)
+            self._progressBar.setValue(0)
 
     def _renderProgress(self) -> None:
         if not self._runs:
             return
         self._showPhase("\n".join(self._describeRun(run) for run in self._runs))
+        self._renderProgressBar()
+
+    def _renderProgressBar(self) -> None:
+        """The determinate bar, shown only when there is a real number behind it.
+
+        One run, one fraction: with several in flight there is no single number
+        a bar could honestly show, and each line already carries its own
+        percentage. Hidden the rest of the time -- most tools report no
+        fraction at all, and a bar that has to invent motion to look busy is
+        worse than the elapsed-time line beside it, which never claims to know
+        how far along anything is.
+        """
+        if self._progressBar is None:
+            return
+        fraction = self._runs[0].fraction if len(self._runs) == 1 else None
+        if fraction is None:
+            self._progressBar.setVisible(False)
+            return
+        self._progressBar.setValue(int(round(100 * fraction)))
+        self._progressBar.setVisible(True)
 
     def _describeRun(self, run) -> str:
         """One line per run -- and for a single run, exactly the line it always was.
@@ -1200,13 +1507,67 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 number=run.number, label=run.label)
         elapsed = int(time.monotonic() - run.started_at)
         line = _("{phase}  —  {minutes}:{seconds:02d} elapsed").format(
-            phase=run.phase or _("Working..."),
+            phase=self._runPhaseText(run) or _("Working..."),
             minutes=elapsed // 60, seconds=elapsed % 60,
         )
         if len(self._runs) == 1:
             return line
         return _("Run {number} ({label}): {line}").format(
             number=run.number, label=run.label, line=line)
+
+    def _runPhaseText(self, run) -> str:
+        """What this run is doing, in one phrase, from whichever side knows.
+
+        The server's word wins while the server is the one working: it is the
+        only side that can tell four minutes of queueing for the GPU from four
+        minutes of inference, and until it could say so that silence was the
+        whole of this panel's problem. The client's own phases (uploading,
+        downloading) take over the moment it has something of its own to
+        report, since by then the server has finished.
+        """
+        if not run.server_phase:
+            return run.phase
+        parts = [self._phaseLabel(run.server_phase)]
+        if run.server_message:
+            parts.append(run.server_message)
+        if run.fraction is not None:
+            parts.append("{:.0%}".format(run.fraction))
+        text = " — ".join(part for part in parts if part)
+        if run.depth:
+            # A supervised chain: AREG drives ASO, which drives ALI. The panel
+            # is never told the child's NAME -- depth is all the contract
+            # carries, and naming the tool would be guessing which one is
+            # running -- so nesting is shown as nesting and the message says
+            # the rest.
+            text = ("→ " * run.depth) + text
+        return text
+
+    @staticmethod
+    def _phaseLabel(phase: str) -> str:
+        """One phase of the run contract, in words a clinician reads.
+
+        The vocabulary is a small CLOSED set precisely so a panel can translate
+        it instead of showing a word written for a server log. Built at call
+        time rather than as a module constant: `_` resolves against the
+        interface language in force when it runs, and a dict built at import
+        time would freeze every label at whatever Slicer started in.
+
+        An unknown phase is shown as-is rather than dropped. This is the seam
+        between two repositories: a phase added on the server side must degrade
+        to a slightly technical word on the panel, never to a run that looks
+        like it stopped saying anything.
+        """
+        labels = {
+            "received": _("Request received"),
+            "staging": _("Preparing the input files"),
+            "queued_gpu": _("Waiting for the GPU"),
+            "running": _("Running on the server"),
+            "packaging": _("Packaging the results"),
+            "done": _("Finished"),
+            "failed": _("Failed"),
+            "cancelled": _("Cancelled"),
+        }
+        return labels.get(phase, phase)
 
     # ------------------------------------------------------------------
     # Open volumes offered as input sources
@@ -1526,7 +1887,13 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # put hundreds of nodes in the scene, which is worse than showing
         # nothing at all.
         loaded_into_scene = False
-        if not os.path.isdir(path):
+        # `set_local_path` above changed the row, which fires the same preview a
+        # hand-picked file gets -- so by the time this line runs the scan may
+        # ALREADY be in the scene, and loading it again would put a second copy
+        # of the same patient there. `_scenePreviews` is the one record of what
+        # has been shown, whichever half of the panel showed it.
+        if not os.path.isdir(path) and self._scenePreviews.get(arg_name) != path:
+            self._scenePreviews[arg_name] = path
             # Said out loud, because this is the slow half and it does not look
             # like it: fetching a 94 MB scan takes 0.3 s over ranged parts,
             # then Slicer spends twenty seconds decompressing it and building
@@ -1535,6 +1902,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._showPhase(_("Loading {name} into the scene...").format(name=name))
             slicer.app.processEvents()
             slicer_io.load_input(path)
+            loaded_into_scene = True
+        elif not os.path.isdir(path):
+            # Shown by the preview, and still worth reporting as scene time.
             loaded_into_scene = True
         # The breakdown goes where a user can actually see it. "It took more
         # than ten seconds" is not a bug report anyone can act on; "download

@@ -267,6 +267,7 @@ class HostedTestFileTest(unittest.TestCase):
         panel._elapsedTimer = None
         panel._testFileRoot = None
         panel._testFileCache = {}
+        panel._scenePreviews = {}
         panel._progressLabel = None
         panel._progressBar = None
         # The per-run Cancel buttons have no home on a panel built without
@@ -506,6 +507,21 @@ class HostedTestFileTest(unittest.TestCase):
         _Job.started[0].deliver()
 
         self.assertEqual(_util.loaded, [("model", self._row.currentPath)])
+
+
+    def test_a_hosted_file_is_put_in_the_scene_exactly_once(self):
+        """Filling the row fires the same preview a hand-picked file gets, so
+        without one record of what has been shown the download would load the
+        scan and the preview would load it again -- two copies of one patient in
+        the scene, from one click."""
+        self._offer({"name": "Upper_gold.vtk", "kind": "file", "size": 4})
+        self.client.payloads["Upper_gold.vtk"] = b"mesh"
+
+        self._pick("Upper_gold.vtk")
+        _Job.started[0].deliver()
+        self.panel._previewPickedFile("t1")
+
+        self.assertEqual(len(_util.loaded), 1, _util.loaded)
 
     def test_a_folder_is_never_loaded_into_the_scene(self):
         """A forty-patient cohort would put hundreds of nodes in the scene,

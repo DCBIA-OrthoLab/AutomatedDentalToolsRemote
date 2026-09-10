@@ -112,11 +112,15 @@ class QLayout(QObject):
         QObject.__init__(self)
         self.widgets = []
         self.stretches = []
+        self.margins = (0, 0, 0, 0)
         if parent is not None:
             parent.layout = self
 
-    def setContentsMargins(self, *_margins):
-        pass
+    def setContentsMargins(self, *margins):
+        """Recorded rather than dropped. Where a block's air sits is the
+        difference between a group a reader can see the end of and one whose
+        last option touches the next argument's label."""
+        self.margins = tuple(margins) if len(margins) == 4 else (0, 0, 0, 0)
 
     def setSpacing(self, _spacing):
         pass

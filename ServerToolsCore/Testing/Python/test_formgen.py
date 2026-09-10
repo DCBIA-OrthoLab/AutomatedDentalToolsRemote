@@ -260,6 +260,17 @@ class MultiChoiceWidgetTest(unittest.TestCase):
             {"summary": False, "preview": False, "columns": False},
         )
 
+    def test_the_block_has_air_under_it(self):
+        """A multichoice is several rows tall where every other field is one, so
+        its last option sat as close to the NEXT argument's label as its own
+        options sit to each other. The other three margins stay zero: the row's
+        label has to line up with the first option, not with a gap."""
+        group = formgen.MultiChoiceGroup({"MERGED": True, "SEPARATE": False})
+        left, top, right, bottom = group.container.layout.margins
+        self.assertEqual((left, top, right), (0, 0, 0))
+        self.assertGreater(bottom, 0)
+
+
     def test_the_description_is_shown_rather_than_hovered(self):
         """It used to be BOTH: rendered as a hint label above the options and
         set as the container's tooltip. Qt hands a container's tooltip to every

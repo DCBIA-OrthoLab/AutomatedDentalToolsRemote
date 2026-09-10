@@ -285,7 +285,13 @@ class MultiChoiceGroup:
                  option_help=None):
         self.container = qt.QWidget()
         column = qt.QVBoxLayout(self.container)
-        column.setContentsMargins(0, 0, 0, 0)
+        # Air UNDER the block, and only under it. A multichoice is several rows
+        # tall where every other field is one, so its last option sat as close
+        # to the next argument's label as its own options sit to each other --
+        # and a reader has no way to tell where the group ends. The other three
+        # margins stay zero: the row's own label has to line up with the first
+        # option, not with a gap.
+        column.setContentsMargins(0, 0, 0, design.SPACING_LG)
         column.setSpacing(design.SPACING_XS)
 
         if description:

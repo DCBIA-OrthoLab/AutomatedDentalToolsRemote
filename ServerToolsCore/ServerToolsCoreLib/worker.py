@@ -39,11 +39,24 @@ _YIELD_SECONDS = 0.001
 class BackgroundJob:
     """Runs `target(progress_cb)` on a worker thread; delivers the outcome on the main thread."""
 
-    def __init__(self, target, on_success=None, on_error=None, on_progress=None):
+    def __init__(self, target, on_success=None, on_error=None, on_progress=None, cancel_event=None):
         self._target = target
         self._on_success = on_success
         self._on_error = on_error
         self._on_progress = on_progress
+        # A cancel token the TARGET can see, which is the only kind that can
+        # actually stop anything. `cancel()` on its own has never interrupted
+        # the work -- it drops the outcome and releases the UI, and the thread
+        # runs to completion inside `requests` regardless. A target given this
+        # event can check it at its own boundaries and stop doing work nobody
+        # is waiting for: no further parts uploaded, and above all no result
+        # archive pulled down for a panel that has already closed.
+        #
+        # Supplied by the caller when something ELSE also has to be able to set
+        # it (base_widget hands the same event to the run's watcher, so
+        # cancelling closes the progress stream too); created here otherwise,
+        # so a target that ignores it costs nothing and every job has one.
+        self.cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self._queue = queue.Queue()
         self._timer = qt.QTimer()
         self._timer.setInterval(_POLL_INTERVAL_MS)
@@ -61,10 +74,19 @@ class BackgroundJob:
         self._yieldTimer.start()
 
     def cancel(self) -> None:
-        """Best-effort: the in-flight HTTP request cannot be interrupted, but its
-        result is discarded and the UI is released immediately (see ARCHITECTURE.md
-        limitations - no true server-side cancel)."""
+        """Stop delivering, and tell the target to stop working.
+
+        Two halves, and they are not the same. The UI half is immediate and
+        unconditional: nothing further is delivered and the panel is released
+        whatever the thread is doing. The work half is cooperative -- setting
+        `cancel_event` cannot interrupt a socket read in progress, so a target
+        only notices at the checkpoints it chose; what it stops is everything
+        after the current one. Stopping the RUN itself is neither of these: it
+        is the server's DELETE /runs/{id}, which the panel issues alongside
+        this (see base_widget._requestServerCancel).
+        """
         self._cancelled = True
+        self.cancel_event.set()
         self._stopTimers()
 
     def _stopTimers(self) -> None:
