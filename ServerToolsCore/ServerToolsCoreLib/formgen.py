@@ -2002,9 +2002,36 @@ def all_required_filled(arg_widgets: dict, arguments_schema: dict, hidden=()) ->
         if widget is None:
             return False
         value = _read_widget(widget)
-        # A multichoice reads as a dict and is always "filled": every box
-        # unchecked is a meaningful selection, not a missing value.
         if value in ("", None):
+            return False
+    return all_minimums_met(arg_widgets, arguments_schema, hidden)
+
+
+def all_minimums_met(arg_widgets: dict, arguments_schema: dict, hidden=()) -> bool:
+    """Whether every multichoice declaring `min_selected` has that many ticked.
+
+    Separate from the loop above because it answers a different question. An
+    empty multichoice is normally FILLED -- every box unchecked is a meaningful
+    selection, and ALI's empty `landmarks` is how a caller says "let the regions
+    decide". `min_selected` is a tool saying that for THIS argument it is not:
+    AMASSS cannot run with no structure and cannot write with no output form,
+    and it raises on both.
+
+    Checked here so Apply greys out instead of a clinician sending a request and
+    being told no. The server refuses it too, and the tool refuses it again --
+    this is the earliest of the three, not the only one.
+    """
+    for name, spec in arguments_schema.items():
+        minimum = spec.get("min_selected")
+        if not minimum or name in hidden:
+            continue
+        widget = arg_widgets.get(name)
+        if widget is None:
+            continue
+        value = _read_widget(widget)
+        if not isinstance(value, dict):
+            continue
+        if sum(1 for on in value.values() if on) < minimum:
             return False
     return True
 

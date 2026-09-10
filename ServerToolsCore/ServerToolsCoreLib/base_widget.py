@@ -195,6 +195,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._inputWidgets = {}  # {schema_argument_name: widget}
         self._inputModes = {}  # {schema_argument_name: mode}, "auto" already resolved
         self._outputFolderWidget = None
+        self._loadResultsBox = None  # only on a 'save_as' panel
         # Schema-driven panel layout, all rebuilt wholesale by _buildForm.
         self._sectionBoxes = {}  # {section name: ctkCollapsibleButton}
         self._sectionLayouts = {}  # {section name: QFormLayout}
@@ -515,6 +516,18 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._outputFolderWidget.filters = ctk.ctkPathLineEdit.Dirs
             outputsLayout.addRow(design.required_label(_("Output folder")), self._outputFolderWidget)
             formgen.connect_changed(self._outputFolderWidget, self._checkCanApply)
+
+            # A "save_as" tool writes files and says where; whether they also
+            # OPEN is a question only the person watching can answer, so it is a
+            # control rather than a policy. On by default: someone who just
+            # segmented a scan almost always wants to look at it, and the
+            # alternative is finding the folder by hand every single run.
+            self._loadResultsBox = qt.QCheckBox(_("Load results into the scene"))
+            self._loadResultsBox.setChecked(True)
+            self._loadResultsBox.setToolTip(_(
+                "Open what the run produced as soon as it lands. A large cohort "
+                "is capped, so a batch cannot flood the scene."))
+            outputsLayout.addRow("", self._loadResultsBox)
             # This row belongs to no schema argument, so it must keep its
             # section on screen even when every argument in it is hidden.
             self._sectionsWithOwnRows.add(_OUTPUTS_SECTION)
@@ -1022,7 +1035,12 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             finally:
                 self._hideProgress()
             os.remove(result.path)
-            slicer.util.infoDisplay(_("Results saved to {path}").format(path=resultDir))
+            shown = self._loadResults(resultDir)
+            message = _("Results saved to {path}").format(path=resultDir)
+            if shown:
+                message += "\n\n" + _("{count} file(s) opened in the scene.").format(
+                    count=shown)
+            slicer.util.infoDisplay(message)
         else:
             slicer.util.infoDisplay(_("Result saved to {path}").format(path=result.path))
 
@@ -1412,6 +1430,44 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._elapsedTimer.stop()
             self._elapsedTimer = None
         self._hideProgress()
+
+    # How many result files may enter the scene at once. A forty-patient
+    # segmentation run writes hundreds, and a scene holding hundreds of nodes is
+    # not a result anyone can read -- it is a machine to slow Slicer down. Past
+    # this the folder is still written and still named; only the opening stops.
+    MAX_RESULTS_LOADED = 12
+
+    def _loadResults(self, folder: str) -> int:
+        """Open what the run produced, if the box is ticked. Returns how many.
+
+        Ordered so a partial view is still a useful one: the shallowest files
+        first, then alphabetically, because a cohort's per-patient folders sit
+        under a root whose own files are the summary.
+
+        Never raises. The files are on disk and named in the dialog either way,
+        so a mesh Slicer's reader refuses costs a log line, not the result.
+        """
+        box = self._loadResultsBox
+        if box is None or not box.isChecked():
+            return 0
+
+        candidates = []
+        for directory, _subdirs, names in os.walk(folder):
+            depth = os.path.relpath(directory, folder).count(os.sep)
+            for name in names:
+                path = os.path.join(directory, name)
+                if slicer_io.load_kind_for(path) is not None:
+                    candidates.append((depth, path))
+        candidates.sort()
+
+        shown = 0
+        for _depth, path in candidates[:self.MAX_RESULTS_LOADED]:
+            if slicer_io.load_input(path) is not None:
+                shown += 1
+        if len(candidates) > self.MAX_RESULTS_LOADED:
+            logger.info("%d result file(s) produced; opened the first %d",
+                        len(candidates), self.MAX_RESULTS_LOADED)
+        return shown
 
     def _previewPickedFile(self, arg_name: str) -> None:
         """Put a picked single file in the scene, once.

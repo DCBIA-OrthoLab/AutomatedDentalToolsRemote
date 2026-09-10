@@ -2054,5 +2054,48 @@ class ChipsLayoutTest(unittest.TestCase):
         self.assertFalse(group.boxes["MAX"].toolTip())
 
 
+
+class MinimumSelectionTest(unittest.TestCase):
+    """`min_selected` -- a tool saying an empty multichoice is not an answer."""
+
+    SCHEMA = {"merge": {"type": "multichoice", "required": False,
+                        "choices": {"MERGED": True, "SEPARATE": False},
+                        "min_selected": 1}}
+
+    def _widgets(self):
+        return formgen.build(self.SCHEMA, qt.QFormLayout())
+
+    def test_an_empty_selection_blocks_apply(self):
+        widgets = self._widgets()
+        for box in widgets["merge"].boxes.values():
+            box.setChecked(False)
+        self.assertFalse(formgen.all_required_filled(widgets, self.SCHEMA))
+
+    def test_one_tick_is_enough(self):
+        widgets = self._widgets()
+        for box in widgets["merge"].boxes.values():
+            box.setChecked(False)
+        widgets["merge"].boxes["SEPARATE"].setChecked(True)
+        self.assertTrue(formgen.all_required_filled(widgets, self.SCHEMA))
+
+    def test_a_multichoice_without_it_is_still_filled_when_empty(self):
+        """The default everywhere else, and ALI relies on it: an empty
+        `landmarks` is how a caller says "let the regions decide"."""
+        schema = {"landmarks": {"type": "multichoice", "required": True,
+                                "choices": {"Ba": False, "S": False}}}
+        widgets = formgen.build(schema, qt.QFormLayout())
+        self.assertTrue(formgen.all_required_filled(widgets, schema))
+
+    def test_a_hidden_argument_cannot_dead_lock_apply(self):
+        """Hidden rows are not sent, so the server applies the default. An
+        unreachable widget must not be able to grey Apply out forever with
+        nothing on screen to explain why."""
+        widgets = self._widgets()
+        for box in widgets["merge"].boxes.values():
+            box.setChecked(False)
+        self.assertTrue(
+            formgen.all_required_filled(widgets, self.SCHEMA, hidden=("merge",)))
+
+
 if __name__ == "__main__":
     unittest.main()
