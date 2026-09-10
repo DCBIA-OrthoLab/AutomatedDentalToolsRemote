@@ -921,5 +921,42 @@ class BuiltPanelTest(unittest.TestCase):
         )
 
 
+
+class AdvancedSectionTest(unittest.TestCase):
+    """A section named "Advanced" opens FOLDED.
+
+    It is the convention's own name for what a clinician does not have to
+    decide -- a seed, a tile step, the landmark folder someone who already has
+    landmarks goes looking for. Open, those sit between the inputs and Apply so
+    every reader steps over them; folded, the ones who want them still find
+    them in one click and nobody else meets them at all.
+    """
+
+    def _panel(self):
+        schema = copy.deepcopy(ASO_SCHEMA)
+        schema["arguments"]["landmarks"] = {
+            "label": "Landmark folder", "type": "path", "required": False,
+            "section": "Advanced",
+        }
+        return _build_panel(_FakeClient(schema))
+
+    def test_advanced_opens_folded(self):
+        panel = self._panel()
+        self.assertTrue(panel._sectionBoxes["Advanced"].collapsed)
+
+    def test_every_other_section_opens_read(self):
+        panel = self._panel()
+        for name, box in panel._sectionBoxes.items():
+            if name != "Advanced":
+                self.assertFalse(box.collapsed, name)
+
+    def test_folded_is_not_hidden(self):
+        """The box is on screen, and its title says what is inside it."""
+        panel = self._panel()
+        box = panel._sectionBoxes["Advanced"]
+        self.assertTrue(box.isVisible())
+        self.assertEqual(box.text, "Advanced")
+
+
 if __name__ == "__main__":
     unittest.main()

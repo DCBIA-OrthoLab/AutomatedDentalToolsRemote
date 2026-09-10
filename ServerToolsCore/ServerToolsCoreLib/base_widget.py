@@ -43,6 +43,11 @@ _RESULT_KINDS = ("text", "segmentation", "labelmap", "volume", "model", "save_as
 # (ASO's output_suffix does), which is why it is a plain name rather than a
 # separate widget.
 _OUTPUTS_SECTION = "Outputs"
+# Sections a panel opens folded. By NAME, because that is what a tool
+# declares -- there is no "advanced" flag on an argument, and inferring it
+# from "every argument here is optional" would fold a section a tool meant
+# to be read.
+_COLLAPSED_SECTIONS = ("Advanced",)
 
 # Characters a hosted test file's name may not contribute to a path built from
 # it. The name comes from the server's own listing rather than from a user, but
@@ -465,6 +470,14 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         for sectionName in formgen.sections_of(arguments, extraSections):
             box = ctk.ctkCollapsibleButton()
             box.text = _(sectionName)
+            # Folded shut, not hidden. "Advanced" is the convention's own name
+            # for what a clinician does not need to decide -- a seed, a tile
+            # step, the landmarks someone who already has them goes looking for.
+            # Open by default they sit between the inputs and Apply, so every
+            # reader steps over them; folded, the ones who want them still find
+            # them in one click and nobody else meets them at all.
+            if sectionName in _COLLAPSED_SECTIONS:
+                box.collapsed = True
             # A section the schema lays out in columns gets a grid; everything
             # else keeps the one-argument-per-row form. FlexReg's four patch
             # corners are a 2x2 that mirrors the arch, so where a pad sits on

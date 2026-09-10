@@ -649,6 +649,9 @@ class ctkCollapsibleButton(QWidget):
     def __init__(self):
         QWidget.__init__(self)
         self.text = ""
+        # Open unless a panel folds it. Which sections open folded is a
+        # property a test asserts on, so it is recorded rather than ignored.
+        self.collapsed = False
 
 
 class ctkSliderWidget(QObject):
