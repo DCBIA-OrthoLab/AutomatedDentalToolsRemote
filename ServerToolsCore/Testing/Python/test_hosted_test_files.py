@@ -105,12 +105,90 @@ def _stub_slicer():
     util.loaded = []          # what a test asserts the scene received
     util.load_failures = set()  # paths the stubbed readers refuse
 
+    class _Display:
+        """A node's display node: the thing that decides whether it is drawn.
+
+        Starts OFF for a markups node, which is what a file written by the old
+        CLIs actually produces -- Slicer builds the node and draws nothing.
+        """
+
+        def __init__(self, visible=False):
+            self.visible = visible
+
+        def SetVisibility(self, visible):
+            self.visible = bool(visible)
+
+        def GetVisibility(self):
+            return self.visible
+
+    class _Node:
+        """What a reader hands back. Named, because a test asserting which node
+        reached the slice views has to be able to tell two of them apart."""
+
+        # A CBCT's span. The shift is a FRACTION of it, so a test asserting
+        # where the curve landed has to know what it was a fraction of.
+        scalar_range = (-1000.0, 3000.0)
+
+        def __init__(self, kind, path):
+            self.kind, self.path = kind, path
+            # What the scene calls it, which the reader takes from the file.
+            # A DICOM series is opened through one of its slices, so this is
+            # `IMG0001` until someone renames it to the folder the user picked.
+            self.name = os.path.basename(path)
+            self.display = _Display() if kind in ("markups", "model",
+                                                  "segmentation") else None
+
+        def GetName(self):
+            return self.name
+
+        def SetName(self, name):
+            self.name = name
+
+        def GetImageData(self):
+            node = self
+
+            class _Image:
+                @staticmethod
+                def GetScalarRange():
+                    return node.scalar_range
+
+            return _Image()
+
+        def GetDisplayNode(self):
+            return self.display
+
+        def CreateDefaultDisplayNodes(self):
+            if self.display is None:
+                self.display = _Display()
+
+        def __repr__(self):
+            return "<{} {}>".format(self.kind, os.path.basename(self.path))
+
+    util.Node = _Node
+    # What the slice views were last told to show: (background, label, fit).
+    # None until something asks, which is itself the thing to assert -- loading
+    # a node puts it in the scene and decides nothing about what is displayed.
+    util.shown = None
+
+    def _setSliceViewerLayers(background=None, foreground=None, label=None,
+                              fit=False, **kwargs):
+        util.shown = (background, label, fit)
+
+    util.setSliceViewerLayers = _setSliceViewerLayers
+
+    # The nodes themselves, beside the (kind, path) log. A test asserting what
+    # the scene CALLS something needs the node, and a path cannot answer it: a
+    # DICOM series is read from `IMG0001.dcm` and must not be called that.
+    util.nodes = []
+
     def _loader(kind):
         def load(path):
             if path in util.load_failures:
                 raise RuntimeError(f"unreadable {kind}")
             util.loaded.append((kind, path))
-            return object()
+            node = _Node(kind, path)
+            util.nodes.append(node)
+            return node
         return load
 
     util.loadVolume = _loader("volume")
@@ -118,6 +196,237 @@ def _stub_slicer():
     util.loadSegmentation = _loader("segmentation")
     util.loadLabelVolume = _loader("labelmap")
     util.loadTransform = _loader("transform")
+    # ASO's landmarks. Absent here for as long as it was absent from
+    # slicer_io._LOADERS, which is why nothing caught that every ASO run ended
+    # on "No MRML loader registered for result kind 'markups'".
+    util.loadMarkups = _loader("markups")
+
+    # Writing a node OUT, which is how a volume already in the scene satisfies
+    # an input row. Records rather than writes; returns the bool the real one
+    # does, because `export_volume` raises on a falsy answer.
+    util.saved = []
+
+    def _saveNode(node, path, properties=None):
+        util.saved.append((getattr(node, "GetName", lambda: "")(), path))
+        return True
+
+    # {class name: [nodes]}, so a test can put meshes in the scene and not
+    # only volumes -- which is the case that left the Scene button grey.
+    util.scene_nodes = {}
+
+    def _getNodesByClass(class_name):
+        return list(util.scene_nodes.get(class_name, []))
+
+    util.getNodesByClass = _getNodesByClass
+
+    util.saveNode = _saveNode
+    # --- the volume-rendering module, as slicer_io reaches for it -----------
+    class _TransferFunction:
+        """A VTK transfer function, reduced to the points and their width.
+
+        `width` is what tells the two kinds apart in the real API too: a
+        piecewise function's node is (x, value, midpoint, sharpness) and a
+        colour one's is (x, r, g, b, midpoint, sharpness). A shift that walked
+        one and not the other would leave the colours behind the opacity.
+        """
+
+        def __init__(self, points, colour=False):
+            self.points = [list(p) for p in points]
+            self.colour = colour
+
+        def GetColorSpace(self):  # only a colour function has one
+            if not self.colour:
+                raise AttributeError("GetColorSpace")
+            return 0
+
+        def GetSize(self):
+            return len(self.points)
+
+        def GetNodeValue(self, index, values):
+            values[:] = list(self.points[index])
+
+        def SetNodeValue(self, index, values):
+            self.points[index] = list(values)
+
+    class _VolumeProperty:
+        def __init__(self):
+            self.opacity = _TransferFunction([[-1000, 0, 0.5, 0], [300, 1, 0.5, 0]])
+            self.colours = _TransferFunction(
+                [[-1000, 0, 0, 0, 0.5, 0], [300, 1, 1, 1, 0.5, 0]], colour=True)
+
+        def GetScalarOpacity(self):
+            return self.opacity
+
+        def GetRGBTransferFunction(self):
+            return self.colours
+
+    class _PropertyNode:
+        def __init__(self):
+            self.property = _VolumeProperty()
+            self.copiedFrom = None
+            self.name = "VolumeProperty"
+
+        def GetVolumeProperty(self):
+            return self.property
+
+        def GetName(self):
+            return self.name
+
+        def SetName(self, name):
+            self.name = name
+
+        def Copy(self, other):
+            """Takes the source's NAME with it, as the real node does -- which
+            is how a second node called "CT-AAA" ends up in the scene beside
+            the preset the module ships."""
+            self.copiedFrom = other
+            self.name = other
+
+    class _RenderingDisplayNode:
+        def __init__(self):
+            self.propertyNode = _PropertyNode()
+            self.visible = False
+
+        def GetVolumePropertyNode(self):
+            return self.propertyNode
+
+        def SetVisibility(self, visible):
+            self.visible = bool(visible)
+
+    class _RenderingLogic:
+        """The presets live in a scene of their own, loaded ON DEMAND.
+
+        Modelled because that is the trap: `GetPresetByName` looks in that
+        scene without loading it, so a module nobody has opened yet answers
+        nothing and the default curve silently stays.
+        """
+
+        presets = ("CT-AAA", "CT-Bone")
+
+        def __init__(self):
+            self.created = []
+            self.presetsLoaded = False
+
+        def CreateDefaultVolumeRenderingNodes(self, node):
+            display = _RenderingDisplayNode()
+            self.created.append((node, display))
+            self.widget.display = display
+            return display
+
+        def GetPresetsScene(self):
+            self.presetsLoaded = True
+            return object()
+
+        def GetPresetByName(self, name):
+            if not self.presetsLoaded:
+                return None
+            return name if name in self.presets else None
+
+    class _PresetCombo:
+        """The module's preset chooser. Setting it IS how a preset is applied,
+        which is why the module then reads the preset's name back."""
+
+        def __init__(self, panel):
+            self.panel = panel
+            self.current = None
+
+        def setCurrentNode(self, node):
+            self.current = node
+            self.panel.applied.append(("preset", node))
+
+    class _OffsetSlider:
+        """The Shift slider. Widget state with no counterpart in MRML, which is
+        the whole reason it is set here rather than written to a node."""
+
+        def __init__(self, panel):
+            self.panel = panel
+            self._value = 0.0
+
+        @property
+        def value(self):
+            return self._value
+
+        @value.setter
+        def value(self, amount):
+            self._value = amount
+            self.panel.applied.append(("shift", amount))
+
+    class _VisibilityCheckBox:
+        """The module's own Visibility box -- the one a user ends up clicking
+        when a rendering is loaded, correct and switched off."""
+
+        def __init__(self, panel):
+            self.panel = panel
+            self.checked = False
+
+        def setChecked(self, checked):
+            self.checked = bool(checked)
+            self.panel.applied.append(("visible", self.checked))
+
+    class _RenderingWidget:
+        def __init__(self):
+            self.volume = None
+            # Every control touched, in order: applying a preset RESETS the
+            # offset, so a shift set first is thrown away without a word.
+            self.applied = []
+            self.children = {"PresetComboBox": _PresetCombo(self),
+                             "PresetOffsetSlider": _OffsetSlider(self),
+                             "VisibilityCheckBox": _VisibilityCheckBox(self)}
+            self.display = None
+
+        def setMRMLVolumeNode(self, node):
+            self.volume = node
+            self.applied.append(("volume", node))
+            # Instantiating the module settles the rendering's own state: what
+            # was switched on before reaching it is switched off again. This is
+            # exactly the bug -- a rendering loaded, correct and invisible.
+            if self.display is not None:
+                self.display.visible = False
+
+    class _RenderingModule:
+        def __init__(self):
+            self._widget = _RenderingWidget()
+            self._logic = _RenderingLogic()
+            self._logic.widget = self._widget
+
+        def logic(self):
+            return self._logic
+
+        def widgetRepresentation(self):
+            return self._widget
+
+    class _Modules:
+        pass
+
+    slicer.modules = _Modules()
+    slicer.modules.volumerendering = _RenderingModule()
+
+    def _findChild(widget, name):
+        found = getattr(widget, "children", {}).get(name)
+        if found is None:
+            # What Slicer's own does: a name that is not there is an error, not
+            # a None to be used unnoticed.
+            raise RuntimeError("no child named " + name)
+        return found
+
+    util.findChild = _findChild
+
+    class _SliceLogic:
+        """Slicer's own answer to "is this model one of my slice planes".
+
+        The real one matches the node's name against the slice views' pattern,
+        which is why a layout adding `Slice4` is covered without anyone naming
+        it. Reproduced, not stubbed away: the filter under test is precisely the
+        decision to ask this rather than to hardcode three names.
+        """
+
+        @staticmethod
+        def IsSliceModelNode(node):
+            name = getattr(node, "GetName", lambda: "")() or ""
+            return name.endswith(" Volume Slice")
+
+    slicer.vtkMRMLSliceLogic = _SliceLogic
+
     sys.modules["slicer.util"] = util
     slicer.util = util
     return util
@@ -237,6 +546,7 @@ class HostedTestFileTest(unittest.TestCase):
     def setUp(self):
         _Job.started = []
         _util.loaded = []
+        _util.shown = None
         _util.load_failures = set()
         self._real_job = base_widget.BackgroundJob
         base_widget.BackgroundJob = _Job
@@ -260,6 +570,10 @@ class HostedTestFileTest(unittest.TestCase):
         panel._rows = {}
         panel._rowSections = {}
         panel._hiddenArgs = set()
+        # A real build sets this and the next enter() consumes it; this panel
+        # never went through one. See test_panel_sections.
+        panel._collapsePending = False
+        panel._sectionBoxes = {}
         panel._sceneVolumes = {}
         panel._downloadJob = None
         # The rest of what a real __init__ sets and `cleanup()` reads. The
@@ -321,8 +635,8 @@ class HostedTestFileTest(unittest.TestCase):
         self.assertEqual(
             [combo.itemText(i) for i in range(combo.count)],
             [
-                # Names what the list holds; the path field beside it keeps
-                # its own words (see ServerFileInput.CHOOSE_OPTION).
+                # Names what the list holds rather than falling back to the
+                # neutral words (see ServerFileInput.CHOOSE_OPTION).
                 formgen.ServerFileInput.PROMPT_HOSTED,
                 "CBCT_FullyAuto  (folder, 339 MB)",
                 "MG_test_scan.nii.gz  (file, 94 MB)",
@@ -625,9 +939,11 @@ class LoadingPhaseIsSaidOutLoudTest(HostedTestFileTest):
 
         self.assertGreater(sys.modules["slicer"].app.processed, before)
 
-    def test_a_folder_gets_no_scene_line_because_it_is_not_loaded(self):
+    def test_a_cohort_gets_no_scene_line_because_it_is_not_loaded(self):
+        """SEVERAL scans, which is what makes it a cohort. A folder holding one
+        is loaded like the file it contains -- see SoleScanInAFolderTest."""
         self._offer({"name": "cohort", "kind": "folder", "size": 40})
-        self.client.payloads["cohort"] = {"a.nii.gz": b"x"}
+        self.client.payloads["cohort"] = {"a.nii.gz": b"x", "b.nii.gz": b"y"}
 
         self._pick("cohort")
         _Job.started[0].deliver()
@@ -775,10 +1091,10 @@ class TheBreakdownStaysOnThePanelTest(HostedTestFileTest):
         self.assertIn("ready in", self.panel.phases[-1])
         self.assertIn("download", self.panel.phases[-1])
 
-    def test_a_folder_reports_no_scene_phase_because_there_was_none(self):
+    def test_a_cohort_reports_no_scene_phase_because_there_was_none(self):
         """Naming a phase that did not happen is worse than omitting it."""
         self._offer({"name": "cohort", "kind": "folder", "size": 40})
-        self.client.payloads["cohort"] = {"a.nii.gz": b"x"}
+        self.client.payloads["cohort"] = {"a.nii.gz": b"x", "b.nii.gz": b"y"}
 
         self._pick("cohort")
         _Job.started[0].deliver()
@@ -845,6 +1161,94 @@ class NothingIsLeftBehindTest(HostedTestFileTest):
 
 
 
+class LoadResultsCheckBoxTest(unittest.TestCase):
+    """Who gets the "load into the scene" box, and what unticking it does.
+
+    Eight modules built this box by hand, identically apart from the wording,
+    and each repeated the same `isChecked()` guard. `ServerToolWidgetBase` owns
+    both now. What matters is that the box appears exactly where it used to --
+    for a module with something to open -- and nowhere else: a box that cannot
+    load anything is a control that does nothing whichever way it is set.
+    """
+
+    class _Loadable(ServerToolWidgetBase):
+        TOOL_NAME = "AMASSS"
+        _LOADABLE = (("*.nii.gz", "labelmap"),)
+
+    class _NothingToLoad(ServerToolWidgetBase):
+        TOOL_NAME = "Surg_Mov_Pred"
+
+    def _panel(self, cls):
+        panel = cls.__new__(cls)
+        panel._producedFiles = []
+        panel._producedRoot = ""
+        return panel
+
+    def test_a_module_with_loadable_results_gets_the_box(self):
+        panel = self._panel(self._Loadable)
+        layout = qt.QVBoxLayout()
+        panel._addLoadResultsCheckBox(layout)
+
+        self.assertIsNotNone(panel._loadResultsCheckBox)
+        self.assertTrue(panel._loadResultsCheckBox.isChecked(),
+                        "loading is the default; unticking is the deliberate act")
+        self.assertIn(panel._loadResultsCheckBox, layout.widgets)
+
+    def test_a_module_that_can_open_nothing_gets_no_box(self):
+        panel = self._panel(self._NothingToLoad)
+        layout = qt.QVBoxLayout()
+        panel._addLoadResultsCheckBox(layout)
+
+        self.assertIsNone(panel._loadResultsCheckBox)
+        self.assertEqual(layout.widgets, [])
+
+    def test_the_label_names_what_the_tool_produces(self):
+        """The default suits any tool; a module overrides it to say what it
+        actually made, which is what a clinician recognises on the panel."""
+
+        class Named(ServerToolWidgetBase):
+            TOOL_NAME = "CLIC"
+            _LOADABLE = (("*.nii.gz", "labelmap"),)
+            LOAD_RESULTS_LABEL = "Load the segmentations into the scene when done"
+
+        panel = self._panel(Named)
+        panel._addLoadResultsCheckBox(qt.QVBoxLayout())
+        self.assertEqual(panel._loadResultsCheckBox.text,
+                         "Load the segmentations into the scene when done")
+
+    def test_unticking_the_box_loads_nothing(self):
+        _util.loaded = []
+        _util.shown = None
+        panel = self._panel(self._Loadable)
+        panel._addLoadResultsCheckBox(qt.QVBoxLayout())
+        panel._loadResultsCheckBox.setChecked(False)
+        panel._producedFiles = ["/out/scan.nii.gz"]
+
+        panel._maybeLoadResults()
+        self.assertEqual(_util.loaded, [])
+
+    def test_leaving_it_ticked_loads_the_results(self):
+        _util.loaded = []
+        _util.shown = None
+        panel = self._panel(self._Loadable)
+        panel._addLoadResultsCheckBox(qt.QVBoxLayout())
+        panel._producedFiles = ["/out/scan.nii.gz"]
+
+        panel._maybeLoadResults()
+        self.assertEqual(_util.loaded, [("labelmap", "/out/scan.nii.gz")])
+
+    def test_a_panel_that_never_built_the_box_loads_nothing_and_does_not_raise(self):
+        """`_maybeLoadResults` is safe to call from a module that was never
+        offered the box -- which is every module whose _LOADABLE is empty."""
+        _util.loaded = []
+        _util.shown = None
+        panel = self._panel(self._NothingToLoad)
+        panel._producedFiles = ["/out/table.csv"]
+
+        panel._maybeLoadResults()
+        self.assertEqual(_util.loaded, [])
+
+
 class LoadResultsTest(unittest.TestCase):
     """`_loadResults` opens what THIS run produced, not what the folder holds."""
 
@@ -854,9 +1258,11 @@ class LoadResultsTest(unittest.TestCase):
 
     def setUp(self):
         _util.loaded = []
+        _util.shown = None
         _util.infos = []
         self.panel = self._Panel.__new__(self._Panel)
         self.panel._producedFiles = []
+        self.panel._producedRoot = ""
 
     def test_it_opens_only_what_the_archive_held(self):
         """The bug this fixes: results unpack into the folder the user picked,

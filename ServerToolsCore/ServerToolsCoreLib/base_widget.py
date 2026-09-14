@@ -10,6 +10,8 @@ See ARCHITECTURE.md, "How to add a new module in 5 minutes".
 
 import logging
 import fnmatch
+import glob
+import json
 import os
 import re
 import shutil
@@ -43,6 +45,15 @@ _RESULT_KINDS = ("text", "segmentation", "labelmap", "volume", "model", "save_as
 # (ASO's output_suffix does), which is why it is a plain name rather than a
 # separate widget.
 _OUTPUTS_SECTION = "Outputs"
+
+# Where the server files what a supervised chain produced, inside the result
+# archive. Its own, unimportable: `execution/runner.INTERMEDIATE_DIRNAME`.
+_INTERMEDIATE_DIRNAME = "intermediate"
+
+# Result kinds drawn by their own display node rather than by a slice
+# layer. A volume is not one: it is shown by being put in a layer, and
+# its display node governs window/level, not whether it appears.
+_SELF_DISPLAYING_KINDS = ("markups", "model", "segmentation")
 # Sections a panel opens folded. By NAME, because that is what a tool
 # declares -- there is no "advanced" flag on an argument, and inferring it
 # from "every argument here is optional" would fold a section a tool meant
@@ -206,6 +217,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._suggestedOutput = None
         # What the LAST run wrote, from the archive itself. See _loadResults.
         self._producedFiles = []
+        # Where those files were unpacked. Kept so a member's path
+        # INSIDE the archive can be read back -- which is how the
+        # chain's own results are told apart from the run's.
+        self._producedRoot = ""
         # Schema-driven panel layout, all rebuilt wholesale by _buildForm.
         self._sectionBoxes = {}  # {section name: ctkCollapsibleButton}
         self._sectionLayouts = {}  # {section name: QFormLayout}
@@ -213,6 +228,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._rowSections = {}  # {schema_argument_name: section name}
         self._sectionsWithOwnRows = set()  # sections holding a row no argument owns
         self._hiddenArgs = set()  # arguments whose `visible_when` is not satisfied
+        # Set by a build, consumed by the first enter() after it. See
+        # _collapseAdvancedSections for why a fold has to happen twice.
+        self._collapsePending = False
         self._statusBadge = None
         self._statusJob = None
         self._downloadJob = None  # one test-file fetch at a time
@@ -268,6 +286,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         extraLayout = qt.QVBoxLayout()
         rootLayout.addLayout(extraLayout)
         self.addExtraWidgets(extraLayout)
+        # After the module's own widgets, so a module that adds some keeps them
+        # above this one -- which is where every module that hand-built this box
+        # had put it.
+        self._addLoadResultsCheckBox(extraLayout)
 
         self.applyButton = design.primary_button(_("Apply"))
         self.cancelButton = design.danger_button(_("Cancel"))
@@ -338,6 +360,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def enter(self) -> None:
         if self.uiWidget:
             design.apply(self.uiWidget)
+        # The fold the build asked for, applied now that the panel has a parent
+        # and a screen. See _collapseAdvancedSections.
+        if self._collapsePending:
+            self._collapsePending = False
+            self._collapseAdvancedSections()
         # The hosted-file lists are re-read here, not only at setup(). They are
         # server-side state that changes independently of the schema — a model
         # dropped into DATA/<tool>/models/ does not touch /tools — so nothing
@@ -422,6 +449,12 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             design.apply(self.uiWidget)
             self._checkCanApply()
 
+        # Now that the form has a parent. A rebuild triggered while the module
+        # is on screen -- a server that was down at setup() coming back -- never
+        # sees another enter(), so the flag set inside the build would not be
+        # consumed and this is the only chance to fold.
+        self._collapseAdvancedSections()
+
     def _onRetryButton(self) -> None:
         """Rebuild from a fresh /tools fetch. Safe to call from the button's own
         handler: _buildForm hides the old container and defers its destruction
@@ -473,14 +506,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         for sectionName in formgen.sections_of(arguments, extraSections):
             box = ctk.ctkCollapsibleButton()
             box.text = _(sectionName)
-            # Folded shut, not hidden. "Advanced" is the convention's own name
-            # for what a clinician does not need to decide -- a seed, a tile
-            # step, the landmarks someone who already has them goes looking for.
-            # Open by default they sit between the inputs and Apply, so every
-            # reader steps over them; folded, the ones who want them still find
-            # them in one click and nobody else meets them at all.
-            if sectionName in _COLLAPSED_SECTIONS:
-                box.collapsed = True
+            # A section in _COLLAPSED_SECTIONS is folded at the END of this
+            # method, not here -- see `_collapseAdvancedSections`.
             # A section the schema lays out in columns gets a grid; everything
             # else keeps the one-argument-per-row form. FlexReg's four patch
             # corners are a 2x2 that mirrors the arch, so where a pad sits on
@@ -543,6 +570,59 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._wireVisibility(arguments)
 
         self.configureFields()
+
+        self._collapseAdvancedSections()
+        # ... and again the first time this panel is actually on screen.
+        self._collapsePending = True
+
+    def _collapseAdvancedSections(self) -> None:
+        """Fold the sections meant to start folded, once every row exists.
+
+        Folded shut, not hidden. "Advanced" is the convention's own name for
+        what a clinician does not need to decide -- a seed, a tile step, the
+        reference volume someone who needs one goes looking for. Open by default
+        they sit between the inputs and Apply, so every reader steps over them;
+        folded, the ones who want them still find them in one click and nobody
+        else meets them at all.
+
+        Done LAST because a ctkCollapsibleButton hides the children it has at
+        the moment it is collapsed, and nothing afterwards: a row added to an
+        already-folded box is never hidden and draws over the title bar. That is
+        what made AutoMatrix's "Reference volume" look crushed into the
+        "Advanced" header, and it would have hit every later section the same
+        way. configureFields() runs before this, so a module adding its own row
+        to one of these sections is folded away with the rest.
+
+        **And done a SECOND time, on the first enter().** Last within the build
+        is still not late enough: `_buildForm` assembles the whole panel into a
+        detached `QWidget` and only parents it into the module afterwards, so
+        this runs on a tree that has never been shown. ctkCollapsibleButton
+        folds by hiding its children, and hiding a child of a widget Qt has not
+        realised yet does not survive the show that follows -- the box reads as
+        folded while its rows are drawn underneath it. Re-folding once the
+        module is actually on screen is what makes the state stick.
+
+        Once, not on every enter(): a section the user opened must stay open
+        when they leave the module and come back, which is why this is a
+        one-shot flag a build sets and the next enter() consumes rather than a
+        fold applied every time the panel appears.
+
+        **The fold is forced through a real state change**, and that is the
+        whole reason the second attempt works where the first did not.
+        `ctkCollapsibleButton::setCollapsed` returns immediately when the value
+        it is handed is the one it already holds -- so a box folded during the
+        build already believes it is folded, and folding it "again" later runs
+        nothing at all: no child pass, no hiding, the rows stay on screen under
+        a bar that reads as shut. Stepping through False first is what makes
+        CTK run the pass, this time on a widget that has a parent and a screen.
+        Both assignments happen inside one turn of the event loop, so nothing
+        is painted in between.
+        """
+        for sectionName in _COLLAPSED_SECTIONS:
+            box = self._sectionBoxes.get(sectionName)
+            if box is not None:
+                box.collapsed = False
+                box.collapsed = True
 
     # ------------------------------------------------------------------
     # Conditional fields (`visible_when`)
@@ -699,7 +779,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             field = widget
             widget.currentNodeChanged.connect(self._checkCanApply)
         else:
-            widget = formgen.file_widget(spec, mode)
+            widget = formgen.file_widget(spec, mode, arg_name)
             field = formgen.row_widget(widget)
             target.addRow(labelWidget, field)
             formgen.connect_changed(widget, self._checkCanApply)
@@ -715,6 +795,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             setter = getattr(widget, "setHostedCallback", None)
             if setter is not None:
                 setter(lambda name, arg=arg_name: self._onHostedTestFile(arg, name))
+            # Same reasoning for a volume already open in Slicer: choosing one
+            # means writing it to disk, which a widget factory does not do.
 
         # Recorded like a scalar row so `visible_when` can hide a file input
         # too, and so a section holding only file inputs is not mistaken for an
@@ -969,8 +1051,18 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             node = self._sceneVolumes.get(volume())
             if node is None:
                 return None
-            return slicer_io.export_volume(
-                node, workspace.file(f"{self.TOOL_NAME}_{arg_name}.nii.gz")
+            # The format follows the node's own class: a surface written as
+            # `.nii.gz` is a file the tool cannot read.
+            extension = ".nii.gz"
+            kinds = self.SCENE_INPUTS.get(arg_name) or formgen.scene_kinds_for(
+                self._schemaArgument(arg_name), arg_name)
+            for kind in kinds:
+                node_class, candidate = formgen.SCENE_NODE_KINDS[kind]
+                if node.IsA(node_class):
+                    extension = candidate
+                    break
+            return slicer_io.export_node(
+                node, workspace.file(f"{self.TOOL_NAME}_{arg_name}{extension}")
             )
         # Already satisfied by a MODEL the server hosts: nothing to upload,
         # collectArgs sends its name instead (see _serverSideSelections). A
@@ -1040,12 +1132,14 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer.app.processEvents()
             try:
                 self._producedFiles = slicer_io.unzip_folder(result.path, resultDir)
+                self._producedRoot = resultDir
             finally:
                 self._hideProgress()
             os.remove(result.path)
             slicer.util.infoDisplay(_("Results saved to {path}").format(path=resultDir))
         else:
             self._producedFiles = [result.path]
+            self._producedRoot = os.path.dirname(result.path)
             slicer.util.infoDisplay(_("Result saved to {path}").format(path=result.path))
 
     # ------------------------------------------------------------------
@@ -1062,6 +1156,101 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # hundreds of nodes is not a result anyone can read.
     MAX_RESULTS_TO_LOAD = 12
 
+    # {argument: kinds of scene node it can be filled from}, for what the
+    # schema cannot say. `describe.py` publishes no extensions for a packaged
+    # tool, so `formgen.scene_kinds_for` has nothing to narrow by and answers
+    # nothing -- which is right for a spreadsheet argument and wrong for ALI's
+    # `input`, which takes a CBCT or an intraoral surface and lets the tool
+    # decide from the data. Same shape and same reason as FILE_INPUTS: an
+    # override for what the schema is not able to express yet.
+    SCENE_INPUTS = {}
+
+    # The volume-rendering preset a module's scan result should be shown with,
+    # or "" for none. Declared per module because only it knows what its output
+    # IS: a dental CBCT and an MRI want different curves, and the extension has
+    # nothing to tell them apart by -- the file extension certainly cannot.
+    #
+    # Applied to the FIRST volume a run produced, the same one put in the slice
+    # views. A cohort gets one rendering, not forty.
+    VOLUME_RENDERING = ""
+
+    # The wording on that check box. The default suits any tool; a module
+    # overrides it to name what it actually produces, because "the
+    # segmentations" or "the registered volumes" is what a clinician
+    # recognises on the panel, not "the results".
+    LOAD_RESULTS_LABEL = _("Load the results into the scene when done")
+
+    # Set when the box is built, which only happens for a module that declares
+    # _LOADABLE. Nothing else may assume it exists.
+    _loadResultsCheckBox = None
+
+    def _addLoadResultsCheckBox(self, layout) -> None:
+        """Offer to open the results, for a module that can open anything.
+
+        Eight modules built this by hand, identically apart from the wording,
+        and each one repeated the same `isChecked()` guard afterwards. What
+        decides whether it appears is `_LOADABLE`: a module that declares no
+        pattern has nothing to open, so the box would be a control that does
+        nothing whichever way it is set.
+        """
+        if not self._LOADABLE or self._loadResultsCheckBox is not None:
+            # Not None means `addExtraWidgets` already built one -- AREG still
+            # does. Adding a second would put two check boxes on the panel, the
+            # module's wired to its own handler and this one silently winning
+            # the attribute.
+            return
+        self._loadResultsCheckBox = qt.QCheckBox(self.LOAD_RESULTS_LABEL)
+        self._loadResultsCheckBox.setChecked(True)
+        layout.addWidget(self._loadResultsCheckBox)
+
+    def _maybeLoadResults(self) -> None:
+        """Load what the run produced, unless the user unticked the box.
+
+        Safe to call from a module that never built the box: an absent box
+        means nothing was offered, and nothing is loaded.
+        """
+        if self._loadResultsCheckBox and self._loadResultsCheckBox.isChecked():
+            self._loadResults()
+
+    # The report a tool writes beside its results. Empty when the module has
+    # none. Named rather than derived from TOOL_NAME, because two spellings are
+    # in use across the tools -- `<Tool>_report.json` and `run_report.json` --
+    # and a module must be able to say which one it gets.
+    RUN_REPORT = ""
+
+    @classmethod
+    def _readRunReport(cls, outputDir: str):
+        """This run's report, or None when there is not a readable one.
+
+        Never fatal: the results themselves are already on disk and are what
+        the user asked for. A missing or malformed report costs them the
+        summary, not the run -- which is why every failure here returns None
+        instead of raising.
+
+        Looked for at the top of `outputDir` first, then anywhere beneath it: a
+        tool that mirrors its input tree files the report beside the results
+        rather than at the root. Matches are sorted, so a run that somehow
+        produced two reports picks the same one every time.
+        """
+        if not cls.RUN_REPORT:
+            return None
+
+        path = os.path.join(outputDir, cls.RUN_REPORT)
+        if not os.path.exists(path):
+            found = sorted(glob.glob(
+                os.path.join(outputDir, "**", cls.RUN_REPORT), recursive=True))
+            if not found:
+                logger.warning("No %s was produced by this run", cls.RUN_REPORT)
+                return None
+            path = found[0]
+
+        try:
+            with open(path, encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, ValueError) as exc:
+            logger.warning("Could not read %s: %s", cls.RUN_REPORT, exc)
+            return None
+
     def _loadResults(self) -> None:
         """Open what THIS run produced.
 
@@ -1076,6 +1265,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         found = [
             (path, kind)
             for path in self._producedFiles
+            if not self._isIntermediate(path)
             for pattern, kind in self._LOADABLE
             if fnmatch.fnmatch(os.path.basename(path), pattern)
         ]
@@ -1093,15 +1283,128 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
 
         failed = []
+        opened = []
         for path, kind in found:
             try:
-                slicer_io.load_result(path, kind)
+                opened.append((kind, slicer_io.load_result(path, kind)))
             except Exception as exc:  # one bad file must not lose the others
                 failed.append("{}: {}".format(os.path.basename(path), exc))
+        self._showLoadedResults(opened)
         if failed:
             slicer.util.errorDisplay(
                 _("Some results could not be loaded:\n{details}").format(
                     details="\n".join(failed)))
+
+    def _showLoadedResults(self, opened: list) -> None:
+        """Put what was just loaded in front of the user.
+
+        Loading a node adds it to the scene; it does not decide what the slice
+        views show. ASO's oriented CBCT arrived in the scene and the views kept
+        whatever was there before -- to a clinician that reads as "only the
+        landmarks loaded", with the 102 MB volume sitting in the Data module
+        where nobody thought to look.
+
+        Which layer a result belongs in is what `_LOADABLE`'s kind already
+        says: a grey scan is a background, labelled voxels are a label layer.
+        The FIRST of each is chosen, in the archive's own order, because a
+        cohort of forty offers no better answer than a deterministic one.
+
+        Best effort: the results are on disk and in the scene either way, so a
+        view that will not cooperate must not turn a finished run into an
+        error.
+        """
+        for kind, node in opened:
+            self._makeVisible(kind, node)
+
+        volumes = [node for kind, node in opened
+                   if kind == "volume" and node is not None]
+        background = volumes[0] if volumes else None
+        label = next((node for kind, node in opened
+                      if kind == "labelmap" and node is not None), None)
+        if background is None and label is None:
+            # Models, markups and segmentations carry their own display node
+            # and show themselves; there is no slice layer to put them in.
+            return
+        try:
+            slicer.util.setSliceViewerLayers(
+                background=background, label=label, fit=True)
+        except Exception as exc:  # noqa: BLE001 - a view is never worth a failure
+            logger.warning("Could not show the loaded results: %s", exc)
+
+        # ONE scan, or none. A cohort of forty would have one of them rendered
+        # and the other thirty-nine not, with nothing on screen saying which --
+        # a 3D view that shows a patient the clinician did not choose is worse
+        # than a 3D view that shows nothing. They are all in the slice views
+        # and on disk either way.
+        if len(volumes) == 1:
+            self._renderScan(volumes[0])
+
+    def _renderScan(self, node) -> None:
+        """Show one scan in 3D, with the preset this module named.
+
+        Used for a RESULT and for an input the clinician just picked: both are
+        one scan going into an empty 3D view, and a module that works on CBCTs
+        wants the same curve either way.
+
+        Best effort: the scan is in the scene and in the slice views whatever
+        happens here.
+        """
+        if not self.VOLUME_RENDERING or node is None:
+            return
+        try:
+            slicer_io.show_volume_rendering(node, self.VOLUME_RENDERING)
+        except Exception as exc:  # noqa: BLE001 - never worth failing a run
+            logger.warning("Could not render %s in 3D: %s", self.VOLUME_RENDERING, exc)
+
+    @staticmethod
+    def _makeVisible(kind: str, node) -> None:
+        """Switch a self-displaying result's display node on.
+
+        Markups, models and segmentations are drawn by their own display node
+        rather than by a slice layer, and that node can arrive OFF: a markups
+        file carries `display.visibility` and both original CLIs wrote `false`,
+        so Slicer built the node, listed it, and drew nothing. The tools write
+        `true` now -- but every file produced before that still says otherwise,
+        and re-running on one is exactly what a clinician does.
+
+        Asked for explicitly here because the user ticked "load the results":
+        that is a request to SEE them, and a file's own preference cannot be
+        what decides whether a run appears to have produced anything.
+        """
+        if node is None or kind not in _SELF_DISPLAYING_KINDS:
+            return
+        try:
+            display = node.GetDisplayNode()
+            if display is None:
+                node.CreateDefaultDisplayNodes()
+                display = node.GetDisplayNode()
+            if display is not None:
+                display.SetVisibility(True)
+        except Exception as exc:  # noqa: BLE001 - never worth failing a run
+            logger.warning("Could not show a loaded %s: %s", kind, exc)
+
+    def _isIntermediate(self, path: str) -> bool:
+        """Whether this file is a CHAIN's output rather than this run's.
+
+        A tool that calls other tools can be asked to return what they produced
+        too; the server files those under `intermediate/<NN>_<tool>/` inside the
+        archive. They are there to be looked at deliberately -- a prediction
+        checked before the thing built on top of it is trusted -- not to be
+        poured into the scene beside the results. Loading them doubles what a
+        clinician sees and makes the run's own output the harder half to find.
+
+        The directory name is the server's (`runner.INTERMEDIATE_DIRNAME`), and
+        this side cannot import it: written down, and pinned by a test naming
+        the same string.
+        """
+        if not self._producedRoot:
+            return False
+        try:
+            relative = os.path.relpath(path, self._producedRoot)
+        except ValueError:  # different drive on Windows; not ours then
+            return False
+        first = relative.replace("\\", "/").split("/")[0]
+        return first == _INTERMEDIATE_DIRNAME
 
     def _suggestOutputFolder(self) -> None:
         """Fill the output folder in, so Apply works on a panel nobody set up.
@@ -1512,37 +1815,65 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._hideProgress()
 
     def _previewPickedFile(self, arg_name: str) -> None:
-        """Put a picked single file in the scene, once.
+        """Put what the user just picked in the scene, once."""
+        widget = self._inputWidgets.get(arg_name)
+        path = getattr(widget, "currentPath", "") if widget is not None else ""
+        if self._showInScene(arg_name, path):
+            self._showPhase("")
 
-        Three things it deliberately does not do. It never loads a FOLDER: a
-        forty-patient cohort would put hundreds of nodes in the scene, which is
-        worse than showing nothing -- batches are the run's job, not the
-        picker's. It never loads the same path twice for one argument, or
-        re-picking would stack copies. And it never fails a pick:
-        `slicer_io.load_input` swallows a reader Slicer refuses, because the
-        input is already filled in and the run works either way.
+    def _showInScene(self, arg_name: str, path: str, label: str = "") -> bool:
+        """Show what this row points at, once. True when something was loaded.
+
+        The ONE answer to "should the user see what they just chose", for both
+        halves of the row -- a path picked in the file dialog and a test file
+        downloaded from the server. Having had one each is exactly how a
+        downloaded scan ended up sitting in the scene unrendered while a picked
+        one rendered, and the two kept drifting because nothing said they were
+        the same question.
+
+        Three things it deliberately does not do. It never loads a COHORT:
+        forty patients would put hundreds of nodes in the scene, which is worse
+        than showing nothing -- batches are the run's job, not the picker's. It
+        never loads the same pick twice for one argument, or re-choosing would
+        stack copies. And it never fails a pick: `slicer_io.load_input` swallows
+        a reader Slicer refuses, because the input is already filled in and the
+        run works either way.
 
         The phase message is not decoration. Slicer spends around twenty
         seconds decompressing and building a 94 MB scan, on the main thread;
         without a line saying so, choosing a file looks like a freeze.
         """
-        widget = self._inputWidgets.get(arg_name)
-        path = getattr(widget, "currentPath", "") if widget is not None else ""
-        if not path or os.path.isdir(path):
-            return
+        if not path:
+            return False
+        # A folder is one scan or a cohort, and only its contents say which.
+        # `sole_scan_in` answers None for the cohort, which shows nothing --
+        # the behaviour every folder used to get unconditionally.
+        folder = os.path.isdir(path)
+        scan = slicer_io.sole_scan_in(path) if folder else path
+        if not scan or slicer_io.scene_kind_for(scan) is None:
+            # A .zip, a .csv, a cohort: nothing a scene can hold as one thing,
+            # and saying "Loading..." about it would be a lie.
+            return False
+        # Keyed on what the USER chose, never on the file resolved out of it: a
+        # folder is re-picked as the folder, and two of them can hold scans
+        # with the same name.
         if self._scenePreviews.get(arg_name) == path:
-            return
-        if slicer_io.load_kind_for(path) is None:
-            # A .zip, a .csv, a DICOM directory: nothing a scene can hold, and
-            # saying "Loading..." about it would be a lie.
-            return
+            return False
 
         self._scenePreviews[arg_name] = path
         self._showPhase(_("Loading {name} into the scene...").format(
-            name=os.path.basename(path)))
+            name=label or os.path.basename(path.rstrip(os.sep))))
         slicer.app.processEvents()
-        slicer_io.load_input(path)
-        self._showPhase("")
+        # The folder's name, when the scan came out of one: a DICOM series is
+        # opened through one of its slices and would otherwise arrive called
+        # `IMG0001`, which names nothing anyone picked.
+        node = slicer_io.load_input(
+            scan, os.path.basename(path.rstrip(os.sep)) if folder else "")
+        # One scan, whatever the row was pointed at: the cohort was refused
+        # above, so rendering this cannot flood anything.
+        if slicer_io.scene_kind_for(scan) == "volume":
+            self._renderScan(node)
+        return True
 
     def _showPhase(self, message: str) -> None:
         """Put a message on the panel immediately, timer running or not.
@@ -1683,10 +2014,15 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         name, and the dropdown must not let one silently shadow the other.
         """
         volumes = {}
-        try:
-            nodes = slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
-        except Exception:
-            nodes = []
+        nodes = []
+        # Every kind the scene can answer an argument with, not scalar volumes
+        # only: ALI's `input` takes an intraoral surface just as readily, and a
+        # scene holding nothing but meshes used to offer nothing at all.
+        for node_class, _extension in formgen.SCENE_NODE_KINDS.values():
+            # The user's own data, not the scene's furniture: every slice view
+            # keeps a model node for the plane it draws in 3D, and all three
+            # were being offered as surfaces (slicer_io.scene_nodes).
+            nodes.extend(slicer_io.scene_nodes(node_class))
         for node in nodes:
             name = node.GetName()
             unique, counter = name, 2
@@ -1698,8 +2034,24 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         for arg_name, widget in self._inputWidgets.items():
             setter = getattr(widget, "setVolumeChoices", None)
-            if setter is not None and formgen.accepts_volume(self._schemaArgument(arg_name)):
-                setter(list(volumes))
+            if setter is None:
+                continue
+            # Narrowed per ARGUMENT: a scan input is offered scans, a mesh
+            # input meshes, and one declaring neither is offered both. A `.csv`
+            # argument gets nothing.
+            kinds = self.SCENE_INPUTS.get(arg_name) or formgen.scene_kinds_for(
+                self._schemaArgument(arg_name), arg_name)
+            classes = [formgen.SCENE_NODE_KINDS[kind][0] for kind in kinds]
+            label = getattr(widget, "setSceneLabel", None)
+            if label is not None:
+                label(formgen.scene_label_for(kinds))
+            supported = getattr(widget, "setSceneSupported", None)
+            if supported is not None:
+                supported(bool(classes))
+            setter([
+                name for name, node in volumes.items()
+                if any(node.IsA(node_class) for node_class in classes)
+            ] if classes else [])
         self._checkCanApply()
 
     # ------------------------------------------------------------------
@@ -1981,35 +2333,31 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             formgen.set_local_path(widget, path)
         self._checkCanApply()
 
-        # A FOLDER is deliberately never loaded: a forty-patient cohort would
-        # put hundreds of nodes in the scene, which is worse than showing
-        # nothing at all.
-        loaded_into_scene = False
         # `set_local_path` above changed the row, which fires the same preview a
-        # hand-picked file gets -- so by the time this line runs the scan may
+        # hand-picked path gets -- so by the time this line runs the scan may
         # ALREADY be in the scene, and loading it again would put a second copy
         # of the same patient there. `_scenePreviews` is the one record of what
-        # has been shown, whichever half of the panel showed it.
-        if not os.path.isdir(path) and self._scenePreviews.get(arg_name) != path:
-            self._scenePreviews[arg_name] = path
-            # Said out loud, because this is the slow half and it does not look
-            # like it: fetching a 94 MB scan takes 0.3 s over ranged parts,
-            # then Slicer spends twenty seconds decompressing it and building
-            # the image. A progress line still reading "Downloading..." while
-            # that happens makes a fast transfer look like a stalled one.
-            self._showPhase(_("Loading {name} into the scene...").format(name=name))
-            slicer.app.processEvents()
-            slicer_io.load_input(path)
-            loaded_into_scene = True
-        elif not os.path.isdir(path):
-            # Shown by the preview, and still worth reporting as scene time.
+        # has been shown, whichever half of the panel showed it, and
+        # `_showInScene` is the one place that reads it. This call is what makes
+        # a downloaded scan render exactly as a picked one does; they used to be
+        # two code paths, and only one of them rendered.
+        #
+        # `name` is said out loud because this is the slow half and does not
+        # look like it: fetching a 94 MB scan takes 0.3 s over ranged parts,
+        # then Slicer spends twenty seconds decompressing it and building the
+        # image. A progress line still reading "Downloading..." while that
+        # happens makes a fast transfer look like a stalled one.
+        loaded_into_scene = self._showInScene(arg_name, path, label=name)
+        if not loaded_into_scene and self._scenePreviews.get(arg_name) == path:
+            # Already shown by the preview the path change fired, and still
+            # worth reporting as scene time -- the seconds were spent.
             loaded_into_scene = True
         # The breakdown goes where a user can actually see it. "It took more
         # than ten seconds" is not a bug report anyone can act on; "download
         # 0.3s, unpack 1.2s, scene 8.4s" is.
         timings = list(getattr(self, "_lastTestFileTimings", []))
         if loaded_into_scene:
-            # Only when there WAS one. A folder is never loaded, and reporting
+            # Only when there WAS one. A cohort is never loaded, and reporting
             # `scene 0.0s` for it would name a phase that did not happen.
             timings.append(("scene", time.perf_counter() - load_started))
         total = sum(seconds for _label, seconds in timings)

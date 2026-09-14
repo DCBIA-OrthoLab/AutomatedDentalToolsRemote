@@ -444,6 +444,89 @@ def hint_label(text: str) -> qt.QLabel:
     return label
 
 
+def selection_label(text: str) -> qt.QLabel:
+    """The line under an input row saying WHAT it currently holds.
+
+    Deliberately not `hint_label`, and that distinction is the point. A hint is
+    explanatory text a reader may skip; this is the only feedback that a choice
+    registered at all -- there is no path field any more, and a dropdown
+    returns to its prompt as soon as it is picked. Muted and 8pt, it read as a
+    footnote, and a clinician who had just chosen a scan could not tell whether
+    the panel had taken it.
+
+    Raised twice before it read as feedback. 8pt muted was a footnote; 10pt
+    was still close enough to the surrounding text to be scanned past. It is
+    12pt and semi-bold now -- the largest text on the row, which is what it
+    should be: everything above it is a control offering a choice, and this is
+    the answer.
+
+    It stays a plain wrapped label all the same. It is a statement of fact,
+    not a control, so it gets no border and no fill: a filled block here would
+    read as a third thing to click, beside two dropdowns and two buttons.
+    """
+    t = tokens()
+    label = qt.QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet(
+        f"color: {t['TEXT']}; font-size: 12pt; font-weight: 600;"
+        f" padding-top: {SPACING_XS}px; padding-bottom: {SPACING_SM}px;"
+    )
+    return label
+
+
+# The two captions on a multichoice's bulk-select row, and on the per-tab pair
+# inside a tabbed one -- ONE pair for what is one action in two places. They had
+# drifted into two wordings and two casings ("Select none" above the options,
+# "Deselect All" inside a tab), which made the same button look like two
+# different controls depending on the layout the tool happened to ask for.
+#
+# Here rather than in formgen because they are the CLIENT's own words: formgen
+# renders no literal text of its own, every label it shows having come from the
+# tool's schema.
+SELECT_ALL_TEXT = "Select all"
+SELECT_NONE_TEXT = "Deselect all"
+
+
+def ghost_button(text: str) -> qt.QPushButton:
+    """A small outlined button for a bulk command acting on the field below it —
+    the Select all / Deselect all pair above a group of check boxes.
+
+    Neither of the two it sits between, and for a reason each:
+
+    `link_button` is what this was, and an underlined caption is this
+    extension's vocabulary for something that takes you ELSEWHERE — Server
+    logs, Check for updates. These take you nowhere; they act on the very list
+    under them. Two underlined captions side by side also read as one broken
+    sentence rather than as two commands, which is what made the row look
+    unfinished.
+
+    `primary_button` is what the tabbed layout uses, and it earns it: there the
+    pair spans a tab and is the only bulk control in it. Out here, a filled blue
+    slab sitting a few rows above Apply competes with the one button that starts
+    a run.
+
+    An outline says "a control, and a quiet one", which is exactly what this is.
+    Sized to its text, not stretched: it commands the group, it is not part of
+    it.
+    """
+    t = tokens()
+    button = qt.QPushButton(text)
+    button.setStyleSheet(
+        f"QPushButton {{ background: transparent; border: 1px solid {t['BORDER']};"
+        f" border-radius: 4px; color: {t['TEXT_MUTED']}; font-weight: 600;"
+        # Padding, never a fixed height: the text is the panel's own size (no
+        # font-size override at all) so it reads at a glance, and the button is
+        # kept compact by hugging it rather than by shrinking it.
+        f" padding: {SPACING_XS}px {SPACING_MD}px; }}"
+        f"QPushButton:hover {{ border-color: {t['PRIMARY']}; color: {t['PRIMARY']};"
+        f" background-color: {t['SURFACE_HOVER']}; }}"
+        f"QPushButton:pressed {{ background-color: {t['SURFACE']};"
+        f" color: {t['PRIMARY_PRESSED']}; }}"
+    )
+    button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+    return button
+
+
 def link_button(text: str) -> qt.QPushButton:
     """A small, flat, text-only button for a secondary action next to a field —
     the All / None / Default row above a group of check boxes.

@@ -44,9 +44,21 @@ class TempWorkspace:
 
 
 def export_volume(volume_node, dest_path: str) -> str:
-    ok = slicer.util.saveNode(volume_node, dest_path)
+    return export_node(volume_node, dest_path)
+
+
+def export_node(node, dest_path: str) -> str:
+    """Write any savable scene node out, and return where it went.
+
+    Not volumes only: `saveNode` writes a model just as readily, and a scene
+    pick has to answer for whatever the argument accepts -- ALI's `input` takes
+    a CBCT or an intraoral surface, and declares no extensions precisely
+    because the tool decides from the data.
+    """
+    ok = slicer.util.saveNode(node, dest_path)
     if not ok:
-        raise IOError(f"Failed to export volume to {dest_path}")
+        raise IOError(f"Failed to export {getattr(node, 'GetName', lambda: '')()} "
+                      f"to {dest_path}")
     return dest_path
 
 
@@ -161,9 +173,9 @@ def unzip_folder(zip_path: str, dest_dir: str) -> list:
 
 # What a downloaded test file can be shown as, by extension. The point of
 # downloading a hosted test file rather than naming it is that the clinician
-# gets to LOOK at it beside the panel, so a single file is put in the scene as
-# soon as it lands. A FOLDER never is: a forty-patient cohort would flood the
-# scene, which is why base_widget asks the entry's `kind` first.
+# gets to LOOK at it beside the panel, so a single scan is put in the scene as
+# soon as it lands. A COHORT never is: forty patients would flood the scene.
+# `sole_scan_in` below is what tells those two apart for a folder.
 #
 # Distinct from formgen._VOLUME_EXTENSIONS on purpose. That table answers "can
 # a volume already in the scene satisfy this argument"; this one answers "what
@@ -192,7 +204,7 @@ def documents_dir() -> str:
     `~/Documents` on Linux and macOS, `C:\\Users\\<name>\\Documents` on Windows --
     and whatever a localised Windows calls it, which is exactly why Qt is asked
     instead of a path being built by hand. The same call every other module in
-    this extension already makes (AREG, GreedyReg, MedX, VFACE).
+    this extension already makes (AREG, GreedyReg, VFACE).
 
     Falls back to the home directory: a Qt with no documents location is not a
     reason to have no default at all.
@@ -229,9 +241,12 @@ def default_output_folder() -> str:
 
 
 def load_kind_for(path: str):
-    """"volume", "model", or None for a file with nothing to put in a scene
-    (a .zip, a .csv, a DICOM directory). Extension-based, longest match first
-    so `.nii.gz` never resolves as `.gz`."""
+    """"volume", "model", or None for a file that is neither (a .zip, a .csv, a
+    single DICOM slice). Extension-based, longest match first so `.nii.gz` never
+    resolves as `.gz`.
+
+    What a file IS, which is what counting a folder's contents needs. What
+    OPENING it produces is `scene_kind_for`, and the two differ on DICOM."""
     lowered = path.lower()
     best, best_kind = "", None
     for extensions, kind in _INPUT_LOAD_KINDS:
@@ -241,23 +256,164 @@ def load_kind_for(path: str):
     return best_kind
 
 
-def load_input(path: str):
+# A DICOM series is a DIRECTORY of single-slice files, so it is one scan spread
+# over hundreds of paths -- the one input shape where counting files answers the
+# wrong question entirely. Slicer reads the whole series from any one of them
+# (its "archetype"): measured on ASO's own test folder, 365 slices became one
+# 512x512x365 volume in 1.0 s.
+#
+# By extension only. A DICOM file is identified properly by the "DICM" magic at
+# offset 128, and plenty of real archives ship slices with no extension at all
+# -- but confirming that means opening every file in the folder to decide
+# whether to show a preview, which is a lot of I/O to spend on a courtesy. Every
+# hosted test file uses `.dcm`; a folder of extensionless slices is simply not
+# previewed, exactly as it is not today.
+_DICOM_EXTENSION = ".dcm"
+
+
+def sole_scan_in(folder: str):
+    """The one scan a folder holds, as a path to open -- or None if it is not one.
+
+    This is the rule that decides whether a folder appears in the scene, and it
+    is deliberately about the SCAN COUNT rather than the file count. "A folder
+    is never loaded" was the first version, and it was too blunt by half: every
+    CBCT test file except ALI's is a folder, and most of them hold exactly one
+    patient, so choosing one showed nothing and read as a broken button. What
+    must never happen is a forty-patient cohort landing in the scene at once,
+    and that is what is actually checked here.
+
+    Exactly one volume wins. Failing that, exactly one DICOM directory. Failing
+    that -- no volume at all -- one lone surface, so a folder holding a single
+    mesh behaves like the file it contains. Anything else is a cohort (or
+    nothing a scene can hold) and answers None, which shows nothing.
+
+    Note the priority: AutoMatrix's test folder holds one CBCT *and* one surface,
+    and the scan is what a clinician opened that folder to see. Counting them
+    together would make it two objects and show neither.
+
+    Metadata only -- nothing is read, nothing is opened -- so this costs a walk
+    of the tree and no I/O.
+    """
+    volumes, models, dicom_dirs = [], [], {}
+    try:
+        for directory, _subdirs, names in os.walk(folder):
+            for name in sorted(names):
+                if name.startswith("."):
+                    continue
+                path = os.path.join(directory, name)
+                kind = load_kind_for(name)
+                if kind == "volume":
+                    volumes.append(path)
+                elif kind == "model":
+                    models.append(path)
+                elif name.lower().endswith(_DICOM_EXTENSION):
+                    # One entry per DIRECTORY, keeping its first slice: that is
+                    # the archetype to open, and the directory count is the scan
+                    # count. AREG's DICOM test file is `T1/C_0001/` and
+                    # `T2/C_0001/` -- two timepoints, 884 files, and merging
+                    # them into one volume is precisely the accident this
+                    # counts its way out of.
+                    dicom_dirs.setdefault(directory, path)
+    except OSError:
+        return None
+
+    if len(volumes) == 1:
+        return volumes[0]
+    if not volumes and len(dicom_dirs) == 1:
+        return next(iter(dicom_dirs.values()))
+    if not volumes and not dicom_dirs and len(models) == 1:
+        return models[0]
+    return None
+
+
+def scene_nodes(node_class: str) -> list:
+    """The nodes of `node_class` a user would recognise as their OWN data.
+
+    `getNodesByClass` answers with the whole scene, and a Slicer scene holds
+    more than what was loaded into it. Every slice view keeps a model node for
+    the plane it draws in the 3D view -- `Red Volume Slice`, `Yellow Volume
+    Slice`, `Green Volume Slice` -- so a surface argument's scene dropdown
+    offered three rectangles nobody put there, that no tool could use, and that
+    sat above the meshes the user actually loaded.
+
+    Slicer answers that question itself (`vtkMRMLSliceLogic.IsSliceModelNode`),
+    and deferring to it is the point: the three names are only the default
+    layout's, and a custom one adds `Slice4`, `Compare1` and the rest. The name
+    list would have to grow with Slicer; this does not.
+
+    `GetHideFromEditors` is the general case beside it -- the flag Slicer sets
+    on a node that is scaffolding rather than data. A node carrying it has
+    already been told not to appear in a chooser, and this is a chooser.
+    """
+    try:
+        found = slicer.util.getNodesByClass(node_class)
+    except Exception:  # noqa: BLE001 - a class this build lacks is not fatal
+        return []
+    return [node for node in found if not _is_scaffolding(node)]
+
+
+def _is_scaffolding(node) -> bool:
+    """Whether the scene made this node for itself rather than for the user.
+
+    Every probe is guarded: this runs against whatever MRML the host Slicer
+    ships, and a missing method must cost one filter rather than the dropdown.
+    An unanswerable question is answered "it is data", which at worst offers one
+    node too many -- the failure the other way round hides a user's own mesh.
+    """
+    try:
+        if node.GetHideFromEditors():
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return bool(slicer.vtkMRMLSliceLogic.IsSliceModelNode(node))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def scene_kind_for(path: str):
+    """What OPENING this path puts in the scene: "volume", "model", or None.
+
+    `load_kind_for` answers what a file IS, which is what counting a folder's
+    contents needs. This answers what opening it produces, and the two differ on
+    exactly one input: a DICOM slice is not a volume, but opening it loads the
+    series around it, which is. Counting with this one would make a 365-slice
+    series read as 365 scans; opening with the other one would show nothing.
+    """
+    kind = load_kind_for(path)
+    if kind is None and path.lower().endswith(_DICOM_EXTENSION):
+        return "volume"
+    return kind
+
+
+def load_input(path: str, name: str = ""):
     """Show a downloaded input file in the scene, if it is something a scene
     can hold. Returns the loaded node, or None when the file is not one.
+
+    `name` renames what was loaded, for the one case where the file's own name
+    is not the scan's: a DICOM series is opened through one of its slices, so it
+    would otherwise arrive in the scene called `IMG0001`. The folder is what the
+    user picked and what they will look for.
 
     **Never raises.** This is a courtesy - the input is already filled in and
     the run works whether or not the scene shows anything - so a reader that
     Slicer refuses (a mesh in a dialect its loader does not take, a truncated
     volume) is a log line, not a failed pick.
     """
-    kind = load_kind_for(path)
+    kind = scene_kind_for(path)
     if kind is None:
         return None
     try:
-        return load_result(path, kind)
+        node = load_result(path, kind)
     except Exception:  # noqa: BLE001 - a preview must never break the input
         logger.warning("Could not load %s into the scene as a %s", os.path.basename(path), kind)
         return None
+    if node is not None and name:
+        try:
+            node.SetName(name)
+        except Exception as exc:  # noqa: BLE001 - a name is never worth a failure
+            logger.warning("Could not rename the loaded scan: %s", exc)
+    return node
 
 
 _LOADERS = {
@@ -273,7 +429,143 @@ _LOADERS = {
     "volume": lambda path: slicer.util.loadVolume(path),
     "model": lambda path: slicer.util.loadModel(path),
     "transform": lambda path: slicer.util.loadTransform(path),
+    # A `.mrk.json`. Missing until a run actually produced one: ASO has
+    # declared ("*.mrk.json", "markups") since it was converted, and every run
+    # with "load the results" ticked ended on "No MRML loader registered for
+    # result kind 'markups'" -- the landmarks were on disk and correct, and the
+    # panel said the run had failed to deliver them. ALI had the call all
+    # along, in a loader of its own.
+    "markups": lambda path: slicer.util.loadMarkups(path),
 }
+
+
+# How far the transfer functions are shifted after a preset is applied, in the
+# units Slicer's own Shift slider reads in -- because it IS that slider we set.
+#
+# Set by eye on one scanner: on a CBCT out of this pipeline, with intensities
+# spanning -6266 to 19272, 580 is the value that looked right. Absolute rather
+# than a fraction of that span, and the measurement is why: a preset's curve is
+# written in absolute units (CT-AAA is defined in Hounsfield), so moving it by a
+# number of units is the natural operation. 60% of that scan's range would have
+# been 15323 units and shown nothing at all.
+VOLUME_RENDERING_SHIFT = 580.0
+
+# The two controls driven inside the Volume Rendering module, by the object
+# names its own .ui gives them. Named constants because they are the one part
+# of this that a Slicer release could rename under us.
+_PRESET_COMBO = "PresetComboBox"
+_PRESET_OFFSET_SLIDER = "PresetOffsetSlider"
+_VISIBILITY_CHECKBOX = "VisibilityCheckBox"
+
+
+def show_volume_rendering(node, preset: str, shift: float = None):
+    """Turn a loaded scan into a 3D rendering, with `preset` applied.
+
+    Loading a volume puts it in the slice views and nothing more; the 3D view
+    stays empty until a volume-rendering display node exists and is switched
+    on. For a tool whose whole output IS a scan -- an orientation, a
+    registration -- that empty 3D view is what a clinician reads as "it did not
+    work".
+
+    **Driven through the module's own widgets, not by writing to the nodes.**
+    Writing the curve directly does produce the right image, and that is what
+    this did first -- but the preset list and the Shift slider are the module's
+    own state, with no counterpart in MRML (`offsetPreset` is a widget slot;
+    the logic library holds no offset at all). So the picture was right while
+    the panel said "no preset, shift 0", and the next person to touch the
+    slider would have started from a curve that was already moved without
+    anything saying by how much.
+
+    Setting the two controls instead means Slicer applies both through its own
+    code path: the module reads CT-AAA and 580, and the shift cannot drift from
+    what that slider would have done.
+
+    Which preset suits a result is the MODULE's to say (see
+    `ServerToolWidgetBase.VOLUME_RENDERING`): a dental CBCT and an MRI want
+    different curves, and this library has no way to tell them apart.
+
+    Returns the display node, or None when this build has no volume-rendering
+    module -- which is not an error, only a scene without a 3D rendering in it.
+    """
+    module = getattr(slicer.modules, "volumerendering", None)
+    if module is None or node is None:
+        return None
+    logic = module.logic()
+
+    display = logic.CreateDefaultVolumeRenderingNodes(node)
+    if display is None:
+        return None
+
+    # The presets live in a scene of their own, loaded ON DEMAND, and
+    # `GetPresetByName` looks in it without loading it: a module nobody has
+    # opened yet answers nothing, and the default curve silently stays.
+    try:
+        logic.GetPresetsScene()
+    except Exception as exc:  # noqa: BLE001 - the lookup below says what happened
+        logger.warning("Could not load the volume rendering presets: %s", exc)
+
+    found = logic.GetPresetByName(preset)
+    if found is None:
+        # Named by a module, installed by this build: one that is not there
+        # leaves the default curve rather than no rendering at all.
+        logger.warning("No volume rendering preset named '%s'; keeping the default", preset)
+    else:
+        _drive_module(module, node, found,
+                      VOLUME_RENDERING_SHIFT if shift is None else shift)
+
+    # LAST, and on the node itself. Reaching the module instantiates its widget,
+    # which reacts to the volume being selected and settles the rendering's own
+    # state -- a visibility set before that is simply undone, which is what left
+    # a rendering loaded, correct and switched off, waiting for someone to find
+    # the check box. Setting it here too costs nothing and does not depend on a
+    # Qt object name holding still.
+    display.SetVisibility(True)
+    return display
+
+
+def _drive_module(module, node, preset, shift: float) -> None:
+    """Set the module's volume, preset, Shift and Visibility, in that order.
+
+    All four, because all four are the module's own state: a rendering can be
+    loaded, carry the right curve and still be switched off, which is a 3D view
+    that looks broken with nothing to say why.
+
+    The order is not cosmetic and each step was paid for:
+
+    * the VOLUME first -- the module applies a preset to whatever IS selected
+      in it, and the Shift slider's range is computed from that volume, so a
+      value set earlier is clamped against the wrong scan;
+    * the SHIFT after the preset -- applying a preset resets the offset, so a
+      shift set first is thrown away without a word;
+    * VISIBILITY last -- reaching the module instantiates its widget, which
+      reacts to the volume being selected and settles the rendering's state.
+
+    Best effort, and loudly so. If a Slicer release renames one of these
+    controls the rendering is still there, with the default curve, and the log
+    says which name went missing rather than leaving a scene nobody can explain.
+    """
+    try:
+        widget = module.widgetRepresentation()
+        widget.setMRMLVolumeNode(node)
+        combo = slicer.util.findChild(widget, _PRESET_COMBO)
+        slider = slicer.util.findChild(widget, _PRESET_OFFSET_SLIDER)
+    except Exception as exc:  # noqa: BLE001 - never worth failing a finished run
+        logger.warning("Could not reach the volume rendering controls: %s", exc)
+        return
+
+    try:
+        combo.setCurrentNode(preset)
+        slider.value = shift
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not apply preset '%s': %s", preset.GetName(), exc)
+        return
+
+    # Separately, because a build that renamed only this one should still get
+    # its preset -- and because the node's own flag below covers it anyway.
+    try:
+        slicer.util.findChild(widget, _VISIBILITY_CHECKBOX).setChecked(True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not tick the rendering's visibility: %s", exc)
 
 
 def load_result(path: str, kind: str):

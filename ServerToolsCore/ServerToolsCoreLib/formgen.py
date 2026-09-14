@@ -83,8 +83,13 @@ _UNGROUPED_LABEL = "Other"
 # two a click will do, so its label moves under the pointer as the group fills,
 # and a control whose name changes is a control you have to read before every
 # click. Two named actions are always true.
-SELECT_GROUP_LABEL = "Select All"
-CLEAR_GROUP_LABEL = "Deselect All"
+#
+# The SAME two words as the bar above a flat group, from the one pair in
+# design.py. They were written twice and had drifted to two wordings and two
+# casings, so the same action read as two different controls depending on which
+# layout the tool happened to ask for.
+SELECT_GROUP_LABEL = design.SELECT_ALL_TEXT
+CLEAR_GROUP_LABEL = design.SELECT_NONE_TEXT
 
 # Leads the dropdown of an OPTIONAL scalar `server_selectable` argument, and
 # reads back as "" so collectArgs drops the argument entirely and the server
@@ -107,6 +112,11 @@ AUTOMATIC_OPTION = "(automatic — the server chooses)"
 BROWSE_FILE_LABEL = "File..."
 BROWSE_FOLDER_LABEL = "Folder..."
 PATH_PLACEHOLDER = "Select a file or a folder"
+
+# What the caption says when the argument holds nothing. The path field's
+# placeholder used to carry this, and the caption is where it lands now
+# that there is no field.
+NOTHING_CHOSEN = "Nothing selected"
 
 # Room for the scroll bar and the item margins, so the widest entry is not
 # elided by a pixel.
@@ -216,7 +226,79 @@ def _size_on_disk(path: str) -> int:
         return 0
 
 
-def describe_file(path: str) -> str:
+def _folder_contents(path: str):
+    """(total bytes, {kind: count}) for a directory, walked ONCE.
+
+    Recursively, because that is how every tool reads a cohort: a folder whose
+    scans sit one level down under per-patient directories is the normal shape,
+    and counting only the top level would report zero for it.
+
+    Metadata only -- nothing is read -- so a 339 MB cohort costs a stat per
+    file and no I/O, which is what it already cost to report a size.
+    """
+    total, counts = 0, {}
+    try:
+        for directory, _subdirs, names in os.walk(path):
+            for name in names:
+                if name.startswith("."):
+                    continue
+                try:
+                    total += os.path.getsize(os.path.join(directory, name))
+                except OSError:
+                    continue
+                kind = file_kind(name) or "file"
+                counts[kind] = counts.get(kind, 0) + 1
+    except OSError:
+        return 0, {}
+    return total, counts
+
+
+def _plural(count: int, noun: str) -> str:
+    """"14 VTK surfaces", "1 NIfTI volume", "3 Slicer markups".
+
+    A kind already ending in `s` is left alone: `FILE_KINDS` holds "Slicer
+    markups", and a blind `+ "s"` produced "Slicer markupss" on screen.
+    """
+    plural = noun if count == 1 or noun.endswith("s") else noun + "s"
+    return "{} {}".format(count, plural)
+
+
+def describe_folder(path: str, name_only: bool = True) -> str:
+    """What a folder HOLDS, which is the only thing that confirms it is the
+    right one.
+
+    "2_TAD_VTKFiles_L_T2 - folder, 73 MB" says nothing a wrong folder would
+    not also say. The count and the kind do: pointing one level too high shows
+    `0 files`, and pointing at the T1 cohort shows a different count.
+
+    One kind is named on its own ("14 VTK surfaces"); a mixed folder gives the
+    total and its two largest groups, because naming all of them turns the
+    caption into a paragraph.
+    """
+    total, counts = _folder_contents(path)
+    # The full path when the caption names its source ("Folder: /data/..."):
+    # confirming you picked the right one means seeing WHERE it is, and the
+    # caption wraps rather than eliding, so it can afford to.
+    name = (os.path.basename(path.rstrip(os.sep)) or path) if name_only else path
+    if not counts:
+        return "{} - folder, empty".format(name)
+
+    ordered = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+    files = sum(counts.values())
+    if len(ordered) == 1:
+        held = _plural(files, ordered[0][0])
+    else:
+        named = ", ".join(_plural(count, kind) for kind, count in ordered[:2])
+        more = " and more" if len(ordered) > 2 else ""
+        held = "{} ({}{})".format(_plural(files, "file"), named, more)
+    # The size is dropped when there is none to report: `human_size(0)` is
+    # empty, and a trailing comma with nothing after it reads as a value that
+    # failed to load rather than as a folder of empty files.
+    parts = [part for part in ("folder", held, human_size(total)) if part]
+    return "{} - {}".format(name, ", ".join(parts))
+
+
+def describe_file(path: str, name_only: bool = True) -> str:
     """One line naming what is in an input: "MG_test_scan.nii.gz - NIfTI volume, 94 MB".
 
     The row itself cannot say this. A downloaded test file lands on a path like
@@ -228,7 +310,9 @@ def describe_file(path: str) -> str:
     """
     if not path:
         return ""
-    name = os.path.basename(path.rstrip(os.sep)) or path
+    if os.path.isdir(path):
+        return describe_folder(path, name_only)
+    name = (os.path.basename(path.rstrip(os.sep)) or path) if name_only else path
     details = [detail for detail in (file_kind(path), human_size(_size_on_disk(path))) if detail]
     return "{} - {}".format(name, ", ".join(details)) if details else name
 
@@ -238,15 +322,124 @@ def describe_file(path: str) -> str:
 # has open, exported at upload time (base_widget._prepareOneInputFile).
 _VOLUME_EXTENSIONS = {".nii", ".nii.gz", ".nrrd", ".gipl", ".gipl.gz", ".mha", ".mhd"}
 
+# Surfaces, for the same question asked of a mesh argument. Separate from
+# _VOLUME_EXTENSIONS because the two answer different node classes, and a
+# caller almost always wants one or the other rather than both.
+_SURFACE_EXTENSIONS = {".vtk", ".vtp", ".stl", ".obj", ".ply"}
 
-def accepts_volume(spec: dict) -> bool:
-    """Whether this file argument can be satisfied by a scalar volume loaded
-    in the MRML scene. Read off the schema, like every other widget decision:
-    a type whose name says volume/nifti, or whose published extensions
-    include a volume format. A csv input must never offer scene volumes."""
-    if any("volume" in name or "nifti" in name for name in argument_types(spec)):
-        return True
-    return any(extension in _VOLUME_EXTENSIONS for extension in file_extensions_for(spec))
+# What the scene can be asked for, per kind: the MRML class to offer and the
+# format to write it back out in. Written here rather than derived, because
+# "what can satisfy this argument" is a widget decision and this file is where
+# every other one lives.
+SCENE_NODE_KINDS = {
+    "volume": ("vtkMRMLScalarVolumeNode", ".nii.gz"),
+    "model": ("vtkMRMLModelNode", ".vtk"),
+    # Landmarks placed by hand, or loaded from an earlier run. A tool that
+    # takes them takes them from the scene too: placing points IS the reason a
+    # clinician has Slicer open beside the panel.
+    "markups": ("vtkMRMLMarkupsFiducialNode", ".mrk.json"),
+}
+
+# What a pick of each kind is called on the row's second line. A row accepting
+# more than one says "Scene", because naming one of them would be wrong for
+# the others -- ALI takes all three.
+SCENE_LABELS = {"volume": "Volume", "model": "Surface", "markups": "Landmarks"}
+
+# Landmark formats, the third thing the scene can answer with. Separate table
+# for the same reason as the other two: they map to their own node class.
+_MARKUP_EXTENSIONS = {".mrk.json", ".fcsv", ".json"}
+
+
+# What an argument's NAME says about the scene node that could satisfy it.
+#
+# Here, and not on the server, for the reason PRETTY_NAMES is here: this is a
+# dental vocabulary, and the server is built not to hold one. It is needed
+# because `describe.py` publishes no extensions for any packaged tool, so the
+# schema cannot narrow a row on its own -- every file argument in the extension
+# would otherwise be offered nothing at all.
+#
+# Matched on WORDS in the name, longest first, and an unknown name gets
+# NOTHING: a spreadsheet or a transform has no counterpart in a scene, and
+# guessing one wrong is worse than offering none.
+SCENE_NAME_KINDS = (
+    ("landmark", ("markups",)),
+    # A mask is labelled voxels, which is a volume node like any other.
+    ("mask", ("volume",)),
+    ("mesh", ("model",)),
+    ("surface", ("model",)),
+    # Intraoral, which in this extension always means a surface.
+    ("ios", ("model",)),
+    ("scan", ("volume",)),
+    ("cbct", ("volume",)),
+    ("volume", ("volume",)),
+    # Deliberately BOTH. `t1`/`t2` are CBCT volumes in AREG_CBCT and GreedyReg
+    # and intraoral SURFACES in AREG_IOS; `input` and `files` are whatever the
+    # tool was pointed at. Offering both is the honest answer -- the scene is
+    # listed, and what the user picks is what they meant.
+    ("t1", ("volume", "model")),
+    ("t2", ("volume", "model")),
+    ("input", ("volume", "model")),
+    ("files", ("volume", "model", "markups")),
+)
+
+
+def scene_kinds_for(spec: dict, name: str = "") -> tuple:
+    """Which kinds of scene node can satisfy this file argument.
+
+    Read off the schema like every other widget decision: an argument is
+    narrowed by the formats it declares, and a `.csv` input must never offer a
+    scan.
+
+    An argument declaring NO format gets nothing, and that is deliberate even
+    though it is not always right. `describe.py` cannot express extensions at
+    all today, so every packaged tool publishes none -- reading that as "takes
+    anything" would put a list of scans under every file row in the extension,
+    including the ones that want a spreadsheet. A module that knows better says
+    so itself: see `ServerToolWidgetBase.SCENE_INPUTS`.
+    """
+    extensions = {e.lower() for e in file_extensions_for(spec)}
+    kinds = []
+    if not extensions and name:
+        # The schema said nothing, which is every packaged tool. The name is
+        # the only thing left, and it is a better guess than none: a row called
+        # `scans` beside an empty dropdown is a feature nobody can find.
+        lowered = name.lower()
+        for word, answer in SCENE_NAME_KINDS:
+            if word in lowered:
+                return answer
+        return ()
+    if extensions & _VOLUME_EXTENSIONS or any(
+            "volume" in name or "nifti" in name for name in argument_types(spec)):
+        kinds.append("volume")
+    if extensions & _SURFACE_EXTENSIONS or any(
+            "surface" in name or "mesh" in name for name in argument_types(spec)):
+        kinds.append("model")
+    if extensions & _MARKUP_EXTENSIONS or any(
+            "markup" in name or "landmark" in name for name in argument_types(spec)):
+        kinds.append("markups")
+    return tuple(kinds)
+
+
+def scene_label_for(kinds) -> str:
+    """The word a scene pick goes under: the kind's own when there is one,
+    "Scene" when the row takes several and no single word is true."""
+    kinds = tuple(kinds)
+    if len(kinds) == 1:
+        return SCENE_LABELS.get(kinds[0], "Volume")
+    return "Scene"
+
+
+def accepts_volume(spec: dict, name: str = "") -> bool:
+    """Whether the scene can satisfy this file argument at all.
+
+    Read off the schema, like every other widget decision. An argument that
+    names its formats is narrowed by them -- a `.csv` input must never offer a
+    scan. One that names NONE takes whatever the scene holds: ALI's `input` is
+    exactly that, a single argument accepting a CBCT or an intraoral surface,
+    and the tool decides from the data rather than from an extension list.
+    Refusing it was what left ALI with no scene entries at all.
+    """
+    return bool(scene_kinds_for(spec, name))
 
 # `ArgSpec.ui` values on the scalar types (the multichoice ones are LAYOUTS
 # below). "slider" turns a bounded int/float into a ctkSliderWidget; "joystick"
@@ -282,7 +475,7 @@ class MultiChoiceGroup:
     """
 
     def __init__(self, choices: dict, description: str = "", layout=None, groups=None,
-                 option_help=None):
+                 option_help=None, select_all=False):
         self.container = qt.QWidget()
         column = qt.QVBoxLayout(self.container)
         # Air UNDER the block, and only under it. A multichoice is several rows
@@ -294,12 +487,19 @@ class MultiChoiceGroup:
         column.setContentsMargins(0, 0, 0, design.SPACING_LG)
         column.setSpacing(design.SPACING_XS)
 
-        if description:
-            column.addWidget(design.hint_label(description))
-
         self._column = column
         self._layout = layout
         self._groups = groups
+        # Drawn in `_draw`, not here: `rebuild` empties the column and redraws,
+        # so anything added once in __init__ is gone the first time a facade
+        # narrows the options. The description used to be added here and
+        # disappeared exactly that way.
+        self._description = description
+        # Two buttons above the options. Only a hint: whatever they do, what
+        # `value()` reads back is the same complete {option: checked} dict.
+        self._select_all = select_all
+        self.selectAllButton = None
+        self.selectNoneButton = None
         # {option: one line saying what it is}. The tool's own words, published
         # per option because a catalogue of CODES cannot be read off its labels.
         self._option_help = option_help
@@ -310,6 +510,9 @@ class MultiChoiceGroup:
         group whose option set changed with the mode."""
         layout = self._layout
         column = self._column
+        if self._description:
+            column.addWidget(design.hint_label(self._description))
+        self._add_select_all(column, choices)
         builder = _LAYOUT_BUILDERS.get(layout)
         if builder is None:
             if layout is not None:
@@ -321,6 +524,59 @@ class MultiChoiceGroup:
 
         # Declaration order, whatever order the layout visited the options in.
         self.boxes = {option: made[option] for option in choices}
+
+        # After the boxes exist, because that is what they act on.
+        if self.selectAllButton is not None:
+            self.selectAllButton.connect("clicked()", self._checkEverything)
+            self.selectNoneButton.connect("clicked()", self._checkNothing)
+
+    def _add_select_all(self, column, choices: dict) -> None:
+        """A "Select all" / "Deselect all" pair, for a catalogue nobody would
+        tick one box at a time.
+
+        Skipped below two options, where it would be two buttons commanding one
+        check box -- which reads as more of a decision than the check box is.
+
+        `ghost_button` rather than the underlined links this started as: two
+        underlined captions in a row read as one broken sentence, and an
+        underline is what this extension uses for something that opens
+        elsewhere. See that factory for why it is not a filled button either.
+        """
+        self.selectAllButton = None
+        self.selectNoneButton = None
+        if not self._select_all or len(choices) < 2:
+            return
+        self.selectAllButton = design.ghost_button(design.SELECT_ALL_TEXT)
+        self.selectNoneButton = design.ghost_button(design.SELECT_NONE_TEXT)
+        # A WIDGET holding the row, not a bare sub-layout: `rebuild` empties the
+        # column with takeAt()/setParent(None), which reaches a widget and not a
+        # layout -- a sub-layout would be dropped while its buttons stayed
+        # parented to the container, and a redraw would leave two of each.
+        holder = qt.QWidget()
+        row = qt.QHBoxLayout(holder)
+        # Air UNDER the pair, so it reads as a heading over the options rather
+        # than as the first line of the list. The column's own spacing is the
+        # gap between two OPTIONS, and at that distance a control and the
+        # things it controls look like the same kind of thing.
+        row.setContentsMargins(0, 0, 0, design.SPACING_SM)
+        row.setSpacing(design.SPACING_XS)
+        row.addWidget(self.selectAllButton)
+        row.addWidget(self.selectNoneButton)
+        row.addStretch(1)
+        column.addWidget(holder)
+
+    def _checkEverything(self) -> None:
+        self.setEverything(True)
+
+    def _checkNothing(self) -> None:
+        self.setEverything(False)
+
+    def setEverything(self, checked: bool) -> None:
+        """Tick or clear every option. Each box emits its own signal, so
+        whatever was connected to this group reacts exactly as it does to a
+        click -- Apply re-evaluates, a dependent field re-renders."""
+        for box in self.boxes.values():
+            box.setChecked(checked)
 
 
     def rebuild(self, choices: dict, groups=None) -> None:
@@ -851,58 +1107,137 @@ def _decimals_for_step(step, maximum=6) -> int:
 
 
 class FileOrFolderInput:
-    """One input row for a file argument that also accepts a whole folder —
-    `types` containing "folder", e.g. example_tool's `input`:
-    `["csv_file", "folder"]`.
+    """The local half of an input row: browse buttons and nothing to type in.
 
-    HTTP has no notion of a folder, so a folder selection is zipped before
-    upload (base_widget._prepareOneInputFile); the server sees an archive,
-    extracts it, and strips a lone root directory if there is one — so whether
-    the zip holds `cohort/a.csv` or `a.csv` makes no difference.
+    **There is no path field.** There was one, and it said the same thing as
+    the caption under the row -- badly: truncated to the width left over after
+    two dropdowns and two buttons, it showed a fragment of
+    `/tmp/...TestFiles.../MG_test_scan.nii.gz` where the caption already reads
+    `MG_test_scan.nii.gz - 94 MB - test data, fetched to a temporary folder`.
+    Five controls competing on one line, two of them answering the same
+    question. The full path stays one hover away, on the container's tooltip.
 
-    **The user never declares which of the two they are providing**: there is
-    one path field, and `is_folder()` answers from the path itself. Asking
-    first was not just an extra click, it was a source of wrong requests — a
-    folder pasted into a field set to "File" was uploaded as if it were one,
-    and failed at `open()` with an unhelpful error.
+    Which buttons appear is the argument's own answer: an argument accepting a
+    folder gets `Folder...`, one accepting a file gets `File...`, one accepting
+    both gets both. The user still never DECLARES which they are providing --
+    `is_folder()` reads it off the filesystem, because a folder pasted into a
+    field set to "File" used to be uploaded as one and fail at `open()`.
 
-    This is a plain QLineEdit with its own two browse buttons rather than a
-    ctkPathLineEdit, and that is forced by ctkPathLineEdit's behavior, not a
-    matter of taste. It emits `currentPathChanged` only for input its name
-    filters accept, so restricting a picker to `*.csv` — which the schema asks
-    for, `types` naming the accepted extensions — silently swallows the change
-    signal for **every folder** (measured against Slicer 5.13: with a `*.csv`
-    filter, only the `.csv` selections of a file/folder/file/xlsx sequence
-    notify; filter order changes nothing). The Apply button would then never
-    enable after picking a folder. Driving both dialogs here keeps the file
-    dialog filtered by the declared extensions *and* every selection
-    observable.
+    It replaces `ctkPathLineEdit` on every input row, which is a simplification
+    and not only a cosmetic one: that widget emits `currentPathChanged` only
+    for input its name filters accept, so a `*.csv` restriction silently
+    swallowed the change signal for every FOLDER (measured against Slicer
+    5.13). Driving the dialogs here keeps them filtered by the declared
+    extensions *and* every selection observable.
     """
 
-    def __init__(self, extensions=()):
+    def __init__(self, extensions=(), modes=("file", "folder")):
         self._extensions = tuple(extensions)
+        self._path = ""
+        # Plain Python callbacks, not a Qt signal: this class is an ordinary
+        # object, and the field that used to carry the signal is gone.
+        self._listeners = []
 
+        # Two lines: the buttons, then what they chose. The caption lives HERE
+        # rather than on the sources wrapper so that every input row has one --
+        # a `.csv` argument has no dropdowns to be wrapped in, and used to show
+        # nothing at all once the path field went.
         self.container = qt.QWidget()
-        row_layout = qt.QHBoxLayout(self.container)
+        column = qt.QVBoxLayout(self.container)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        buttons = qt.QWidget()
+        row_layout = qt.QHBoxLayout(buttons)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(design.SPACING_XS)
 
-        self.pathEdit = qt.QLineEdit()
-        self.pathEdit.setPlaceholderText(PATH_PLACEHOLDER)
-        self.fileButton = design.compact_button(BROWSE_FILE_LABEL)
-        self.folderButton = design.compact_button(BROWSE_FOLDER_LABEL)
-        row_layout.addWidget(self.pathEdit, 1)
-        row_layout.addWidget(self.fileButton)
-        row_layout.addWidget(self.folderButton)
+        self.fileButton = None
+        self.folderButton = None
+        if "file" in modes:
+            self.fileButton = design.compact_button(BROWSE_FILE_LABEL)
+            self.fileButton.clicked.connect(self._onBrowseFile)
+            row_layout.addWidget(self.fileButton)
+        if "folder" in modes:
+            self.folderButton = design.compact_button(BROWSE_FOLDER_LABEL)
+            self.folderButton.clicked.connect(self._onBrowseFolder)
+            row_layout.addWidget(self.folderButton)
+        # The buttons sit at the left of the space the row gives them rather
+        # than spreading across it: they are two short actions, not a field.
+        row_layout.addStretch(1)
+        column.addWidget(buttons)
+        # Kept as its own widget so the sources wrapper can put the BUTTONS on
+        # its line and the caption under the whole row. Nested inside this
+        # container instead, the second line started where the buttons do --
+        # indented past the dropdowns, describing them rather than the row.
+        self.buttons = buttons
 
-        self.fileButton.clicked.connect(self._onBrowseFile)
-        self.folderButton.clicked.connect(self._onBrowseFolder)
+        self.caption = design.selection_label(NOTHING_CHOSEN)
+        column.addWidget(self.caption)
+        self._column = column
 
     @property
     def currentPath(self) -> str:
         """Same name as ctkPathLineEdit's, so base_widget's readiness check
         treats this field like any other path input."""
-        return self.pathEdit.text.strip()
+        return self._path
+
+    def setCurrentPath(self, value: str) -> None:
+        """Set the chosen path and tell whoever is listening.
+
+        Called by a browse dialog and by `set_local_path` when a downloaded
+        test file lands -- and it must notify either way, because the caption
+        and the Apply button are both driven off that notification.
+        """
+        value = (value or "").strip()
+        if value == self._path:
+            return
+        self._path = value
+        self.describe()
+        for listener in list(self._listeners):
+            listener()
+
+    def detachCaption(self):
+        """Hand the caption over, taking it out of this row's own column.
+
+        The sources wrapper puts it under the WHOLE row -- dropdowns included
+        -- and a caption still held by this column would start where the
+        buttons do, indented past them, describing them rather than the row.
+        Removed explicitly rather than left to Qt's re-parenting, so the two
+        layouts never both believe they hold it.
+        """
+        # Emptied and refilled rather than indexed: `takeAt` shifts every
+        # index after the one it removes, and walking a range over a shrinking
+        # layout skips half of it -- which left the caption in place and put
+        # the buttons back in the wrong order.
+        kept = []
+        while self._column.count():
+            item = self._column.takeAt(0)
+            widget = item.widget() if hasattr(item, "widget") else None
+            if widget is not self.caption:
+                kept.append(widget)
+        for widget in kept:
+            self._column.addWidget(widget)
+        return self.caption
+
+    def describe(self, text: str = None) -> None:
+        """Say what this row holds, on its second line.
+
+        `text` is how the sources wrapper speaks for it: a hosted test file or
+        a node picked from the scene is not a local path, and only that wrapper
+        knows which was chosen. Left out, the row describes its own path.
+        """
+        if text is None:
+            path = self._path
+            if not path:
+                text = NOTHING_CHOSEN
+            elif os.path.isdir(path):
+                text = "Folder: {}".format(describe_folder(path, name_only=False))
+            else:
+                text = "File: {}".format(describe_file(path, name_only=False))
+        self.caption.setText(text)
+
+    def onPathChanged(self, callback) -> None:
+        self._listeners.append(callback)
 
     def is_folder(self) -> bool:
         """Whether what the user picked is a folder — read off the filesystem,
@@ -915,12 +1250,12 @@ class FileOrFolderInput:
             self.container, BROWSE_FILE_LABEL, self.currentPath, ";;".join(name_filters(self._extensions))
         )
         if path:
-            self.pathEdit.setText(path)
+            self.setCurrentPath(path)
 
     def _onBrowseFolder(self) -> None:
         folder = qt.QFileDialog.getExistingDirectory(self.container, BROWSE_FOLDER_LABEL, self.currentPath)
         if folder:
-            self.pathEdit.setText(folder)
+            self.setCurrentPath(folder)
 
     # -- the slice of the QWidget API build()/base_widget use on a field ----
 
@@ -1001,6 +1336,15 @@ class ServerFileInput:
         self.local = local
         self._syncing = False
         self._hosted = []  # [{"name", "kind", "size"}], in server order
+        # How a scene pick is named on the second line. Set by base_widget from
+        # the kinds this argument accepts, because "Volume" over a surface or a
+        # set of landmarks would be wrong -- and ALI takes all three.
+        self._scene_label = "Volume"
+        # Whether this row can EVER be filled from the scene. Distinct from
+        # having something to offer right now: "never" is a property of the
+        # argument and hides the control, "nothing at the moment" is a property
+        # of the scene and only greys it.
+        self._scene_supported = False
         self._popup_warned = False  # the widening failure is reported once
         self._volume_names = []
         # Whether picking a hosted entry FETCHES it. True for the tool's test
@@ -1038,21 +1382,53 @@ class ServerFileInput:
         # Replaced on every rebuild, once the list knows what it holds.
         self.combo.setToolTip(self.CHOOSE_OPTION)
         self.combo.addItems([self.CHOOSE_OPTION])
+        # Empty until `setChoices` says otherwise, and hidden while it is --
+        # the same rule the scene list follows, applied from the start rather
+        # than only on the first rebuild.
+        self.combo.setVisible(False)
         row.addWidget(self.combo)
-        row.addWidget(row_widget(local), 1)
+
+        # A SECOND dropdown, not more entries in the first. The two answer
+        # different questions -- "fetch the tool's sample data" and "use what is
+        # already open in Slicer" -- and one list mixing them read as a single
+        # jumbled menu. It also lets a row that cannot take a scene node simply
+        # not show it, which one list cannot express.
+        self.sceneCombo = qt.QComboBox()
+        self.sceneCombo.sizeAdjustPolicy = \
+            qt.QComboBox.AdjustToMinimumContentsLengthWithIcon
+        self.sceneCombo.minimumContentsLength = 14
+        self.sceneCombo.addItems([self.PROMPT_VOLUMES])
+        self.sceneCombo.setToolTip(self.PROMPT_VOLUMES)
+        # Hidden until there is something in it: an empty dropdown is a control
+        # that can only disappoint, and most rows never get one.
+        self.sceneCombo.setVisible(False)
+        row.addWidget(self.sceneCombo)
+
+        # The picker's BUTTONS, not its whole container: its caption goes under
+        # the entire row below, spanning the dropdowns too.
+        row.addWidget(getattr(local, "buttons", None) or row_widget(local), 1)
         column.addWidget(controls)
 
-        self.caption = design.hint_label("")
-        self.caption.setVisible(False)
+        # The picker carries the row's second line, so a row with dropdowns and
+        # one without look and behave the same. One that has none of its own --
+        # a bare Qt field, which only a test builds now -- gets one here rather
+        # than leaving the wrapper with nothing to say.
+        # Taken from the picker and put under the WHOLE row: it belongs to the
+        # picker, which owns what it says, but it describes the row and has to
+        # start at its left edge whether or not dropdowns sit in front.
+        detach = getattr(local, "detachCaption", None)
+        self.caption = detach() if detach else design.selection_label(NOTHING_CHOSEN)
         column.addWidget(self.caption)
 
         self.combo.currentTextChanged.connect(self._onComboChoice)
+        self.sceneCombo.currentTextChanged.connect(self._onSceneChoice)
         connect_changed(local, self._onLocalChoice)
         # Its own connection, not a call from the two handlers: a path also
         # arrives through `set_local_path` when a download lands, which is
         # exactly the case the caption exists for.
         connect_changed(local, self._describe)
         self.combo.currentTextChanged.connect(self._describe)
+        self.sceneCombo.currentTextChanged.connect(self._describe)
 
     def setHostedCallback(self, callback) -> None:
         """What to do when the user picks a hosted test file: base_widget
@@ -1072,12 +1448,32 @@ class ServerFileInput:
         self._hosted = [_hosted_entry(entry) for entry in entries]
         self._rebuild()
 
+    def setSceneSupported(self, supported: bool) -> None:
+        """Whether the scene can answer this argument AT ALL.
+
+        A transform or a spreadsheet has no counterpart in a scene, so the
+        control is not shown -- there is nothing to learn from it. Everything
+        else keeps it, greyed while the scene holds nothing of the right kind:
+        hidden, the feature is invisible until the day it happens to be
+        available, and nobody discovers a control that is not there.
+        """
+        self._scene_supported = bool(supported)
+        self._rebuildScene()
+
+    def setSceneLabel(self, label: str) -> None:
+        """What a scene pick is called on the caption: Volume, Surface,
+        Landmarks -- or "Scene" for a row accepting more than one of them."""
+        self._scene_label = label or "Volume"
+
     def setVolumeChoices(self, names) -> None:
-        """The scalar volumes currently open in the scene, as display names.
-        base_widget owns the name-to-node mapping and the refresh triggers;
-        this widget only offers the entries."""
+        """What the scene currently offers THIS argument, as display names.
+
+        base_widget owns the name-to-node mapping, the refresh triggers and the
+        narrowing by kind; this widget only offers the entries. An empty list
+        hides the dropdown rather than leaving an inert one on the row.
+        """
         self._volume_names = list(names)
-        self._rebuild()
+        self._rebuildScene()
 
     def hosted_entries(self) -> list:
         """The hosted test files currently offered, as the entries they were
@@ -1086,30 +1482,54 @@ class ServerFileInput:
         return list(self._hosted)
 
     def _prompt(self) -> str:
-        """The first entry, naming what the list holds rather than repeating the
-        field beside it.
+        """The hosted list's first entry, naming what IT holds.
 
-        A model row is its own case: those entries are not fetched, they are the
-        value, so "Test data" would be wrong twice over.
+        No longer has to speak for the scene as well: that is a dropdown of its
+        own now, with its own prompt. `PROMPT_BOTH` went with the merge -- one
+        list describing two unrelated sources is what read as a jumble.
+
+        A model row is its own case: those entries are not fetched, they are
+        the value, so "Test data" would be wrong twice over.
         """
         if self._hosted and not self.hosted_downloads:
             return self.PROMPT_MODEL
-        if self._hosted and self._volume_names:
-            return self.PROMPT_BOTH
         if self._hosted:
             return self.PROMPT_HOSTED
-        if self._volume_names:
-            return self.PROMPT_VOLUMES
-        # Nothing to offer: the list is inert, and saying so by naming a source
-        # it does not have would be worse than the neutral words.
         return self.CHOOSE_OPTION
 
     def _entries(self) -> list:
-        return (
-            [self._prompt()]
-            + [hosted_entry_label(entry) for entry in self._hosted]
-            + [OPEN_VOLUME_PREFIX + name for name in self._volume_names]
-        )
+        return [self._prompt()] + [
+            hosted_entry_label(entry) for entry in self._hosted
+        ]
+
+    def _sceneEntries(self) -> list:
+        return [self.PROMPT_VOLUMES] + [
+            OPEN_VOLUME_PREFIX + name for name in self._volume_names
+        ]
+
+    def _rebuildScene(self) -> None:
+        """Redraw the scene list, keeping the current pick when still offered.
+
+        A node closed in Slicer takes its entry with it, and a selection that
+        is gone must not silently become the prompt's neighbour: `_selection`
+        reads by INDEX, so a stale index would name the wrong scan.
+        """
+        previous = self.sceneCombo.currentText
+        self._syncing = True
+        try:
+            self.sceneCombo.clear()
+            entries = self._sceneEntries()
+            self.sceneCombo.addItems(entries)
+            if previous in entries:
+                self.sceneCombo.setCurrentIndex(entries.index(previous))
+            self.sceneCombo.setToolTip(entries[0])
+        finally:
+            self._syncing = False
+        # Shown whenever the argument could take one, greyed when the scene
+        # holds none: the control is how a clinician learns the row can be
+        # filled that way at all.
+        self.sceneCombo.setVisible(self._scene_supported)
+        self.sceneCombo.setEnabled(bool(self._volume_names))
 
     def _rebuild(self) -> None:
         previous = self.combo.currentText
@@ -1127,6 +1547,10 @@ class ServerFileInput:
             self.combo.setToolTip(entries[0])
         finally:
             self._syncing = False
+        # Hidden when it holds only its own prompt, the way the scene list is.
+        # Most arguments host no test files, and a dropdown that can only ever
+        # offer nothing is a control a user opens once and stops trusting.
+        self.combo.setVisible(bool(self._hosted))
 
     def _widenPopup(self) -> None:
         """Let the dropdown LIST show a whole entry, however narrow the box is.
@@ -1160,16 +1584,19 @@ class ServerFileInput:
                 logger.warning("could not widen the dropdown list", exc_info=True)
 
     def _selection(self):
-        """("none" | "hosted" | "volume", name) for the current entry, decided
-        by index so no name can be misparsed."""
+        """("none" | "hosted" | "volume", name) for whichever list holds a pick.
+
+        Decided by INDEX in both, never by parsing the text back: a hosted file
+        whose name happens to start with the volume prefix cannot be misread,
+        and the two lists cannot both be picked -- choosing in one resets the
+        other, the same way either resets the path field.
+        """
         index = self.combo.currentIndex
-        if index <= 0:
-            return "none", ""
-        if index <= len(self._hosted):
+        if 0 < index <= len(self._hosted):
             return "hosted", self._hosted[index - 1]["name"]
-        volume_index = index - 1 - len(self._hosted)
-        if volume_index < len(self._volume_names):
-            return "volume", self._volume_names[volume_index]
+        index = self.sceneCombo.currentIndex
+        if 0 < index <= len(self._volume_names):
+            return "volume", self._volume_names[index - 1]
         return "none", ""
 
     def hosted_name(self) -> str:
@@ -1212,22 +1639,60 @@ class ServerFileInput:
         checker = getattr(self.local, "is_folder", None)
         return bool(checker()) if checker else False
 
-    def _onComboChoice(self, _text=None) -> None:
-        if self._syncing:
-            return
-        kind, name = self._selection()
-        if kind == "none":
-            return
-        # Whatever was in the path field is not what the user just asked for.
-        # Cleared before the download starts, not after it lands, so a run
-        # launched mid-download cannot send the previous file.
+    def clear(self) -> None:
+        """Empty this input: no local path, no hosted pick, no open volume.
+
+        For a caller OUTSIDE the dropdown that decides this argument is no longer
+        satisfied -- AutoMatrix's mirror check box fills the field when it is
+        ticked, and must not leave the mirror matrix behind when it is cleared.
+        Guarded by `_syncing` like every other programmatic write here, so
+        emptying the field does not read as the user having picked something.
+        """
         self._syncing = True
         try:
             _set_local_path(self.local, "")
+            self.combo.setCurrentIndex(0)  # the prompt: `_entries` leads with it
         finally:
             self._syncing = False
-        if kind == "hosted" and self.hosted_downloads and self._on_hosted is not None:
+        self._describe()
+
+    def _onComboChoice(self, _text=None) -> None:
+        if self._syncing or self.combo.currentIndex <= 0:
+            return
+        index = self.combo.currentIndex
+        if index > len(self._hosted):
+            return
+        name = self._hosted[index - 1]["name"]
+        # Whatever else satisfied this argument is not what the user just asked
+        # for. Cleared before the download starts, not after it lands, so a run
+        # launched mid-download cannot send the previous file.
+        self._clearOthers(keep=self.combo)
+        if self.hosted_downloads and self._on_hosted is not None:
             self._on_hosted(name)
+
+    def _onSceneChoice(self, _text=None) -> None:
+        if self._syncing or self.sceneCombo.currentIndex <= 0:
+            return
+        self._clearOthers(keep=self.sceneCombo)
+
+    def _clearOthers(self, keep) -> None:
+        """One source at a time, cleared rather than ranked.
+
+        A precedence rule the user cannot see is how you end up sending a file
+        you thought you had replaced -- which is why picking in either list
+        empties the path field and resets the other list, and why typing a path
+        resets both.
+        """
+        self._syncing = True
+        try:
+            if keep is not self.local:
+                _set_local_path(self.local, "")
+            if keep is not self.combo:
+                self.combo.setCurrentIndex(0)
+            if keep is not self.sceneCombo:
+                self.sceneCombo.setCurrentIndex(0)
+        finally:
+            self._syncing = False
 
     def _describe(self, *_args) -> None:
         """Say what this input holds, under the row, whatever satisfied it.
@@ -1240,22 +1705,37 @@ class ServerFileInput:
         model = self.server_name()
         path = _local_path(self.local)
         if volume:
-            text = "Open volume - {}".format(volume)
+            # Named for what it IS, from the node's own class: "Volume" over a
+            # surface would be wrong on ALI, which takes either.
+            text = "{}: {}".format(self._scene_label, volume)
         elif model:
-            text = "Model on the server - {}".format(model)
+            text = "Model: {}".format(model)
+        elif path and self._is_fetched(path):
+            # Its hosted NAME, not the path it landed on: a fetched file sits
+            # in a session directory that is swept on exit, and a user who
+            # mistakes that path for their own copy will look for it later.
+            text = "Test File: {}".format(describe_file(path))
         elif path:
-            text = describe_file(path)
-            # Where it came from, and it is not cosmetic: a file the panel
-            # fetched sits in a session directory that is swept on exit, and a
-            # user who mistakes it for their own copy will look for it later.
-            if self._is_fetched(path):
-                text += " - test data, fetched to a temporary folder"
+            # The picker's own wording, so a row with dropdowns and one without
+            # say the same thing about the same file.
+            text = None
         else:
-            text = ""
-        self.caption.setText(text)
-        self.caption.setVisible(bool(text))
+            text = NOTHING_CHOSEN
+        self._say(text)
         # The full path stays reachable without taking a line of its own.
         set_tooltip(self.local, path)
+
+    def _say(self, text) -> None:
+        """Put `text` on the row's second line, wherever that line lives.
+
+        `None` means "describe your own path", which only a picker that owns a
+        caption can do -- a bare Qt field gets the neutral words instead.
+        """
+        describe = getattr(self.local, "describe", None)
+        if describe is not None:
+            describe(text)
+        else:
+            self.caption.setText(text or NOTHING_CHOSEN)
 
     def _is_fetched(self, path: str) -> bool:
         """Whether this path is one of the hosted entries this row offered.
@@ -1269,11 +1749,7 @@ class ServerFileInput:
     def _onLocalChoice(self, *_args) -> None:
         if self._syncing or not _local_path(self.local):
             return
-        self._syncing = True
-        try:
-            self.combo.setCurrentIndex(0)
-        finally:
-            self._syncing = False
+        self._clearOthers(keep=self.local)
 
     # -- the slice of the QWidget API build()/base_widget use on a field ----
 
@@ -1296,12 +1772,35 @@ def _hosted_entry(entry) -> dict:
     return {"name": str(entry), "kind": None, "size": None}
 
 
+def local_input(widget):
+    """The half of an input row that holds a LOCAL path.
+
+    A row is sometimes a composite: an argument the server hosts test files for
+    is wrapped in a `ServerFileInput`, whose `local` is the real picker. Anyone
+    reaching for the picker has to go through here, and forgetting to is not a
+    visible mistake -- `getattr(wrapper, "setSceneCallback", None)` simply
+    answers None, and whatever was being wired stays silently unwired. That is
+    exactly how the Scene button shipped inert: ALI's input is the one that has
+    hosted test files, so it is the one that is wrapped.
+    """
+    return widget.local if isinstance(widget, ServerFileInput) else widget
+
+
 def set_local_path(widget, value: str) -> None:
     """Write a local path into any input-row kind: what base_widget fills in
     once a hosted test file has been downloaded. Writing the local half of a
     ServerFileInput also resets its dropdown, through its own sync."""
-    target = widget.local if isinstance(widget, ServerFileInput) else widget
-    _set_local_path(target, value)
+    _set_local_path(local_input(widget), value)
+
+
+# Which browse buttons each input mode gets. The user still never declares
+# which of the two they are giving -- `is_folder` reads it off the filesystem --
+# this only says which are OFFERED, from what the argument accepts.
+_BROWSE_MODES = {
+    "single_file": ("file",),
+    "folder_zip": ("folder",),
+    "file_or_folder": ("file", "folder"),
+}
 
 
 def _local_path(widget) -> str:
@@ -1311,12 +1810,13 @@ def _local_path(widget) -> str:
 def _set_local_path(widget, value: str) -> None:
     """Write a path into whichever picker kind `widget` is.
 
-    A FileOrFolderInput drives a plain QLineEdit (see that class for why it is
-    not a ctkPathLineEdit); everything else exposes ctkPathLineEdit's writable
-    `currentPath`.
+    Every INPUT row is a FileOrFolderInput now; a ctkPathLineEdit is left only
+    where the panel itself puts one (the output folder), and that one is
+    written through its own `currentPath`.
     """
-    if isinstance(widget, FileOrFolderInput):
-        widget.pathEdit.setText(value)
+    setter = getattr(widget, "setCurrentPath", None)
+    if setter is not None:
+        setter(value)
     else:
         widget.currentPath = value
 
@@ -1325,10 +1825,11 @@ def set_tooltip(widget, text: str) -> None:
     """Put `text` on whichever picker kind `widget` is, and on nothing else.
 
     The caption says which file; the tooltip says where it sits. A composite
-    row has no tooltip of its own, so it goes on the field the pointer is
-    actually over.
+    row has no tooltip of its own, so it goes on the container the pointer is
+    actually over -- which is now the whole button group, the path field having
+    gone.
     """
-    target = getattr(widget, "pathEdit", widget)
+    target = getattr(widget, "container", widget)
     setter = getattr(target, "setToolTip", None)
     if setter:
         setter(text or "")
@@ -1657,6 +2158,7 @@ def _make_widget(name: str, spec: dict):
             layout=spec.get("ui"),
             groups=spec.get("groups"),
             option_help=spec.get("option_help"),
+            select_all=bool(spec.get("select_all")),
         )
     if is_file_type(arg_type):
         return file_widget(spec)
@@ -1861,7 +2363,20 @@ def file_input_modes(arguments_schema: dict, overrides=None) -> dict:
         for name, spec in arguments_schema.items()
         if is_file_type(spec.get("type", ""))
     }
-    modes.update(overrides or {})
+    # An override may only MODIFY an argument the tool declares. Naming one it
+    # does not is always a module left behind by a rename, and taking it at its
+    # word grew a phantom row: SurgMovPred's `input` became `measurements` when
+    # the tool was packaged, and the panel kept offering an "Input" picker that
+    # uploaded to an argument the server would have refused. Skipped and said
+    # out loud -- silence is what let that one sit there.
+    for name, mode in (overrides or {}).items():
+        if arguments_schema and name not in arguments_schema:
+            logger.warning(
+                "FILE_INPUTS names '%s', which this tool does not declare; ignored. "
+                "Its arguments are: %s", name, ", ".join(sorted(arguments_schema))
+            )
+            continue
+        modes[name] = mode
 
     resolved = {}
     for name, mode in modes.items():
@@ -1897,7 +2412,7 @@ def result_kind_for(output_kind, declared=None) -> str:
     return declared or _RESULT_KIND_FOR_OUTPUT.get(output_kind, "text")
 
 
-def file_widget(spec: dict, mode: str = "auto"):
+def file_widget(spec: dict, mode: str = "auto", name: str = ""):
     """The picker for a file argument. `mode` defaults to the schema-driven
     rule above; base_widget passes an explicit one for what the schema cannot
     express (or to force a single selection kind).
@@ -1914,10 +2429,10 @@ def file_widget(spec: dict, mode: str = "auto"):
     # scene (accepts_volume). Only file-typed arguments reach here: a SCALAR
     # server_selectable argument (a model, which must never leave the server)
     # is a plain combo box built by _make_widget, with no local picker at all.
-    wrap = bool(spec.get("server_selectable")) or accepts_volume(spec)
+    wrap = bool(spec.get("server_selectable")) or accepts_volume(spec, name)
 
     extensions = file_extensions_for(spec)
-    local = FileOrFolderInput(extensions) if mode == "file_or_folder" else path_widget(extensions, mode)
+    local = FileOrFolderInput(extensions, _BROWSE_MODES.get(mode, ("file",)))
     if not wrap:
         return local
     # A hosted MODEL is not downloadable and never was: the server declines to
@@ -2046,9 +2561,9 @@ def connect_changed(widget, callback) -> None:
         widget.combo.currentTextChanged.connect(callback)
         connect_changed(widget.local, callback)
     elif isinstance(widget, FileOrFolderInput):
-        # Both buttons write into the same field, so one connection covers
-        # browsing either kind as well as typing or pasting a path.
-        widget.pathEdit.textChanged.connect(callback)
+        # Its own callback list rather than a Qt signal: the field that used to
+        # carry one is gone, and this class is a plain Python object.
+        widget.onPathChanged(callback)
     elif isinstance(widget, JoystickInput):
         # The pad writes into the spin boxes (see JoystickInput), so the two
         # boxes cover every input path: drag, wheel, keys and typing.

@@ -1059,10 +1059,18 @@ never speaks HTTP — and `base_widget._onHostedTestFile` does the rest:
   as the file it is. The `kind` comes from `entries`; an older server that
   publishes none falls back to "an extensionless name that really did arrive as
   an archive was a directory".
-- **a single file is loaded into the scene** (`slicer_io.load_input`, volume or
-  mesh by extension) — the point of downloading rather than naming. A **folder
-  never is**: a forty-patient cohort would flood the scene. A load that fails is
-  a log line: the input is filled in and the run works either way.
+- **a single scan is loaded into the scene** (`slicer_io.load_input`, volume or
+  mesh by extension) — the point of downloading rather than naming — and a
+  volume is then rendered in 3D with the module's own `VOLUME_RENDERING`
+  preset. A **cohort never is**: forty patients would flood the scene.
+  `slicer_io.sole_scan_in` is what tells the two apart for a folder, and it
+  counts SCANS rather than files — one volume, or failing that one DICOM
+  directory (a series is one scan spread over hundreds of slice files), or
+  failing that one lone surface. Anything else shows nothing. This matters
+  because only ALI's CBCT test file is a bare `.nii.gz`: ASO's and AutoMatrix's
+  are folders holding a single patient, and "a folder is never loaded" made the
+  feature look absent on every module but ALI. A load that fails is a log line:
+  the input is filled in and the run works either way.
 
 Once it lands the row holds an ordinary local path, so it is **uploaded** like
 any other file. The wire shape changed with the mechanism.

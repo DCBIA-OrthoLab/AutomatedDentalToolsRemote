@@ -310,8 +310,11 @@ class QLabel(QObject):
     def setText(self, text):
         self.text = text
 
-    def setWordWrap(self, _wrap):
-        pass
+    def setWordWrap(self, wrap):
+        """Recorded, not dropped. Whether a caption WRAPS is the difference
+        between showing a whole path and showing a fragment of one, which is
+        the reason that line replaced the path field."""
+        self.wordWrap = bool(wrap)
 
 
 class QPushButton(QObject):
@@ -322,6 +325,22 @@ class QPushButton(QObject):
         self.toggled = Signal()
         self._checkable = False
         self._checked = False
+
+    def connect(self, signature, slot):
+        """PythonQt's own spelling: `button.connect("clicked()", callable)`.
+
+        Only the signals the extension actually wires are honoured; anything
+        else is recorded and never fired, which is what a stub should do rather
+        than pretend.
+        """
+        if signature.startswith("clicked"):
+            self.clicked.connect(slot)
+        elif signature.startswith("toggled"):
+            self.toggled.connect(slot)
+
+    def click(self):
+        """What a user does. Emits, so whatever was connected actually runs."""
+        self.clicked.emit()
 
     def isCheckable(self):
         """Whether this button IS an option rather than an action -- the whole
@@ -664,7 +683,37 @@ class ctkCollapsibleButton(QWidget):
         self.text = ""
         # Open unless a panel folds it. Which sections open folded is a
         # property a test asserts on, so it is recorded rather than ignored.
-        self.collapsed = False
+        self._collapsed = False
+        # How many rows the box held at the moment it folded. Real CTK hides the
+        # children a box HAS when it collapses, so a box folded before its rows
+        # exist folds nothing -- which is what made a "Reference volume" picker
+        # appear crushed into the "Advanced" header. Recorded so a test can tell
+        # a box that folded once it was built from one that folded empty.
+        self.rowsWhenCollapsed = None
+        # How many times CTK actually ran its hide-the-children pass. Counted
+        # because "is it collapsed" cannot tell a fold that DID something from
+        # one that was skipped -- see the setter.
+        self.foldsApplied = 0
+
+    @property
+    def collapsed(self):
+        return self._collapsed
+
+    @collapsed.setter
+    def collapsed(self, value):
+        # `ctkCollapsibleButton::setCollapsed` returns immediately when handed
+        # the value it already holds, so folding a box that already believes it
+        # is folded runs NOTHING: no child pass, no hiding. A panel that folds
+        # during its build and folds again once on screen therefore has to step
+        # through the other state to make the second one count. Modelled here
+        # because the real behaviour is invisible from Python and cost two
+        # wrong fixes.
+        if value == self._collapsed:
+            return
+        self._collapsed = value
+        if value:
+            self.foldsApplied += 1
+            self.rowsWhenCollapsed = len(getattr(self.layout, "widgets", ()) or ())
 
 
 class ctkSliderWidget(QObject):

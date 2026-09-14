@@ -509,8 +509,18 @@ class ResultKindTest(unittest.TestCase):
 
 
 class FileOrFolderInputTest(unittest.TestCase):
-    """The `input` argument: `types` = ["csv_file", "folder"] - one path field
-    taking either, with the client working out which it got."""
+    """The `input` argument: `types` = ["csv_file", "folder"] - one row taking
+    either, with the client working out which it got.
+
+    **There is nothing to type a path into any more.** The row used to carry an
+    editable path field beside its browse buttons, and that field answered the
+    question the caption under the row already answers - badly: truncated to
+    the width left over from two dropdowns and two buttons, it showed a
+    fragment of a temporary directory where the caption reads
+    `MG_test_scan.nii.gz - NIfTI volume, 94 MB`. The two browse dialogs and
+    `set_local_path` are the only writers now; `currentPath` is what the rest
+    of the panel reads, and the full path is one hover away on the container.
+    """
 
     def setUp(self):
         self.spec = EXAMPLE_TOOL_SCHEMA["arguments"]["input"]
@@ -523,9 +533,41 @@ class FileOrFolderInputTest(unittest.TestCase):
         self.folder = os.path.join(self.work, "cohort")
         os.makedirs(self.folder)
 
-    def test_folder_in_types_gives_a_single_field_accepting_both(self):
+    def test_folder_in_types_gives_one_row_offering_both(self):
+        """An argument taking a file OR a folder is one row with both browse
+        buttons - not two rows, and not a kind selector the user has to set
+        correctly before picking."""
         self.assertIsInstance(self.field, formgen.FileOrFolderInput)
-        self.assertIsInstance(self.field.pathEdit, qt.QLineEdit)
+        self.assertIsNotNone(self.field.fileButton)
+        self.assertIsNotNone(self.field.folderButton)
+
+    def test_a_single_file_argument_offers_no_folder_button(self):
+        """A button whose result the server is going to refuse is worse than no
+        button at all: the folder is zipped and uploaded first, and the run
+        fails after the bytes have travelled."""
+        field = formgen.file_widget({"type": "csv_file", "types": ["csv_file"]})
+
+        self.assertIsNotNone(field.fileButton)
+        self.assertIsNone(field.folderButton)
+
+    def test_a_folder_argument_offers_no_file_button(self):
+        """The mirror image: an argument taking a whole folder (zipped on the
+        way out) must not invite a single file it cannot use."""
+        field = formgen.file_widget({"type": "folder", "types": ["folder"]})
+
+        self.assertIsNone(field.fileButton)
+        self.assertIsNotNone(field.folderButton)
+
+    def test_there_is_nothing_to_type_a_path_into(self):
+        """The only writers are the two browse dialogs and `set_local_path`.
+
+        Pinned rather than left to the class docstring: a text field added back
+        onto this row would look harmless and would put two answers to "which
+        file is loaded" side by side again, the shorter one truncated.
+        """
+        self.assertFalse(hasattr(self.field, "pathEdit"))
+        for widget in self.field.container.layout.widgets:
+            self.assertNotIsInstance(widget, qt.QLineEdit)
 
     def test_the_file_dialog_is_restricted_to_the_declared_extensions(self):
         # The extensions still come from `types` - that is the whole point of
@@ -534,45 +576,64 @@ class FileOrFolderInputTest(unittest.TestCase):
 
         self.assertIn("*.csv", qt.QFileDialog.last_open_file_args[3])
 
+    def test_a_generic_file_argument_is_left_unrestricted(self):
+        """A `file` argument declares no extension, and no restriction must
+        stay no restriction: a dialog handed "Supported files ()" shows the
+        user an empty folder and no way out of it.
+
+        Read off the dialog the button opens, the extensions no longer having a
+        widget of their own to be read back from.
+        """
+        field = formgen.file_widget({"type": "file", "types": ["file"]})
+
+        field.fileButton.clicked.emit()
+
+        self.assertEqual(field._extensions, ())
+        self.assertEqual(qt.QFileDialog.last_open_file_args[3], "")
+
     def test_nothing_selected_is_not_a_folder(self):
         self.assertEqual(self.field.currentPath, "")
         self.assertFalse(self.field.is_folder())
 
     def test_a_file_is_detected_as_a_file(self):
-        self.field.pathEdit.setText(self.csv)
+        self.field.setCurrentPath(self.csv)
 
         self.assertEqual(self.field.currentPath, self.csv)
         self.assertFalse(self.field.is_folder())
 
     def test_a_folder_is_detected_as_a_folder(self):
         # The user says nothing: picking the path *is* saying which it is.
-        self.field.pathEdit.setText(self.folder)
+        self.field.setCurrentPath(self.folder)
 
         self.assertTrue(self.field.is_folder())
 
-    def test_a_folder_pasted_into_the_field_is_still_detected(self):
+    def test_a_folder_chosen_after_a_file_is_still_detected(self):
         # A kind selector made this a wrong request: a folder left under
-        # "File" was uploaded as a file and failed at open().
-        self.field.pathEdit.setText(self.csv)
+        # "File" was uploaded as a file and failed at open(). The kind is read
+        # off the filesystem on every selection, so it cannot go stale.
+        self.field.setCurrentPath(self.csv)
         self.assertFalse(self.field.is_folder())
 
-        self.field.pathEdit.setText(self.folder)
+        self.field.setCurrentPath(self.folder)
 
         self.assertTrue(self.field.is_folder())
 
     def test_surrounding_whitespace_is_ignored(self):
-        # A pasted path often carries a trailing newline or space.
-        self.field.pathEdit.setText(f"  {self.folder}\n")
+        # Nobody types here any more, but a path still arrives from elsewhere:
+        # `set_local_path` when a download lands, or a module filling its own
+        # row. A trailing newline makes `is_folder` answer no for a folder, and
+        # the upload then fails at open().
+        self.field.setCurrentPath(f"  {self.folder}\n")
 
         self.assertEqual(self.field.currentPath, self.folder)
         self.assertTrue(self.field.is_folder())
 
     def test_a_nonexistent_path_is_not_taken_for_a_folder(self):
-        self.field.pathEdit.setText(os.path.join(self.work, "gone"))
+        self.field.setCurrentPath(os.path.join(self.work, "gone"))
 
         self.assertFalse(self.field.is_folder())
 
-    def test_each_browse_button_fills_the_same_field(self):
+    def test_each_browse_button_fills_the_same_selection(self):
         qt.QFileDialog.next_directory = self.folder
         qt.QFileDialog.next_file = self.csv
         self.addCleanup(setattr, qt.QFileDialog, "next_directory", "")
@@ -587,7 +648,7 @@ class FileOrFolderInputTest(unittest.TestCase):
         self.assertFalse(self.field.is_folder())
 
     def test_a_cancelled_dialog_keeps_the_current_selection(self):
-        self.field.pathEdit.setText(self.csv)
+        self.field.setCurrentPath(self.csv)
         qt.QFileDialog.next_directory = ""  # what Qt returns when cancelled
         qt.QFileDialog.next_file = ""
 
@@ -599,25 +660,42 @@ class FileOrFolderInputTest(unittest.TestCase):
     def test_every_selection_notifies_whatever_its_kind(self):
         # Regression: on a ctkPathLineEdit, a *.csv name filter silences
         # currentPathChanged for every folder (and every non-matching file),
-        # so the Apply button would never enable after choosing a folder.
+        # so the Apply button would never enable after choosing a folder. The
+        # row keeps its own listener list now, and it has to fire for all
+        # three ways a path arrives: browsed, or written in from outside.
         calls = []
         formgen.connect_changed(self.field, lambda *_a: calls.append(1))
         qt.QFileDialog.next_directory = self.folder
         self.addCleanup(setattr, qt.QFileDialog, "next_directory", "")
 
-        self.field.pathEdit.setText(self.csv)
+        self.field.setCurrentPath(self.csv)
         self.field.folderButton.clicked.emit()
-        self.field.pathEdit.setText(os.path.join(self.work, "other.xlsx"))
+        self.field.setCurrentPath(os.path.join(self.work, "other.xlsx"))
 
         self.assertEqual(len(calls), 3)
 
+    def test_the_same_path_written_twice_notifies_once(self):
+        """A notification re-runs the readiness check and rewrites the caption,
+        and `set_local_path` is called on every refresh of a row -- including
+        ones that change nothing. Re-announcing a selection nobody made is how
+        a panel ends up redrawing itself in a loop."""
+        calls = []
+        formgen.connect_changed(self.field, lambda *_a: calls.append(1))
+
+        self.field.setCurrentPath(self.csv)
+        self.field.setCurrentPath(self.csv)
+
+        self.assertEqual(len(calls), 1)
+
     def test_an_explicit_mode_overrides_the_schema_rule(self):
         # SurgMovPred's "input" is typed zip_file and the module still wants a
-        # folder picker (it zips it): a declared mode wins over the derived one.
+        # folder picker (it zips it): a declared mode wins over the derived one,
+        # and decides which browse buttons the row gets.
         field = formgen.file_widget({"type": "zip_file", "types": ["zip_file"]}, "folder_zip")
 
-        self.assertIsInstance(field, ctk.ctkPathLineEdit)
-        self.assertEqual(field.filters, ctk.ctkPathLineEdit.Dirs)
+        self.assertIsInstance(field, formgen.FileOrFolderInput)
+        self.assertIsNone(field.fileButton)
+        self.assertIsNotNone(field.folderButton)
 
     def test_a_volume_argument_gets_the_sources_dropdown_around_its_picker(self):
         field = formgen.file_widget({"type": "nifti_file", "types": ["nifti_file"]})
@@ -625,35 +703,23 @@ class FileOrFolderInputTest(unittest.TestCase):
         # accepts_volume: a scan input can also be satisfied by a volume open
         # in the scene, so its picker comes wrapped in the sources dropdown.
         self.assertIsInstance(field, formgen.ServerFileInput)
-        self.assertIsInstance(field.local, ctk.ctkPathLineEdit)
-        self.assertEqual(field.local.filters, ctk.ctkPathLineEdit.Files)
-        self.assertIn("Supported files (*.nii *.nii.gz)", field.local.nameFilters)
+        self.assertIsInstance(field.local, formgen.FileOrFolderInput)
+        self.assertIsNone(field.local.folderButton)
 
-    def test_a_non_volume_file_argument_gets_a_plain_file_picker(self):
+        # Wrapping it changes nothing about what the local half offers: the
+        # declared extensions still reach the dialog.
+        field.local.fileButton.clicked.emit()
+
+        self.assertIn("Supported files (*.nii *.nii.gz)",
+                      qt.QFileDialog.last_open_file_args[3])
+
+    def test_a_non_volume_file_argument_gets_a_plain_row(self):
+        """A csv input cannot be satisfied by a scan open in the scene, so it
+        gets no sources dropdown at all - the row IS the picker."""
         field = formgen.file_widget({"type": "csv_file", "types": ["csv_file"]})
 
-        self.assertIsInstance(field, ctk.ctkPathLineEdit)
-        self.assertEqual(field.filters, ctk.ctkPathLineEdit.Files)
-
-    def test_a_generic_file_argument_is_left_unrestricted(self):
-        field = formgen.file_widget({"type": "file", "types": ["file"]})
-
-        self.assertEqual(field.nameFilters, [])
-        self.assertEqual(field.nameFilterAssignments, 0)
-
-    def test_single_kind_pickers_are_configured_once_and_never_touched(self):
-        # Regression: re-assigning nameFilters on a live ctkPathLineEdit
-        # corrupts it and crashes Slicer, either on the next filters
-        # assignment or later at teardown. Every ctkPathLineEdit this module
-        # hands out must come fully configured and stay that way.
-        for spec, mode in (
-            ({"types": ["csv_file"]}, "single_file"),
-            ({"types": ["zip_file"]}, "folder_zip"),
-            ({"types": ["file"]}, "single_file"),
-        ):
-            picker = formgen.file_widget(spec, mode)
-            self.assertEqual(picker.filterAssignments, 1, mode)
-            self.assertLessEqual(picker.nameFilterAssignments, 1, mode)
+        self.assertIsInstance(field, formgen.FileOrFolderInput)
+        self.assertNotIsInstance(field, formgen.ServerFileInput)
 
 
 # ---------------------------------------------------------------------------
@@ -725,7 +791,7 @@ class MultiChoiceLayoutTest(unittest.TestCase):
 
         Measured in Slicer on ALI's cranial base: eleven 20 px check boxes sat
         94 px apart, three sparse lines floating in a tall empty box, which is
-        what "le tableau est moche, pas bien proportionne" describes. Qt has no
+        what "the table looks ugly, badly proportioned" describes. Qt has no
         pack flag; a trailing stretched row and column is the idiom.
         """
         group = self._group("tabs", _LAYOUT_GROUPS)
@@ -808,7 +874,7 @@ class MultiChoiceLayoutTest(unittest.TestCase):
         """The original extension's `Switch group selection`, restored.
 
         Dropping it made a ten-landmark region cost ten clicks, which is what
-        "cocher une region active tous les landmarks de cette region" is asking
+        "ticking a region turns on every landmark in that region" is asking
         for. Scoped to the tab: the other groups are untouched.
         """
         group = self._group("tabs", _LAYOUT_GROUPS)
@@ -1228,9 +1294,14 @@ class AcceptsVolumeTest(unittest.TestCase):
     def test_a_csv_input_never_offers_scene_volumes(self):
         self.assertFalse(formgen.accepts_volume(EXAMPLE_TOOL_SCHEMA["arguments"]["input"]))
 
-    def test_a_surface_only_input_does_not_qualify(self):
+    def test_a_surface_only_input_qualifies_now_that_meshes_count(self):
+        """It did not, and that was the narrower question: "can a scalar volume
+        satisfy this". What the row actually asks is whether the SCENE can --
+        and a mesh argument is satisfied by a model open in Slicer exactly as a
+        scan argument is by a volume. `scene_kinds_for` says which kinds."""
         spec = {"types": ["surface_file"], "extensions": {"surface_file": [".vtk", ".stl"]}}
-        self.assertFalse(formgen.accepts_volume(spec))
+        self.assertTrue(formgen.accepts_volume(spec))
+        self.assertEqual(formgen.scene_kinds_for(spec), ("model",))
 
 
 class HumanSizeTest(unittest.TestCase):
@@ -1283,7 +1354,7 @@ class InputSourcesTest(unittest.TestCase):
 
     There is no "Upload my own file..." entry any more: it was a MODE dressed
     as a file, and what says whether the argument has been given anything is
-    the path field.
+    the picker's own `currentPath`.
     """
 
     def setUp(self):
@@ -1306,14 +1377,21 @@ class InputSourcesTest(unittest.TestCase):
         """
         column = self.widget.container.layout
         self.assertIsInstance(column, qt.QVBoxLayout)
-        controls, caption = column.widgets
-        self.assertIs(caption, self.widget.caption)
+        controls = column.widgets[0]
         self.assertIsInstance(controls.layout, qt.QHBoxLayout)
         self.assertIs(controls.layout.widgets[0], self.widget.combo)
+        # The second line lives on the PICKER now, so a row without dropdowns
+        # has one too -- a `.csv` argument used to show nothing at all.
+        self.assertIs(self.widget.caption, self.widget.local.caption)
 
-    def test_the_caption_is_hidden_until_there_is_something_to_say(self):
-        self.assertFalse(self.widget.caption.isVisible())
-        self.assertEqual(self.widget.caption.text, "")
+    def test_the_caption_says_so_when_nothing_is_chosen(self):
+        """It used to hide, on the reasoning that an empty line is noise. That
+        held while the row had a path field: its placeholder said "nothing here
+        yet". The field is gone, and a row of two buttons with no caption reads
+        as a row whose state nobody thought to show -- with Apply greyed and
+        nothing saying which input is the one still missing."""
+        self.assertTrue(self.widget.caption.isVisible())
+        self.assertEqual(self.widget.caption.text, formgen.NOTHING_CHOSEN)
 
     def test_a_downloaded_test_file_says_its_name_and_its_kind(self):
         """The complaint this exists for: the row showed
@@ -1340,7 +1418,7 @@ class InputSourcesTest(unittest.TestCase):
 
         formgen.set_local_path(self.widget, path)
 
-        self.assertIn("test data", self.widget.caption.text)
+        self.assertIn("Test File:", self.widget.caption.text)
 
     def test_a_file_the_user_chose_themselves_claims_nothing_of_the_sort(self):
         path = os.path.join(self.temp, "my_own_patient.nii.gz")
@@ -1372,20 +1450,27 @@ class InputSourcesTest(unittest.TestCase):
 
     def test_the_full_path_stays_reachable_as_a_tooltip(self):
         """The caption names the file; the tooltip says where it sits. Neither
-        costs a line the panel does not have."""
+        costs a line the panel does not have.
+
+        It sits on the picker's CONTAINER now, the field it used to sit on
+        having gone: the pointer is over the button group, and a tooltip on a
+        widget nobody hovers is a path nobody can read.
+        """
         path = os.path.join(self.temp, "MG_test_scan.nii.gz")
         open(path, "wb").close()
 
         formgen.set_local_path(self.widget, path)
 
-        self.assertEqual(self.widget.local.pathEdit.toolTip(), path)
+        self.assertEqual(self.widget.local.container.toolTip(), path)
 
     def test_an_open_volume_says_it_is_one(self):
         """Nothing is on disk for it, so `describe_file` has nothing to read --
         and "no file chosen" would be a lie about a satisfied argument."""
-        self.widget.combo.setCurrentIndex(2)
+        self.widget.sceneCombo.setCurrentIndex(1)
 
-        self.assertIn("Open volume", self.widget.caption.text)
+        # Named for what it IS: "Volume" over a surface would be wrong on ALI,
+        # which takes scans, surfaces and landmarks through one argument.
+        self.assertIn("Volume:", self.widget.caption.text)
         self.assertIn("CBCT_patient1", self.widget.caption.text)
 
     def test_the_caption_empties_when_the_input_does(self):
@@ -1395,19 +1480,24 @@ class InputSourcesTest(unittest.TestCase):
 
         formgen.set_local_path(self.widget, "")
 
-        self.assertEqual(self.widget.caption.text, "")
-        self.assertFalse(self.widget.caption.isVisible())
+        self.assertEqual(self.widget.caption.text, formgen.NOTHING_CHOSEN)
 
-    def test_entries_are_the_prompt_then_test_files_then_volumes(self):
-        combo = self.widget.combo
+    def test_each_source_has_a_list_of_its_own(self):
+        """They used to share one. Two unrelated questions -- "fetch the tool's
+        sample data" and "use what is already open in Slicer" -- read as a
+        single jumbled menu, and one list cannot be hidden for a row that
+        takes no scene node while the other stays."""
+        combo, scene = self.widget.combo, self.widget.sceneCombo
         self.assertEqual(
             [combo.itemText(i) for i in range(combo.count)],
-            [
-                formgen.ServerFileInput.PROMPT_BOTH,
-                "MG_test_scan.nii.gz  (file, 94 MB)",
-                formgen.OPEN_VOLUME_PREFIX + "CBCT_patient1",
-                formgen.OPEN_VOLUME_PREFIX + "CBCT_patient2",
-            ],
+            [formgen.ServerFileInput.PROMPT_HOSTED,
+             "MG_test_scan.nii.gz  (file, 94 MB)"],
+        )
+        self.assertEqual(
+            [scene.itemText(i) for i in range(scene.count)],
+            [formgen.ServerFileInput.PROMPT_VOLUMES,
+             formgen.OPEN_VOLUME_PREFIX + "CBCT_patient1",
+             formgen.OPEN_VOLUME_PREFIX + "CBCT_patient2"],
         )
 
     def test_the_prompt_names_what_the_list_holds(self):
@@ -1417,23 +1507,35 @@ class InputSourcesTest(unittest.TestCase):
         side, and the dropdown read as a duplicate of the field beside it rather
         than as the one place a tool's test data is reached from. Nobody opens a
         control that appears to repeat its neighbour.
+
+        The field is gone, so the duplication cannot happen on screen any more,
+        but the words are still there (`PATH_PLACEHOLDER`, the fallback for an
+        empty list) and a list that HAS test data in it must not fall back to
+        them: "Select a file or a folder" says nothing about what is inside.
         """
         self.assertEqual(self.widget.combo.itemText(0),
-                         formgen.ServerFileInput.PROMPT_BOTH)
+                         formgen.ServerFileInput.PROMPT_HOSTED)
         self.assertNotEqual(self.widget.combo.itemText(0),
-                            self.widget.local.pathEdit.placeholderText)
+                            formgen.PATH_PLACEHOLDER)
 
     def test_the_prompt_offers_only_what_is_there(self):
         """Naming a source the list does not have would be worse than saying
         nothing: a user opens it, finds no test data, and stops trusting it."""
+        self.widget.setSceneSupported(True)
         self.widget.setVolumeChoices([])
         self.assertEqual(self.widget.combo.itemText(0),
                          formgen.ServerFileInput.PROMPT_HOSTED)
+        # Shown but GREY: hidden, nobody learns the row can be filled that way
+        # at all -- which is exactly how the feature looked missing on every
+        # module but the one whose scene happened to hold the right kind.
+        self.assertTrue(self.widget.sceneCombo.isVisible())
+        self.assertFalse(self.widget.sceneCombo._enabled)
 
         self.widget.setChoices([])
         self.widget.setVolumeChoices(["CBCT_patient1"])
         self.assertEqual(self.widget.combo.itemText(0),
-                         formgen.ServerFileInput.PROMPT_VOLUMES)
+                         formgen.ServerFileInput.CHOOSE_OPTION)
+        self.assertTrue(self.widget.sceneCombo.isVisible())
 
     def test_an_empty_list_keeps_the_neutral_words(self):
         self.widget.setChoices([])
@@ -1454,7 +1556,9 @@ class InputSourcesTest(unittest.TestCase):
         """The box stays narrow on purpose, so the prompt is the first thing
         elided -- the tooltip is where it survives."""
         self.assertEqual(self.widget.combo.toolTip(),
-                         formgen.ServerFileInput.PROMPT_BOTH)
+                         formgen.ServerFileInput.PROMPT_HOSTED)
+        self.assertEqual(self.widget.sceneCombo.toolTip(),
+                         formgen.ServerFileInput.PROMPT_VOLUMES)
 
     def test_the_default_state_names_nothing(self):
         self.assertEqual(self.widget.hosted_name(), "")
@@ -1474,7 +1578,7 @@ class InputSourcesTest(unittest.TestCase):
     def test_a_test_file_pick_clears_a_previously_chosen_path(self):
         """Cleared when the pick starts, not when the download lands: a run
         launched mid-download must not send the file it replaced."""
-        self.widget.local.pathEdit.setText("/data/my_own_scan.nii.gz")
+        self.widget.local.setCurrentPath("/data/my_own_scan.nii.gz")
 
         self.widget.combo.setCurrentIndex(1)
 
@@ -1489,12 +1593,12 @@ class InputSourcesTest(unittest.TestCase):
 
         self.assertEqual(self.widget.currentPath, "/tmp/session/MG_test_scan.nii.gz")
         # The dropdown is an action list, not a mode: once the file is on disk
-        # the path field is the whole of the state.
+        # the local path is the whole of the state.
         self.assertEqual(self.widget.combo.currentIndex, 0)
         self.assertEqual(self.widget.hosted_name(), "")
 
     def test_choosing_a_volume_is_not_a_test_file_selection(self):
-        self.widget.combo.setCurrentIndex(2)
+        self.widget.sceneCombo.setCurrentIndex(1)
 
         self.assertEqual(self.widget.volume_name(), "CBCT_patient1")
         self.assertEqual(self.widget.hosted_name(), "")
@@ -1502,22 +1606,28 @@ class InputSourcesTest(unittest.TestCase):
         self.assertEqual(self.widget.currentPath, "")
 
     def test_choosing_a_volume_clears_the_local_path(self):
-        self.widget.local.pathEdit.setText("/data/scan.nii.gz")
+        self.widget.local.setCurrentPath("/data/scan.nii.gz")
 
-        self.widget.combo.setCurrentIndex(3)
+        self.widget.sceneCombo.setCurrentIndex(2)
 
         self.assertEqual(self.widget.local.currentPath, "")
 
-    def test_typing_a_local_path_resets_the_dropdown(self):
-        self.widget.combo.setCurrentIndex(2)
+    def test_a_local_path_resets_the_dropdown(self):
+        """The other half of the mutual exclusion, and nothing is typed to get
+        it any more: a browse dialog, or `set_local_path` once a download has
+        landed, writes the path and the chosen entry has to let go. A
+        precedence rule the user cannot see is how you end up sending a file
+        you thought you had replaced."""
+        self.widget.sceneCombo.setCurrentIndex(2)
 
-        self.widget.local.pathEdit.setText("/data/scan.nii.gz")
+        self.widget.local.setCurrentPath("/data/scan.nii.gz")
 
         self.assertEqual(self.widget.volume_name(), "")
+        self.assertEqual(self.widget.sceneCombo.currentIndex, 0)
         self.assertEqual(self.widget.currentPath, "/data/scan.nii.gz")
 
     def test_a_chosen_volume_survives_a_test_file_list_refresh(self):
-        self.widget.combo.setCurrentIndex(2)
+        self.widget.sceneCombo.setCurrentIndex(1)
 
         self.widget.setChoices([
             {"name": "MG_test_scan.nii.gz", "kind": "file", "size": 94 * 1024 * 1024},
@@ -1527,14 +1637,14 @@ class InputSourcesTest(unittest.TestCase):
         self.assertEqual(self.widget.volume_name(), "CBCT_patient1")
 
     def test_a_gone_volume_falls_back_to_the_prompt(self):
-        self.widget.combo.setCurrentIndex(2)
+        self.widget.sceneCombo.setCurrentIndex(1)
 
         self.widget.setVolumeChoices([])
 
         self.assertEqual(self.widget.volume_name(), "")
-        # The prompt follows what is left in the list: the test files.
-        self.assertEqual(self.widget.combo.currentText,
-                         formgen.ServerFileInput.PROMPT_HOSTED)
+        # And the list goes with it: a dropdown holding only its own prompt is
+        # a control that can only disappoint.
+        self.assertFalse(self.widget.sceneCombo.isVisible())
 
     def test_a_refresh_starts_no_download_of_its_own(self):
         """clear()+addItems reselects index 0 and would otherwise fire the
@@ -2099,3 +2209,211 @@ class MinimumSelectionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ServerFileInputClearTest(unittest.TestCase):
+    """`clear()` exists for a caller outside the dropdown that decides an
+    argument is no longer satisfied — AutoMatrix's mirror check box, which fills
+    Transforms when ticked and must not leave the matrix behind when unticked.
+
+    What it must NOT do is read as the user having chosen something: the write is
+    guarded the way every other programmatic write to this widget is, so a panel
+    watching for changes is not told a hosted file was picked.
+    """
+
+    def _input(self):
+        widget = formgen.ServerFileInput(qt.QLineEdit())
+        widget.setChoices([{"name": "Mirror", "kind": "folder", "size": 468}])
+        return widget
+
+    def test_a_filled_input_is_emptied(self):
+        widget = self._input()
+        formgen._set_local_path(widget.local, "/tmp/downloads/Mirror")
+        self.assertEqual(widget.currentPath, "/tmp/downloads/Mirror")
+
+        widget.clear()
+
+        self.assertEqual(widget.currentPath, "")
+        self.assertEqual(widget.combo.currentIndex, 0, "the dropdown kept its pick")
+
+    def test_clearing_does_not_fire_the_hosted_action(self):
+        picked = []
+        widget = self._input()
+        widget.setHostedCallback(picked.append)
+        formgen._set_local_path(widget.local, "/tmp/downloads/Mirror")
+
+        widget.clear()
+
+        self.assertEqual(picked, [], "clearing was mistaken for picking an entry")
+
+
+class OverridesMayOnlyNameRealArgumentsTest(unittest.TestCase):
+    """A FILE_INPUTS entry MODIFIES an argument the tool declares.
+
+    Naming one it does not is always a module left behind by a rename, and the
+    merge used to take it at its word: SurgMovPred's `input` became
+    `measurements` when the tool was packaged, and the panel kept showing an
+    "Input" picker -- styled optional, since there was no spec to say
+    otherwise -- that uploaded to an argument the server would have refused.
+    """
+
+    SCHEMA = {"measurements": {"type": "path"}, "model": {"type": "str"}}
+
+    def test_an_override_naming_no_argument_adds_no_row(self):
+        modes = formgen.file_input_modes(self.SCHEMA, {"input": "folder_zip"})
+
+        self.assertNotIn("input", modes)
+        self.assertEqual(list(modes), ["measurements"])
+
+    def test_an_override_on_a_real_argument_still_applies(self):
+        modes = formgen.file_input_modes(self.SCHEMA, {"measurements": "folder_zip"})
+
+        self.assertEqual(modes["measurements"], "folder_zip")
+
+    def test_a_failed_schema_fetch_drops_no_override(self):
+        """No schema means no form either, and warning once per override about
+        a tool nobody could reach says nothing useful."""
+        modes = formgen.file_input_modes({}, {"input": "folder_zip"})
+
+        self.assertEqual(modes, {"input": "folder_zip"})
+
+
+class DescribeFolderTest(unittest.TestCase):
+    """What a folder HOLDS, which is the only thing that confirms it is the
+    right one.
+
+    "2_TAD_VTKFiles_L_T2 - folder, 73 MB" says nothing a wrong folder would not
+    also say. The count and the kind do: pointing one level too high shows a
+    different count, and pointing at nothing shows `empty`.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _write(self, relative, size=1024):
+        path = os.path.join(self.dir, relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(b"x" * size)
+
+    def test_one_kind_is_named_on_its_own(self):
+        for index in range(14):
+            self._write("L%02d_T2_L.vtk" % index)
+
+        self.assertIn("14 VTK surfaces", formgen.describe_file(self.dir))
+
+    def test_a_single_file_is_not_pluralised(self):
+        self._write("only.vtk")
+
+        self.assertIn("1 VTK surface,", formgen.describe_file(self.dir))
+
+    def test_a_kind_already_ending_in_s_is_left_alone(self):
+        """`FILE_KINDS` holds "Slicer markups"; a blind `+ "s"` put
+        "Slicer markupss" on screen."""
+        self._write("a.mrk.json")
+        self._write("b.mrk.json")
+
+        self.assertIn("2 Slicer markups,", formgen.describe_file(self.dir))
+
+    def test_a_mixed_folder_names_its_two_largest_groups(self):
+        for index in range(5):
+            self._write("scan%d.nii.gz" % index)
+        self._write("a.mrk.json")
+        self._write("b.mrk.json")
+        self._write("notes.csv")
+
+        text = formgen.describe_file(self.dir)
+        self.assertIn("8 files", text)
+        self.assertIn("5 NIfTI volumes", text)
+        self.assertIn("2 Slicer markups", text)
+        self.assertIn("and more", text)
+
+    def test_it_counts_the_whole_tree(self):
+        """A cohort whose scans sit under per-patient directories is the normal
+        shape; counting only the top level would report zero for it."""
+        self._write(os.path.join("Pat_01", "scan.nii.gz"))
+        self._write(os.path.join("Pat_02", "scan.nii.gz"))
+
+        self.assertIn("2 NIfTI volumes", formgen.describe_file(self.dir))
+
+    def test_an_empty_folder_says_so(self):
+        """The signal that you pointed one level too high."""
+        self.assertIn("empty", formgen.describe_file(self.dir))
+
+    def test_hidden_files_are_not_counted(self):
+        """`.DS_Store` beside fourteen surfaces must not read as fifteen."""
+        for index in range(3):
+            self._write("s%d.vtk" % index)
+        self._write(".DS_Store")
+
+        text = formgen.describe_file(self.dir)
+        self.assertIn("3 VTK surfaces", text)
+        # And ONE kind, so the caption stays "3 VTK surfaces" rather than
+        # becoming "4 files (3 VTK surfaces, 1 file)" -- which is what counting
+        # it produced, and reads as a folder holding something unexpected.
+        self.assertNotIn("4 files", text)
+
+    def test_a_folder_of_empty_files_still_reads_as_a_folder(self):
+        """`human_size(0)` is empty, and a trailing comma with nothing after it
+        reads as a value that failed to load."""
+        self._write("empty.vtk", size=0)
+
+        text = formgen.describe_file(self.dir)
+        self.assertFalse(text.rstrip().endswith(","), text)
+
+    def test_a_file_is_still_described_as_a_file(self):
+        self._write("scan.nii.gz", size=2048)
+
+        self.assertIn("NIfTI volume",
+                      formgen.describe_file(os.path.join(self.dir, "scan.nii.gz")))
+
+
+class SelectionLabelTest(unittest.TestCase):
+    """The row's second line is feedback, not a footnote.
+
+    There is no path field any more and a dropdown returns to its prompt as
+    soon as it is picked, so this line is the ONLY thing saying a choice
+    registered. Rendered as a hint -- muted, 8pt -- it read as explanatory text
+    a reader may skip, and a clinician who had just chosen a scan could not
+    tell whether the panel had taken it.
+    """
+
+    def test_it_is_the_largest_text_on_the_row(self):
+        """Raised twice before it read as feedback: 8pt muted was a footnote,
+        10pt was still close enough to the surrounding text to be scanned
+        past. Everything above this line is a control offering a choice; this
+        is the answer, and it should be the thing the eye lands on."""
+        selection = design.selection_label("Folder: /data/cohort")
+        hint = design.hint_label("CBCT only: ignored for intraoral scans")
+
+        self.assertIn("font-size: 12pt", selection._stylesheet)
+        self.assertIn("font-weight: 600", selection._stylesheet)
+        self.assertIn("font-size: 8pt", hint._stylesheet)
+
+    def test_it_is_still_a_statement_and_not_a_control(self):
+        """No border, no fill: a filled block here would read as a third thing
+        to click, beside two dropdowns and two buttons."""
+        style = design.selection_label("Folder: /data/cohort")._stylesheet
+
+        self.assertNotIn("border", style)
+        self.assertNotIn("background", style)
+
+    def test_it_uses_the_body_colour_not_the_muted_one(self):
+        selection = design.selection_label("Folder: /data/cohort")
+
+        self.assertIn(design.tokens()["TEXT"], selection._stylesheet)
+        self.assertNotIn(design.tokens()["TEXT_MUTED"], selection._stylesheet)
+
+    def test_it_wraps_rather_than_eliding(self):
+        """A full path is long, and the whole reason this line replaced the
+        field is that a field could only show a fragment of one."""
+        selection = design.selection_label("Folder: " + "/very/long/path" * 8)
+
+        self.assertTrue(selection.wordWrap)
+
+    def test_both_themes_define_what_it_needs(self):
+        """A colour defined in one theme and not the other is a KeyError in
+        the theme nobody tests in."""
+        for theme in (design._LIGHT, design._DARK):
+            self.assertIn("TEXT", theme)
