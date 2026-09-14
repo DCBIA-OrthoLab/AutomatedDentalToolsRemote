@@ -4,12 +4,6 @@ set(MODULE_NAME BATCHDENTALSEG)
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
-  BATCHDENTALSEGLib/__init__.py
-  BATCHDENTALSEGLib/IconPath.py
-  BATCHDENTALSEGLib/PythonDependencyChecker.py
-  BATCHDENTALSEGLib/SegmentationWidget.py
-  BATCHDENTALSEGLib/Signal.py
-  BATCHDENTALSEGLib/Utils.py
   Testing/__init__.py
   Testing/IntegrationTestCase.py
   Testing/SegmentationWidgetTestCase.py

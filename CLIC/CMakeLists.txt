@@ -4,14 +4,12 @@ set(MODULE_NAME CLIC)
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
-  runner/clic_runner.py
 
 
 )
 
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/CLIC.png
-  Resources/UI/CLIC.ui
 
 )
 
