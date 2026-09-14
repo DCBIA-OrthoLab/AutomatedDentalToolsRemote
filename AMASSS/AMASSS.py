@@ -11,9 +11,7 @@ Authors:
 - Baptiste Baquero (UoM)
 """
 
-import os
 
-import qt
 import slicer
 from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule
@@ -84,6 +82,13 @@ class AMASSSWidget(ServerToolWidgetBase):
     MAX_RESULTS_TO_LOAD = 12
     # Extension -> the slicer_io kind that loads it. Surfaces are only there
     # when the run asked for them (the schema's generate_surface).
+
+    # This module works on CBCTs, so any scan it is given or produces is shown
+    # in 3D with this preset -- an input the clinician just picked as much as a
+    # result. "" for a module whose data is not a CT-like volume; nothing then
+    # happens, and nothing happens anyway for one whose files load as meshes.
+    VOLUME_RENDERING = "CT-AAA"
+
     _LOADABLE = (
         ("*.nii.gz", "labelmap"),
         ("*.nii", "labelmap"),
@@ -92,19 +97,8 @@ class AMASSSWidget(ServerToolWidgetBase):
         ("*.vtk", "model"),
     )
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._loadResultsCheckBox = None
-
-    def addExtraWidgets(self, layout) -> None:
-        self._loadResultsCheckBox = qt.QCheckBox(_("Load the results into the scene when done"))
-        self._loadResultsCheckBox.setChecked(True)
-        layout.addWidget(self._loadResultsCheckBox)
-
     def handleResult(self, result) -> None:
         """Unpack the archive (base class), then optionally load what it held."""
         super().handleResult(result)
 
-        if not (self._loadResultsCheckBox and self._loadResultsCheckBox.isChecked()):
-            return
-        self._loadResults()
+        self._maybeLoadResults()

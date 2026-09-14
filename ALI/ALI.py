@@ -33,7 +33,6 @@ Three things about ALI's schema are worth knowing when reading this file:
   that report is this module's one real job - see handleResult.
 """
 
-import json
 import logging
 import os
 
@@ -90,6 +89,7 @@ class ALIWidget(ServerToolWidgetBase):
     in ServerToolsCoreLib. See ARCHITECTURE.md."""
 
     TOOL_NAME = "ALI"
+    RUN_REPORT = "run_report.json"
 
     # The one thing ALI's schema cannot state. `input` is typed
     # ("volume_or_zip_file", "surface_or_zip_file") - both file types, no
@@ -98,6 +98,12 @@ class ALIWidget(ServerToolWidgetBase):
     # folder, base_widget zips it, and the server extracts it. Which of the two
     # was given is read off the path at upload time, never asked.
     FILE_INPUTS = {"input": "file_or_folder"}
+
+    # The CBCT engine takes a scan in, so one picked as input is shown in 3D
+    # with this preset. Its own results are markups, loaded by this module's
+    # own path below, and an IOS surface loads as a mesh -- neither is a volume,
+    # so neither reaches this.
+    VOLUME_RENDERING = "CT-AAA"
 
     # RESULT_KIND is deliberately absent: output_kind is "files", which can
     # only mean "save the archive", and formgen.result_kind_for derives it.
@@ -150,22 +156,6 @@ class ALIWidget(ServerToolWidgetBase):
         loaded = self._loadMarkups(markupFiles)
 
         slicer.util.infoDisplay(self._summarize(resultDir, report, len(markupFiles), loaded))
-
-    @staticmethod
-    def _readRunReport(resultDir: str):
-        """The run report, or None when there isn't a readable one.
-
-        Never fatal: the results themselves are already on disk and are what
-        the user asked for. A missing or malformed report costs them the
-        summary, not the run.
-        """
-        path = os.path.join(resultDir, "run_report.json")
-        try:
-            with open(path, encoding="utf-8") as handle:
-                return json.load(handle)
-        except (OSError, ValueError) as exc:
-            logger.warning("Could not read %s: %s", path, exc)
-            return None
 
     @staticmethod
     def _findMarkupFiles(resultDir: str) -> list:

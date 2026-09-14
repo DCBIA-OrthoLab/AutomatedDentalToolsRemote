@@ -4,8 +4,8 @@ Replaces the former local module (a Slicer widget driving Automatrix_CLI, plus
 a Mirror check box that downloaded a matrix from a GitHub release and typed its
 path into the matrix field). Nothing is computed in Slicer any more: the panel
 is generated from the server's `GET /tools` entry, the scans and the matrices
-go up, the moved files come back. AutoMatrix_Method/ and Resources/UI/ are left
-in the tree but are no longer wired to this module.
+go up, the moved files come back. AutoMatrix_Method/ went with it; the unused
+Resources/UI/ is all that is left of the hand-written panel.
 
 Three things about AutoMatrix's schema are worth knowing when reading this file:
 
@@ -22,7 +22,6 @@ Three things about AutoMatrix's schema are worth knowing when reading this file:
   and both kinds are offered to the scene.
 """
 
-import glob
 import json
 import logging
 import os
@@ -32,7 +31,7 @@ import slicer
 from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule
 
-from ServerToolsCoreLib import slicer_io
+from ServerToolsCoreLib import formgen, slicer_io
 from ServerToolsCoreLib.base_widget import ServerToolWidgetBase
 
 logger = logging.getLogger("AutoMatrix")
@@ -71,6 +70,8 @@ class AutoMatrixWidget(ServerToolWidgetBase):
     in ServerToolsCoreLib. See ARCHITECTURE.md."""
 
     TOOL_NAME = "AutoMatrix"
+    LOAD_RESULTS_LABEL = _("Load the moved scans and landmarks into the scene when done")
+    RUN_REPORT = "AutoMatrix_report.json"
 
     # No FILE_INPUTS. `scans`, `matrices` and `reference` are a packaged tool's
     # `path`, and the client already gives that a picker taking a file OR a
@@ -89,11 +90,18 @@ class AutoMatrixWidget(ServerToolWidgetBase):
     # output.
     MAX_RESULTS_TO_LOAD = 12
 
+    # This module works on CBCTs, so any scan it is given or produces is shown
+    # in 3D with this preset -- an input the clinician just picked as much as a
+    # result. "" for a module whose data is not a CT-like volume; nothing then
+    # happens, and nothing happens anyway for one whose files load as meshes.
+    VOLUME_RENDERING = "CT-AAA"
+
     # Pattern -> how to load it. A moved scan is a VOLUME whether or not it was
     # a segmentation: AutoMatrix resamples a label map, it does not create one,
     # and loading a mask as a segmentation node here would relabel a file the
     # user already has labelled. `AutoMatrix_report.json` is deliberately
-    # absent, and so is `*.mrk.json`'s neighbour glob -- see _findResults.
+    # absent: the report is a `.json` and not a `.mrk.json`, so the markups
+    # pattern below never picks it up.
     _LOADABLE = (
         ("*.nii.gz", "volume"),
         ("*.nii", "volume"),
@@ -103,17 +111,94 @@ class AutoMatrixWidget(ServerToolWidgetBase):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._loadResultsCheckBox = None
+        self._mirrorCheckBox = None
 
     # ------------------------------------------------------------------
     # Panel
     # ------------------------------------------------------------------
 
+    # The mirror matrix, as the tool hosts it. The legacy module fetched
+    # Mirror.zip from GitHub into the user's Documents and filled the matrix
+    # field with it; here that file is one of AutoMatrix's own hosted test files,
+    # so there is nothing to download from anywhere else -- only an entry in the
+    # Transforms dropdown that nobody would think to look for.
+    _MIRROR_TEST_FILE = "Mirror"
+
     def addExtraWidgets(self, layout) -> None:
-        self._loadResultsCheckBox = qt.QCheckBox(
-            _("Load the moved scans and landmarks into the scene when done"))
-        self._loadResultsCheckBox.setChecked(True)
-        layout.addWidget(self._loadResultsCheckBox)
+        # A check box rather than a button: it is a state of the run -- "the
+        # transform is the mirror matrix" -- not a one-off action, and it reads
+        # as one more option beside the others instead of a link floating above
+        # Apply.
+        self._mirrorCheckBox = qt.QCheckBox(_("Use the mirror matrix"))
+        self._mirrorCheckBox.connect("toggled(bool)", self._onMirrorToggled)
+        layout.addWidget(self._mirrorCheckBox)
+
+
+    def configureFields(self) -> None:
+        """Grey the mirror box off what the server actually hosts, and keep it
+        honest when the user picks a transform themselves.
+
+        Runs on every build, unlike addExtraWidgets: the panel is rebuilt when a
+        server that was down comes back, and that is exactly when the hosted list
+        goes from empty to populated. The widgets are new each time too, so the
+        connection below is made once per widget, not once per panel.
+        """
+        super().configureFields()
+        box = getattr(self, "_mirrorCheckBox", None)
+        if box is None:
+            return
+        widget = self._inputWidgets.get("transforms")
+        entries = widget.hosted_entries() if widget is not None else []
+        available = any(e.get("name") == self._MIRROR_TEST_FILE for e in entries)
+        box.setEnabled(available)
+        box.setToolTip(_(
+            "Apply the mirror matrix to every patient — reflecting a patient "
+            "across the midsagittal plane is how left is compared with right.")
+            if available else _(
+            "The server does not host the mirror matrix. Fetch it with "
+            "setup-testfiles.sh --tool AutoMatrix."))
+        if widget is not None:
+            # Choosing a transform by hand contradicts the box. Untick it rather
+            # than leave a tick claiming the mirror matrix is in a field that now
+            # holds something else.
+            formgen.connect_changed(widget, self._onTransformsChanged)
+
+    def _onTransformsChanged(self, *_args) -> None:
+        """Untick the box when Transforms stops holding the mirror matrix.
+
+        Compared against the field's contents rather than tracked with a "I am
+        writing this" flag, because the hosted file is fetched on a BackgroundJob
+        (base_widget._onHostedTestFile): the flag would already have been cleared
+        by the time the download lands and writes the path, and this handler
+        would then untick the box the download was fulfilling.
+        """
+        box = getattr(self, "_mirrorCheckBox", None)
+        if box is None or not box.checked:
+            return
+        widget = self._inputWidgets.get("transforms")
+        path = (widget.currentPath if widget is not None else "") or ""
+        if os.path.basename(path.rstrip(os.sep)) != self._MIRROR_TEST_FILE:
+            box.setChecked(False)
+
+    def _onMirrorToggled(self, checked: bool) -> None:
+        """Both halves of the mirror workflow, on one tick.
+
+        Filling Transforms goes through the same path the dropdown uses --
+        download, cache, preview. Ticking "same transform for every patient" is
+        the other half and cannot be skipped: a mirror matrix belongs to no
+        patient, so no name can pair it, and without that a cohort is refused
+        rather than guessed at.
+        """
+        widget = self._inputWidgets.get("transforms")
+        if checked:
+            self._onHostedTestFile("transforms", self._MIRROR_TEST_FILE)
+        elif widget is not None:
+            # Unticking must not leave the mirror matrix sitting in the field,
+            # where the next Apply would silently still use it.
+            widget.clear()
+        share = self._argWidgets.get("same_transform_for_every_patient")
+        if share is not None:
+            share.setChecked(bool(checked))
 
     # ------------------------------------------------------------------
     # Result
@@ -137,26 +222,7 @@ class AutoMatrixWidget(ServerToolWidgetBase):
         if report:
             slicer.util.showStatusMessage(self._summarize(report), 8000)
 
-        if self._loadResultsCheckBox and self._loadResultsCheckBox.isChecked():
-            self._loadResults()
-
-    @staticmethod
-    def _readRunReport(outputDir: str):
-        """The run report, or None when there isn't a readable one.
-
-        Never fatal: the moved files are already on disk and are what the user
-        asked for. A missing report costs them the summary, not the run.
-        """
-        found = glob.glob(os.path.join(outputDir, "**", "AutoMatrix_report.json"),
-                          recursive=True)
-        if not found:
-            return None
-        try:
-            with open(found[0], encoding="utf-8") as handle:
-                return json.load(handle)
-        except (OSError, ValueError) as exc:
-            logger.warning("Could not read %s: %s", found[0], exc)
-            return None
+        self._maybeLoadResults()
 
     @staticmethod
     def _summarize(report: dict) -> str:
@@ -167,17 +233,3 @@ class AutoMatrixWidget(ServerToolWidgetBase):
                          written=report.get("written") or 0, skipped=skipped)
         return _("AutoMatrix: {written} file(s) written.").format(
             written=report.get("written") or 0)
-
-    @classmethod
-    def _findResults(cls, outputDir: str) -> list:
-        """[(path, kind)] for every result with a loader.
-
-        The report is a `.json` and not a `.mrk.json`, so the markups pattern
-        never picks it up; it is named here only because the two extensions
-        look alike enough to be worth saying once.
-        """
-        return sorted(
-            (path, kind)
-            for pattern, kind in cls._LOADABLE
-            for path in glob.glob(os.path.join(outputDir, "**", pattern), recursive=True)
-        )

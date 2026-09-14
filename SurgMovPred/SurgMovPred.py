@@ -31,16 +31,16 @@ class SurgMovPredWidget(ServerToolWidgetBase):
     lives in ServerToolsCoreLib. See ARCHITECTURE.md."""
 
     TOOL_NAME = "Surg_Mov_Pred"
-    # Both attributes below are overrides - the two things this tool's schema
-    # cannot state. Everything else is derived from it: "model" is declared as
-    # a server_selectable str, so the auto-UI renders it as a dropdown filled
-    # from GET /tools/SurgMovPred/data and sends the chosen model's *name* - 
-    # no model file ever leaves or reaches this machine.
+    # No FILE_INPUTS. There used to be one, `{"input": "folder_zip"}`, and it
+    # named an argument this tool stopped having when it was packaged: the
+    # table is `measurements` now. An override naming an argument the schema
+    # does not declare used to be ADDED to the form, so the panel grew a row
+    # labelled "Input", styled optional because there was no spec to say
+    # otherwise, uploading to an argument the server would have rejected.
+    # `measurements` is a packaged tool's `path`, which the generic picker
+    # already takes as either one table or a folder, zipping the folder on the
+    # way out -- which is all the override ever wanted.
     #
-    # The server types "input" as a plain zip_file, so it would get a file
-    # picker; what the user actually has is a folder of measurement files, and
-    # zipping it is the client's job.
-    FILE_INPUTS = {"input": "folder_zip"}
     # output_kind is "file", which says a file comes back but not what to do
     # with it: save it, rather than load it into the scene.
     RESULT_KIND = "save_as"

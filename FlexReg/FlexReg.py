@@ -74,6 +74,11 @@ class FlexRegWidget(ServerToolWidgetBase):
     # it does not label one. `*.tfm` is deliberately absent -- the transform
     # carries a measurement back onto the original acquisition, and loading it
     # into the scene applies nothing by itself.
+    # `reference` is the surface a patch is registered ONTO, but the word is
+    # ambiguous on its own -- AREG's `cbct_reference` is a volume -- so the
+    # name rule leaves it alone rather than guessing. Said here instead.
+    SCENE_INPUTS = {"reference": ("model",)}
+
     _LOADABLE = (
         ("*.vtk", "model"),
         ("*.vtp", "model"),

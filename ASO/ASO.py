@@ -7,18 +7,14 @@ is installed into Slicer's interpreter, no conda environment is created and no
 reference bundle is downloaded to this machine.
 
 Replaces the former local module, which drove the PRE/SEMI_ASO_CBCT and
-PRE/SEMI_ASO_IOS CLIs from inside Slicer. `ASO_Method/` and
-`Resources/UI/ASO.ui` are left in the tree but are no longer wired to this one.
+PRE/SEMI_ASO_IOS CLIs from inside Slicer through a conda environment and a
+pytorch3d wheel. `ASO_Method/` went with it and is no longer in the tree.
 
 Authors:
 - Nathan Hutin (UoM)
 - Luc Anchling (UoM)
 """
 
-import glob
-import os
-
-import qt
 import slicer
 from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule
@@ -98,6 +94,11 @@ class ASOWidget(ServerToolWidgetBase):
     # returns hundreds of files, and loading them all would be worse than
     # useless.
     MAX_RESULTS_TO_LOAD = 12
+
+    # The oriented scan IS the result here, so the 3D view starting empty reads
+    # as a run that did nothing. CT-AAA because the output is a dental CBCT;
+    # see slicer_io.show_volume_rendering for the shift applied over it.
+    VOLUME_RENDERING = "CT-AAA"
     # Pattern -> how to load it. The oriented CBCT is a VOLUME, not a
     # segmentation: ASO moves a scan, it does not label one. `*.tfm` is
     # deliberately absent - the transform is there to carry a measurement back
@@ -114,29 +115,8 @@ class ASOWidget(ServerToolWidgetBase):
         ("*.mrk.json", "markups"),
     )
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._loadResultsCheckBox = None
-
-    def addExtraWidgets(self, layout) -> None:
-        self._loadResultsCheckBox = qt.QCheckBox(_("Load the results into the scene when done"))
-        self._loadResultsCheckBox.setChecked(True)
-        layout.addWidget(self._loadResultsCheckBox)
-
     def handleResult(self, result) -> None:
         """Unpack the archive (base class), then optionally load what it held."""
         super().handleResult(result)
 
-        if not (self._loadResultsCheckBox and self._loadResultsCheckBox.isChecked()):
-            return
-        self._loadResults()
-
-    @classmethod
-    def _findResults(cls, outputDir: str) -> list:
-        """[(path, kind)] for every result with a loader, in the per-case tree
-        the server built."""
-        return sorted(
-            (path, kind)
-            for pattern, kind in cls._LOADABLE
-            for path in glob.glob(os.path.join(outputDir, "**", pattern), recursive=True)
-        )
+        self._maybeLoadResults()
