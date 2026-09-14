@@ -6,7 +6,7 @@ set(MODULE_NAME ServerToolsCore)
 # right. It is listed here as extra SCRIPTS of the hidden ServerToolsCore
 # module so it lands next to it and is importable via `from ServerToolsCoreLib
 # import ...` from any scripted module in the extension (see ARCHITECTURE.md,
-# "Build system" section, for why this mirrors BATCHDENTALSEGLib rather than
+# "Build system" section, for why this mirrors FlexRegLib rather than
 # using a raw install(DIRECTORY ...) into Slicer_QTSCRIPTEDMODULES_LIB_DIR).
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py

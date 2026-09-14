@@ -513,7 +513,7 @@ class TestServerSideInput(unittest.TestCase):
 
     def test_the_prompt_leads_and_names_nothing(self):
         self.assertEqual(
-            self.widget.combo.itemText(0), formgen.ServerFileInput.CHOOSE_OPTION
+            self.widget.combo.itemText(0), formgen.ServerFileInput.PROMPT_HOSTED
         )
         self.assertEqual(self.widget.combo.count, 3)
         self.assertEqual(self.widget.hosted_name(), "")
@@ -535,7 +535,7 @@ class TestServerSideInput(unittest.TestCase):
 
     def test_the_two_halves_are_mutually_exclusive_and_visibly_so(self):
         self.widget.combo.setCurrentIndex(1)
-        self.widget.local.pathEdit.setText("/data/my_own_scan.nii.gz")
+        self.widget.local.setCurrentPath("/data/my_own_scan.nii.gz")
         # Picking a local file resets the dropdown rather than losing to it:
         # a precedence rule the user cannot see is how you end up sending the
         # file you thought you had replaced.

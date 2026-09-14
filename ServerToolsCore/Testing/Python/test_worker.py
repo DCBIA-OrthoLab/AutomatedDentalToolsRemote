@@ -106,6 +106,69 @@ class YieldTimerLifecycle(unittest.TestCase):
         release.set()
 
 
+class CancelToken(unittest.TestCase):
+    """`cancel()` used to cancel nothing at all.
+
+    It set a flag, stopped the timers, and let the daemon thread run to
+    completion inside `requests` with its outcome quietly dropped. The UI half
+    of that is right and unchanged. What was missing is a token the TARGET can
+    see, so the work itself can stop: a cancelled run must not go on to pull a
+    four-hundred-megabyte archive down for a panel that has already closed.
+    """
+
+    def test_a_job_always_has_one_even_when_nobody_asked(self):
+        job = worker.BackgroundJob(target=lambda progress: None)
+        self.assertFalse(job.cancel_event.is_set())
+
+    def test_cancelling_sets_it(self):
+        job = worker.BackgroundJob(target=lambda progress: None)
+        job.cancel()
+        self.assertTrue(job.cancel_event.is_set())
+
+    def test_the_caller_s_own_event_is_used_rather_than_a_second_one(self):
+        """The panel hands the run's event in, because the run's progress
+        watcher reads the SAME event: cancelling has to close the stream in the
+        same gesture that stops the work."""
+        shared = threading.Event()
+        job = worker.BackgroundJob(target=lambda progress: None, cancel_event=shared)
+        self.assertIs(job.cancel_event, shared)
+        job.cancel()
+        self.assertTrue(shared.is_set())
+
+    def test_the_target_really_sees_it_while_it_is_still_working(self):
+        running = threading.Event()
+        noticed = threading.Event()
+        cancel = threading.Event()
+
+        def work(_progress):
+            running.set()
+            # What a real target does at its own checkpoints: between two
+            # uploads, and before downloading a result.
+            while not cancel.is_set():
+                time.sleep(0.005)
+            noticed.set()
+            return "stopped"
+
+        job = worker.BackgroundJob(target=work, cancel_event=cancel)
+        job.start()
+        self.assertTrue(running.wait(5))
+        job.cancel()
+        self.assertTrue(noticed.wait(5), "the target never saw the cancellation")
+
+    def test_a_cancelled_job_still_delivers_nothing(self):
+        """The UI half, unchanged: whatever the thread ends up doing, its
+        outcome must not reach a panel that has moved on."""
+        release = threading.Event()
+        delivered = []
+        job = worker.BackgroundJob(target=lambda progress: release.wait(5) or "done",
+                                   on_success=delivered.append)
+        job.start()
+        job.cancel()
+        release.set()
+        _drain_until(job, lambda: False, timeout=0.3)
+        self.assertEqual(delivered, [])
+
+
 class YieldCallback(unittest.TestCase):
     def test_the_callback_sleeps_and_does_nothing_else(self):
         job = worker.BackgroundJob(target=lambda progress: None)

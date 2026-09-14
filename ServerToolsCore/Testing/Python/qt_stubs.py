@@ -54,6 +54,10 @@ class QObject:
     def toolTip(self):
         return self._tooltip
 
+    def setParent(self, parent):
+        """`rebuild` detaches a widget this way; the stub only has to accept it."""
+        self.parent = parent
+
     def setStyleSheet(self, sheet):
         self._stylesheet = sheet
 
@@ -62,6 +66,18 @@ class QObject:
 
     def setMinimumHeight(self, height):
         self._minimum_height = height
+
+    def setMaximumHeight(self, height):
+        """Recorded because it is half of a real property: a tab box with only a
+        MINIMUM is stretched by the panel's spare vertical space, which is how
+        ten cranial landmarks ended up in a 380 px box."""
+        self._maximum_height = height
+
+    def minimumHeight(self):
+        return getattr(self, "_minimum_height", 0)
+
+    def maximumHeight(self):
+        return getattr(self, "_maximum_height", None)
 
     def setFixedSize(self, width, height):
         self._fixed_size = (width, height)
@@ -78,17 +94,33 @@ class QWidget(QObject):
         QObject.__init__(self)
         self.parent = parent
         self.layout = None
+        self.deleted = False
+
+    def setParent(self, parent):
+        """Reparenting is what removes a widget from its layout in Qt, which is
+        how base_widget swaps a container wholesale (_buildForm,
+        _rebuildRunCancelButtons). Recorded so a test can check the old one
+        really left."""
+        self.parent = parent
+
+    def deleteLater(self):
+        self.deleted = True
 
 
 class QLayout(QObject):
     def __init__(self, parent=None):
         QObject.__init__(self)
         self.widgets = []
+        self.stretches = []
+        self.margins = (0, 0, 0, 0)
         if parent is not None:
             parent.layout = self
 
-    def setContentsMargins(self, *_margins):
-        pass
+    def setContentsMargins(self, *margins):
+        """Recorded rather than dropped. Where a block's air sits is the
+        difference between a group a reader can see the end of and one whose
+        last option touches the next argument's label."""
+        self.margins = tuple(margins) if len(margins) == 4 else (0, 0, 0, 0)
 
     def setSpacing(self, _spacing):
         pass
@@ -96,14 +128,34 @@ class QLayout(QObject):
     def addWidget(self, widget, stretch=0):
         self.widgets.append(widget)
 
+    def addStretch(self, stretch=1):
+        """Recorded, not discarded. WHERE the stretch sits is the difference
+        between links that start at the left edge of the options they act on and
+        links that float at the far edge of the panel."""
+        self.stretches.append(stretch)
+
+    def count(self):
+        return len(self.widgets)
+
+    def takeAt(self, index):
+        """Qt hands back an item wrapping the widget; `rebuild` empties a layout
+        through it, so the stub answers the same shape."""
+        widget = self.widgets.pop(index)
+
+        class _Item:
+            @staticmethod
+            def widget():
+                return widget
+
+        return _Item()
+
 
 class QVBoxLayout(QLayout):
     pass
 
 
 class QHBoxLayout(QLayout):
-    def addStretch(self, _stretch=0):
-        pass
+    pass
 
 
 class QGridLayout(QLayout):
@@ -114,10 +166,35 @@ class QGridLayout(QLayout):
     def __init__(self, parent=None):
         QLayout.__init__(self, parent)
         self.cells = {}  # {(row, column): widget}
+        # Which trailing row/column was given the layout's spare space. Recorded
+        # rather than ignored: without a stretch, a grid inside a resizable
+        # scroll area spreads its rows across the whole height -- ALI's check
+        # boxes sat 94 px apart -- and that is a property worth a test.
+        self.rowStretch = {}
+        self.columnStretch = {}
+        self.verticalSpacing = None
+        self.horizontalSpacing = None
 
     def addWidget(self, widget, row=0, column=0, *_args):
         self.widgets.append(widget)
         self.cells[(row, column)] = widget
+
+    def setVerticalSpacing(self, spacing):
+        self.verticalSpacing = spacing
+
+    def setHorizontalSpacing(self, spacing):
+        """Recorded separately: chips carry their own padding, so the two gaps
+        are deliberately different -- touching columns read as one long word."""
+        self.horizontalSpacing = spacing
+
+    def setRowStretch(self, row, stretch):
+        self.rowStretch[row] = stretch
+
+    def setColumnStretch(self, column, stretch):
+        self.columnStretch[column] = stretch
+
+    def rowCount(self):
+        return max((row for row, _column in self.cells), default=-1) + 1
 
 
 class QScrollArea(QWidget):
@@ -145,9 +222,29 @@ class QTabWidget(QWidget):
     def __init__(self, parent=None):
         QWidget.__init__(self, parent)
         self.tabs = []  # [(title, widget)]
+        self.currentIndex = 0
+        self.currentChanged = Signal()
 
     def addTab(self, widget, title):
         self.tabs.append((title, widget))
+
+    def setCurrentIndex(self, index):
+        """Emits, because the height of the box follows the tab on screen."""
+        self.currentIndex = index
+        self.currentChanged.emit(index)
+
+
+class QStandardPaths:
+    """Where this OS puts things. The stub answers a fixed location, which is
+    the point: a test asserts what the code does WITH the answer, never what
+    the answer is on the machine running it."""
+
+    DocumentsLocation = 1
+    documents = "/home/tester/Documents"
+
+    @staticmethod
+    def writableLocation(_location):
+        return QStandardPaths.documents
 
 
 class QCursor:
@@ -213,8 +310,11 @@ class QLabel(QObject):
     def setText(self, text):
         self.text = text
 
-    def setWordWrap(self, _wrap):
-        pass
+    def setWordWrap(self, wrap):
+        """Recorded, not dropped. Whether a caption WRAPS is the difference
+        between showing a whole path and showing a fragment of one, which is
+        the reason that line replaced the path field."""
+        self.wordWrap = bool(wrap)
 
 
 class QPushButton(QObject):
@@ -222,7 +322,41 @@ class QPushButton(QObject):
         QObject.__init__(self)
         self.text = text
         self.clicked = Signal()
+        self.toggled = Signal()
         self._checkable = False
+        self._checked = False
+
+    def connect(self, signature, slot):
+        """PythonQt's own spelling: `button.connect("clicked()", callable)`.
+
+        Only the signals the extension actually wires are honoured; anything
+        else is recorded and never fired, which is what a stub should do rather
+        than pretend.
+        """
+        if signature.startswith("clicked"):
+            self.clicked.connect(slot)
+        elif signature.startswith("toggled"):
+            self.toggled.connect(slot)
+
+    def click(self):
+        """What a user does. Emits, so whatever was connected actually runs."""
+        self.clicked.emit()
+
+    def isCheckable(self):
+        """Whether this button IS an option rather than an action -- the whole
+        distinction between a chip and a plain button."""
+        return self._checkable
+
+    def setChecked(self, checked):
+        """A checkable button IS the option in a dense multichoice, so it has to
+        read back exactly as a check box does (see design.option_chip)."""
+        checked = bool(checked)
+        if checked != self._checked:
+            self._checked = checked
+            self.toggled.emit(checked)
+
+    def isChecked(self):
+        return self._checked
 
     def setText(self, text):
         """PythonQt exposes both the property and the setter; so does this."""
@@ -271,23 +405,45 @@ class QCheckBox(QObject):
 
 
 class _ListView:
-    """Just enough of the popup for `_widenPopup`: it sets a minimum width and
-    nothing here reads it back but the tests."""
+    """Just enough of the popup for `_widenPopup`.
+
+    `sizeHintForColumn` is what the real view answers: the width its own items
+    need. One pixel per character here -- real metrics are proportional, but the
+    property under test is "the widest entry decides", not the exact pixels.
+    """
 
     def __init__(self):
         self.minimumWidth = 0
+        self.items = []
+
+    def sizeHintForColumn(self, _column):
+        return max((len(text) for text in self.items), default=0)
 
     def setMinimumWidth(self, width):
         self.minimumWidth = width
 
 
-class _FontMetrics:
-    """One pixel per character. Real metrics are proportional, but the
-    property under test is "the widest entry decides", not the exact pixels."""
+class _Metrics:
+    """What `fontMetrics()` RETURNS. One pixel per character."""
 
     @staticmethod
     def horizontalAdvance(text):
         return len(text)
+
+
+class _FontMetricsSlot:
+    """A SLOT, exactly as PythonQt exposes it: `combo.fontMetrics` is not a
+    property, it is a callable, and reading through it without calling it gives
+    an object with no metrics on it at all.
+
+    This stub used to BE the metrics, so `combo.fontMetrics.horizontalAdvance`
+    worked here and raised `AttributeError` in Slicer -- the popup-widening code
+    was dead for as long as it existed and 728 passing tests said it was fine. A
+    stub that lies in the same direction as the binding is worse than no stub.
+    """
+
+    def __call__(self):
+        return _Metrics()
 
 
 class QComboBox(QObject):
@@ -301,7 +457,7 @@ class QComboBox(QObject):
         self.sizeAdjustPolicy = 0
         self.minimumContentsLength = 0
         self._view = _ListView()
-        self.fontMetrics = _FontMetrics()
+        self.fontMetrics = _FontMetricsSlot()
         self.currentTextChanged = Signal()
         self.currentIndexChanged = Signal()
 
@@ -311,6 +467,8 @@ class QComboBox(QObject):
     def addItems(self, items):
         self._items.extend(items)
         self._data.extend([None] * len(items))
+        # The real view measures the model it is showing; so does this one.
+        self._view.items = list(self._items)
         if self._index < 0 and self._items:
             self.setCurrentIndex(0)
 
@@ -334,6 +492,7 @@ class QComboBox(QObject):
         self._items = []
         self._data = []
         self._index = -1
+        self._view.items = []
 
     @property
     def count(self):
@@ -443,6 +602,29 @@ class QTimer(QObject):
         self.timeout.emit()
 
 
+class QProgressBar(QObject):
+    """Records its range and value. Determinate only: base_widget shows it
+    exclusively for a fraction a tool really reported, so there is no
+    indeterminate (0, 0) mode to model."""
+
+    def __init__(self):
+        QObject.__init__(self)
+        self.minimum = 0
+        self.maximum = 100
+        self.value = 0
+        self.textVisible = True
+
+    def setRange(self, minimum, maximum):
+        self.minimum = minimum
+        self.maximum = maximum
+
+    def setValue(self, value):
+        self.value = value
+
+    def setTextVisible(self, visible):
+        self.textVisible = bool(visible)
+
+
 class QPalette:
     Window = 0
 
@@ -499,6 +681,39 @@ class ctkCollapsibleButton(QWidget):
     def __init__(self):
         QWidget.__init__(self)
         self.text = ""
+        # Open unless a panel folds it. Which sections open folded is a
+        # property a test asserts on, so it is recorded rather than ignored.
+        self._collapsed = False
+        # How many rows the box held at the moment it folded. Real CTK hides the
+        # children a box HAS when it collapses, so a box folded before its rows
+        # exist folds nothing -- which is what made a "Reference volume" picker
+        # appear crushed into the "Advanced" header. Recorded so a test can tell
+        # a box that folded once it was built from one that folded empty.
+        self.rowsWhenCollapsed = None
+        # How many times CTK actually ran its hide-the-children pass. Counted
+        # because "is it collapsed" cannot tell a fold that DID something from
+        # one that was skipped -- see the setter.
+        self.foldsApplied = 0
+
+    @property
+    def collapsed(self):
+        return self._collapsed
+
+    @collapsed.setter
+    def collapsed(self, value):
+        # `ctkCollapsibleButton::setCollapsed` returns immediately when handed
+        # the value it already holds, so folding a box that already believes it
+        # is folded runs NOTHING: no child pass, no hiding. A panel that folds
+        # during its build and folds again once on screen therefore has to step
+        # through the other state to make the second one count. Modelled here
+        # because the real behaviour is invisible from Python and cost two
+        # wrong fixes.
+        if value == self._collapsed:
+            return
+        self._collapsed = value
+        if value:
+            self.foldsApplied += 1
+            self.rowsWhenCollapsed = len(getattr(self.layout, "widgets", ()) or ())
 
 
 class ctkSliderWidget(QObject):

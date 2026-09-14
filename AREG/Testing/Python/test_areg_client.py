@@ -501,8 +501,8 @@ class DeclarationTest(unittest.TestCase):
 class SchemaDrivenPanelTest(unittest.TestCase):
     def test_the_two_timepoints_take_a_folder_or_an_archive(self):
         """`t1`/`t2` list "folder" alongside "zip_file", so the panel gives one
-        path field with both browse buttons and zips a chosen folder before
-        upload. Which kind was given is read off the path, never asked."""
+        row with both browse buttons and zips a chosen folder before upload.
+        Which kind was given is read off the path, never asked."""
         modes = formgen.file_input_modes(_ARGUMENTS)
         self.assertEqual(modes["t1"], "file_or_folder")
         self.assertEqual(modes["t2"], "file_or_folder")
@@ -761,6 +761,11 @@ def _build_panel():
     panel._rowSections = {}
     panel._sectionsWithOwnRows = set()
     panel._hiddenArgs = set()
+    # Choosing a file offers to show it in the scene, and that hook reads this
+    # record to avoid stacking a second copy of the same scan. __init__ makes
+    # it; this panel skips __init__, so it makes it here or every filled row
+    # dies on an AttributeError.
+    panel._scenePreviews = {}
     panel._schema = None
     panel._schemaError = None
     panel._outputFolderWidget = None
@@ -799,15 +804,16 @@ class InputReadyTest(unittest.TestCase):
         combo.setCurrentIndex(list(_ARGUMENTS[name]["choices"]).index(option))
 
     def _fill(self, *names):
-        """Type a path into a row, through the same widget the user types in.
+        """Put a path into a row the way everything else does.
 
-        `currentPath` is a read-only property on both wrappers -- it reads the
-        text edit (or answers "" while a hosted file is picked), so the value
-        has to go where a user would put it."""
+        There is nothing to type into: a row is browse buttons and a caption,
+        and `currentPath` is a read-only property on both wrappers (it answers
+        "" while a hosted file is picked). `set_local_path` is the one writer
+        the panel itself uses, whether the path came from a browse dialog or
+        from a download that has just landed.
+        """
         for name in names:
-            widget = self.panel._inputWidgets[name]
-            edit = getattr(widget, "pathEdit", None) or getattr(widget.local, "pathEdit")
-            edit.text = "/tmp/whatever.zip"
+            formgen.set_local_path(self.panel._inputWidgets[name], "/tmp/whatever.zip")
 
     def test_the_two_timepoints_are_what_apply_waits_for(self):
         self.assertFalse(self.panel._inputReady())
@@ -872,9 +878,7 @@ class PrepareInputFilesTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.workspace.root, True)
 
     def _fill(self, name, path):
-        widget = self.panel._inputWidgets[name]
-        edit = getattr(widget, "pathEdit", None) or getattr(widget.local, "pathEdit")
-        edit.text = path
+        formgen.set_local_path(self.panel._inputWidgets[name], path)
 
     def test_an_empty_optional_row_uploads_nothing(self):
         scan = os.path.join(self.workspace.root, "T1.zip")

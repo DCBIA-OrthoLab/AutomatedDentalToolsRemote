@@ -11,10 +11,7 @@ Authors:
 - Baptiste Baquero (UoM)
 """
 
-import glob
-import os
 
-import qt
 import slicer
 from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule
@@ -85,6 +82,13 @@ class AMASSSWidget(ServerToolWidgetBase):
     MAX_RESULTS_TO_LOAD = 12
     # Extension -> the slicer_io kind that loads it. Surfaces are only there
     # when the run asked for them (the schema's generate_surface).
+
+    # This module works on CBCTs, so any scan it is given or produces is shown
+    # in 3D with this preset -- an input the clinician just picked as much as a
+    # result. "" for a module whose data is not a CT-like volume; nothing then
+    # happens, and nothing happens anyway for one whose files load as meshes.
+    VOLUME_RENDERING = "CT-AAA"
+
     _LOADABLE = (
         ("*.nii.gz", "labelmap"),
         ("*.nii", "labelmap"),
@@ -93,51 +97,8 @@ class AMASSSWidget(ServerToolWidgetBase):
         ("*.vtk", "model"),
     )
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._loadResultsCheckBox = None
-
-    def addExtraWidgets(self, layout) -> None:
-        self._loadResultsCheckBox = qt.QCheckBox(_("Load the results into the scene when done"))
-        layout.addWidget(self._loadResultsCheckBox)
-
     def handleResult(self, result) -> None:
         """Unpack the archive (base class), then optionally load what it held."""
         super().handleResult(result)
 
-        if not (self._loadResultsCheckBox and self._loadResultsCheckBox.isChecked()):
-            return
-        outputDir = self._outputFolderWidget.currentPath if self._outputFolderWidget else None
-        if outputDir:
-            self._loadResults(outputDir)
-
-    def _loadResults(self, outputDir: str) -> None:
-        found = [
-            (path, kind)
-            for pattern, kind in self._LOADABLE
-            for path in sorted(glob.glob(os.path.join(outputDir, "**", pattern), recursive=True))
-        ]
-        if not found:
-            slicer.util.showStatusMessage(_("AMASSS: no result file found to load."), 5000)
-            return
-
-        if len(found) > self.MAX_RESULTS_TO_LOAD:
-            slicer.util.infoDisplay(
-                _(
-                    "{count} result files were produced - too many to load at once.\n"
-                    "They are all saved in {path}."
-                ).format(count=len(found), path=outputDir)
-            )
-            return
-
-        failed = []
-        for path, kind in found:
-            try:
-                slicer_io.load_result(path, kind)
-            except Exception as exc:  # one bad file must not lose the others
-                failed.append(f"{os.path.basename(path)}: {exc}")
-
-        if failed:
-            slicer.util.errorDisplay(
-                _("Some results could not be loaded:\n{details}").format(details="\n".join(failed))
-            )
+        self._maybeLoadResults()

@@ -94,9 +94,15 @@ what testing against the real dev server surfaced. Each is explained in
   forty seconds from finishing. A main-thread `QTimer` now ticks the current
   phase plus elapsed time into a label under the Cancel button, `progress_cb`
   reports MB/percent during the download, and the extraction announces itself.
-  What it still can't show is progress *within* the inference: that needs a
-  server-side job API. See ARCHITECTURE.md, "Telling the user something is
-  happening".
+  *(Since resolved on the other side of the wire: the server names each run
+  from an `X-Run-Id` the client mints, publishes its progress as Server-Sent
+  events, and stops it on a `DELETE`. The client watches that stream on a
+  second connection held open for the length of the POST, translates the
+  server's phase into the clinician's words, shows a determinate bar when a
+  tool reports a fraction, and gives each run of a cohort its own Cancel. All
+  of it degrades silently against a server that has none of those endpoints.
+  See ARCHITECTURE.md, "What the server itself says, while the request is still
+  in flight".)*
 - **Added beyond the original brief: a runtime settings module.** The brief's
   "constants at the top of a config file" decision (below) covered defaults,
   but not how a user changes server URL/API key/TLS/timeout without editing

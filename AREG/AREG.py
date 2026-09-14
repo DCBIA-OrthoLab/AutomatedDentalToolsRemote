@@ -126,6 +126,7 @@ class AREGWidget(ServerToolWidgetBase):
 
     def addExtraWidgets(self, layout) -> None:
         self._loadResultsCheckBox = qt.QCheckBox(_("Load the results into the scene when done"))
+        self._loadResultsCheckBox.setChecked(True)
         layout.addWidget(self._loadResultsCheckBox)
 
     def handleResult(self, result) -> None:
@@ -134,9 +135,7 @@ class AREGWidget(ServerToolWidgetBase):
 
         if not (self._loadResultsCheckBox and self._loadResultsCheckBox.isChecked()):
             return
-        outputDir = self._outputFolderWidget.currentPath if self._outputFolderWidget else None
-        if outputDir:
-            self._loadResults(outputDir)
+        self._loadResults()
 
     @classmethod
     def _findResults(cls, outputDir: str) -> list:
@@ -147,30 +146,3 @@ class AREGWidget(ServerToolWidgetBase):
             for pattern, kind in cls._LOADABLE
             for path in glob.glob(os.path.join(outputDir, "**", pattern), recursive=True)
         )
-
-    def _loadResults(self, outputDir: str) -> None:
-        found = self._findResults(outputDir)
-        if not found:
-            slicer.util.showStatusMessage(_("AREG: no result file found to load."), 5000)
-            return
-
-        if len(found) > self.MAX_RESULTS_TO_LOAD:
-            slicer.util.infoDisplay(
-                _(
-                    "{count} result files were produced — too many to load at once.\n"
-                    "They are all saved in {path}."
-                ).format(count=len(found), path=outputDir)
-            )
-            return
-
-        failed = []
-        for path, kind in found:
-            try:
-                slicer_io.load_result(path, kind)
-            except Exception as exc:  # one bad file must not lose the others
-                failed.append(f"{os.path.basename(path)}: {exc}")
-
-        if failed:
-            slicer.util.errorDisplay(
-                _("Some results could not be loaded:\n{details}").format(details="\n".join(failed))
-            )

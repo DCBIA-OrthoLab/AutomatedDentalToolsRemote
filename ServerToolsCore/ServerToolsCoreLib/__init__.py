@@ -17,9 +17,10 @@ from .client import (
     argument_types,
     file_extensions_for,
     is_file_type,
+    new_run_id,
     testfile_entries,
 )
-from .errors import ServerToolError
+from .errors import RunCancelled, ServerToolError
 
 _client = None
 
@@ -45,6 +46,8 @@ __all__ = [
     "ToolServerClient",
     "ToolResult",
     "ServerToolError",
+    "RunCancelled",
+    "new_run_id",
     "is_file_type",
     "argument_types",
     "accepts_folder",

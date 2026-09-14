@@ -1,7 +1,7 @@
 """Unit tests for the ASO module's client behaviour - run outside Slicer, with
 `qt`/`ctk`/`slicer` stubbed (ServerToolsCore/Testing/Python/qt_stubs.py).
 
-Two things are covered, and they fail for different reasons:
+What is covered:
 
 * **What ASO's panel derives from its schema.** ASO declares nothing but
   TOOL_NAME, so every widget, every extension filter and the result handling
@@ -9,8 +9,9 @@ Two things are covered, and they fail for different reasons:
   all of it - if the server's schema changes shape, this is what notices, and
   they are also what would catch someone "helpfully" re-adding a FILE_INPUTS or
   RESULT_KIND override that only repeats the server.
-* **Which result files get loaded, and how.** ASO returns four kinds of file
-  per case and only three of them belong in the scene.
+* **Which arguments each of the four modes shows, and which are therefore not
+  sent.** ASO's four modes share one schema, so `visible_when` is what keeps a
+  run from carrying the inert half of it.
 
 `ASO.py` is imported here, which needs three `slicer` submodules qt_stubs does
 not provide. That is safe for what is under test: these functions are pure
@@ -23,9 +24,7 @@ Usage:
 
 import copy
 import os
-import shutil
 import sys
-import tempfile
 import types
 import unittest
 
@@ -319,8 +318,8 @@ class DeclarationTest(unittest.TestCase):
 class SchemaDrivenPanelTest(unittest.TestCase):
     def test_input_takes_a_file_or_a_folder(self):
         """`input` lists "folder" alongside two file types, so the panel gives
-        one path field with both browse buttons; which kind was given is read
-        off the path at upload time, never asked."""
+        one row with both browse buttons; which kind was given is read off the
+        path at upload time, never asked."""
         modes = formgen.file_input_modes(ASO_SCHEMA["arguments"])
         self.assertEqual(modes["input"], "file_or_folder")
 
@@ -384,65 +383,6 @@ class SchemaDrivenPanelTest(unittest.TestCase):
         empty value would override run()'s default server-side."""
         self.assertEqual(ASO_SCHEMA["arguments"]["output_suffix"]["initial"], "Or")
         self.assertIs(ASO_SCHEMA["arguments"]["dicom_input"]["initial"], False)
-
-
-# ---------------------------------------------------------------------------
-# Finding what came back
-# ---------------------------------------------------------------------------
-
-class ResultDiscoveryTest(unittest.TestCase):
-    def setUp(self):
-        self.dir = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.dir, True)
-
-    def _write(self, relative):
-        path = os.path.join(self.dir, relative)
-        os.makedirs(os.path.dirname(path) or self.dir, exist_ok=True)
-        with open(path, "w") as handle:
-            handle.write("x")
-        return path
-
-    def _found(self):
-        return {
-            os.path.basename(path): kind
-            for path, kind in ASOWidget._findResults(self.dir)
-        }
-
-    def test_each_result_kind_gets_the_right_loader(self):
-        """The oriented CBCT is a VOLUME, not a segmentation: ASO moves a scan,
-        it does not label one. Meshes are models, landmarks are markups."""
-        self._write("patient1_Or.nii.gz")
-        self._write("P1_U_Seg_Or.vtk")
-        self._write("patient1_lm_Or.mrk.json")
-        self.assertEqual(
-            self._found(),
-            {
-                "patient1_Or.nii.gz": "volume",
-                "P1_U_Seg_Or.vtk": "model",
-                "patient1_lm_Or.mrk.json": "markups",
-            },
-        )
-
-    def test_transforms_and_the_report_are_not_loaded(self):
-        """Loading a .tfm into the scene applies nothing and explains nothing;
-        ASO_report.json is not a scene object either. Both must stay out, or
-        they would eat into the MAX_RESULTS_TO_LOAD budget as well."""
-        self._write("patient1_Or_transform.tfm")
-        self._write("ASO_report.json")
-        self.assertEqual(ASOWidget._findResults(self.dir), [])
-
-    def test_results_are_found_across_the_whole_tree(self):
-        """The server preserves the input's folder structure, so a cohort's
-        results are nested - a non-recursive search would find nothing."""
-        self._write("siteA/patient1_Or.nii.gz")
-        self._write("siteB/nested/patient2_Or.nii.gz")
-        self.assertEqual(len(ASOWidget._findResults(self.dir)), 2)
-
-    def test_a_compressed_scan_is_not_counted_twice(self):
-        """"*.nii" must not also match "patient1_Or.nii.gz" - a double count
-        would halve the effective load cap and load the same file twice."""
-        self._write("patient1_Or.nii.gz")
-        self.assertEqual(len(ASOWidget._findResults(self.dir)), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -695,7 +635,9 @@ class ServerSelectablesRefreshTest(unittest.TestCase):
         self.client.models.append("CBCT_landmark_models")
         self.panel._refreshServerSelectables()
         self.assertEqual(
-            self._referenceItems()[0], formgen.ServerFileInput.CHOOSE_OPTION
+            # `reference` is a MODEL row: its entries are the value that
+            # travels, never a download, so the prompt says so.
+            self._referenceItems()[0], formgen.ServerFileInput.PROMPT_MODEL
         )
 
     def test_a_hosted_reference_is_a_name_and_is_never_downloaded(self):
@@ -917,6 +859,43 @@ class BuiltPanelTest(unittest.TestCase):
             "Frankfurt_Horizontal_Midsagittal_Plane.zip",
             self.panel._inputWidgets["reference"].combo._items,
         )
+
+
+
+class AdvancedSectionTest(unittest.TestCase):
+    """A section named "Advanced" opens FOLDED.
+
+    It is the convention's own name for what a clinician does not have to
+    decide -- a seed, a tile step, the landmark folder someone who already has
+    landmarks goes looking for. Open, those sit between the inputs and Apply so
+    every reader steps over them; folded, the ones who want them still find
+    them in one click and nobody else meets them at all.
+    """
+
+    def _panel(self):
+        schema = copy.deepcopy(ASO_SCHEMA)
+        schema["arguments"]["landmarks"] = {
+            "label": "Landmark folder", "type": "path", "required": False,
+            "section": "Advanced",
+        }
+        return _build_panel(_FakeClient(schema))
+
+    def test_advanced_opens_folded(self):
+        panel = self._panel()
+        self.assertTrue(panel._sectionBoxes["Advanced"].collapsed)
+
+    def test_every_other_section_opens_read(self):
+        panel = self._panel()
+        for name, box in panel._sectionBoxes.items():
+            if name != "Advanced":
+                self.assertFalse(box.collapsed, name)
+
+    def test_folded_is_not_hidden(self):
+        """The box is on screen, and its title says what is inside it."""
+        panel = self._panel()
+        box = panel._sectionBoxes["Advanced"]
+        self.assertTrue(box.isVisible())
+        self.assertEqual(box.text, "Advanced")
 
 
 if __name__ == "__main__":

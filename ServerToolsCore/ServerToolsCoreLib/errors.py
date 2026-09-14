@@ -13,6 +13,17 @@ class ServerToolError(Exception):
         self.status_code = status_code
 
 
+class RunCancelled(ServerToolError):
+    """The run was withdrawn by whoever asked for it (HTTP 499).
+
+    A class of its own, and that is the whole point of the status code being
+    non-standard: no standard code means "the caller withdrew this", and the
+    difference between a cancellation and a failure is the difference between
+    closing a panel quietly and opening an error dialog. A caller that does not
+    know this class still gets a ServerToolError and behaves as it always did.
+    """
+
+
 def error_for_status(status_code, server_message=None):
     """Map an HTTP status code to a ServerToolError with a user-facing message.
 
@@ -48,4 +59,9 @@ def error_for_status(status_code, server_message=None):
         return ServerToolError(server_message or "File too large for the server.", status_code)
     if status_code == 500:
         return ServerToolError("The tool failed on the server.", status_code)
+    if status_code == 499:
+        # nginx's code, borrowed by the run contract: the client withdrew the
+        # request. Not a failure, and it must never reach an error dialog -
+        # the user is the one who asked for this.
+        return RunCancelled(server_message or "Run cancelled.", status_code)
     return ServerToolError(server_message or f"Server error ({status_code}).", status_code)

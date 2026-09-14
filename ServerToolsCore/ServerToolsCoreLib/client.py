@@ -15,6 +15,8 @@ import json
 import logging
 import mimetypes
 import os
+import secrets
+import threading
 import time
 import re
 import zipfile
@@ -25,7 +27,7 @@ from urllib.parse import quote
 import requests
 
 from . import transfer
-from .errors import ServerToolError, error_for_status
+from .errors import RunCancelled, ServerToolError, error_for_status
 
 logger = logging.getLogger("ServerToolsCore.client")
 
@@ -63,6 +65,179 @@ _CONNECTION_POOL_SIZE = 16
 # _UPLOADS_FIELD; double-underscored so it can never collide with a tool's
 # argument name.
 _UPLOADS_FIELD = "__uploads__"
+
+# ----------------------------------------------------------------------
+# Run progress and cancellation (see the wire contract shared with the
+# server repository). Everything here is OPTIONAL ON BOTH SIDES: a run sent
+# without an id behaves exactly as it always did, and a client using these
+# endpoints against a server that has none of them gets a 404 and falls back
+# to the elapsed-time tick it already shows. That is a hard requirement, not
+# a nicety - the extension ships on its own schedule.
+# ----------------------------------------------------------------------
+
+# The id travels as a request header on the run, not in the body: it has to be
+# known to BOTH sides before the response exists, since the whole point is to
+# say something while the request is still in flight.
+RUN_ID_HEADER = "X-Run-Id"
+
+# The closed set of terminal states. Reaching one ends the stream, on both
+# sides: the server stops writing, and the watcher stops reading rather than
+# reconnecting to a run that will never say anything again.
+TERMINAL_RUN_STATES = ("done", "failed", "cancelled")
+
+# A progress message is written by a tool and may name a file, so the server
+# truncates it. Truncated again here rather than trusted: this text goes
+# straight onto a panel, and a server that forgot its own cap must not be able
+# to push a megabyte of it into a QLabel.
+_RUN_MESSAGE_MAX_LEN = 200
+
+# Read timeout on the event stream. Long on purpose: the contract has no
+# heartbeat, so a server that is simply busy inferring sends NOTHING between
+# `running` and `packaging` - minutes of it - and a short timeout would mean
+# reconnecting (and replaying the backlog) over and over for no information.
+# What it costs is that an abandoned watcher, one whose run finished without a
+# terminal event, takes this long to notice. It is a daemon thread doing
+# nothing, so that is the cheap side of the trade.
+_RUN_EVENTS_READ_TIMEOUT = 30
+
+# How long a watcher tolerates a 404 before concluding the server simply has
+# no such endpoint.
+#
+# This window is not defensiveness, it is the normal case: the watcher opens
+# the stream as soon as the id is minted, and the run only exists server-side
+# once the POST gets there. On the multipart path the POST *is* the upload, so
+# those two are separated by however long the input takes to travel. A watcher
+# that gave up on the first 404 would therefore go quiet on exactly the long
+# uploads this feature exists for. The server registers the run before it
+# parses the form, which narrows the window to microseconds in the normal
+# case; this closes what is left of it.
+#
+# After the first event has been delivered the window is over for good: a 404
+# then means the run was reaped, and there is nothing left to wait for.
+_RUN_EVENTS_STARTUP_GRACE_SECONDS = 15.0
+
+# Between two attempts, whatever ended the last one. Short enough that a
+# reconnect is invisible next to an inference, long enough that a server
+# closing the stream instantly cannot become a hot loop.
+_RUN_EVENTS_RETRY_SECONDS = 0.5
+
+
+def new_run_id() -> str:
+    """A fresh run id: 32 URL-safe characters from the OS CSPRNG.
+
+    The id is a CAPABILITY - knowing it, plus the bearer token, is what
+    authorises reading a run's progress and cancelling it, the same model the
+    result ids already use. So it must come from `secrets`, never from a
+    counter, a timestamp or anything derived from a patient. The server checks
+    the shape (`[A-Za-z0-9_-]{16,64}`) and nothing more, because it cannot
+    check entropy.
+    """
+    return secrets.token_urlsafe(24)
+
+
+class _AnyEvent:
+    """Any one of several `threading.Event`s being set means "stop".
+
+    A watcher has two independent reasons to stop - its run finished, or the
+    user cancelled - and the events for those belong to different owners. This
+    is the smallest thing that lets `watch_run` keep taking one stop object
+    while honouring both, rather than growing a second parameter that every
+    caller would have to thread through.
+    """
+
+    def __init__(self, events):
+        self._events = [event for event in events if event is not None]
+
+    def is_set(self) -> bool:
+        return any(event.is_set() for event in self._events)
+
+    def wait(self, timeout=None) -> bool:
+        """Sleep, but wake the moment any of them is set.
+
+        Polled rather than combined with a condition variable: the events are
+        other people's, `threading.Event` has no "wait for any", and the
+        alternative (a thread per event) costs more than a 50 ms poll of a
+        boolean does.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self.is_set():
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            time.sleep(min(0.05, timeout if timeout is not None else 0.05))
+        return True
+
+
+def _sse_data_frames(lines):
+    """Yield the payload of each Server-Sent Events `data:` frame.
+
+    The contract sends one JSON object per frame and each object fits on one
+    line, so this could be a single `startswith("data:")`. It is written to the
+    actual SSE framing anyway - accumulate `data:` lines, a blank line ends the
+    frame - because that costs four lines and means a server that later sends a
+    comment heartbeat (`: ping`), or splits a long message, does not break the
+    client it has to stay compatible with.
+    """
+    payload = []
+    for raw_line in lines:
+        line = raw_line if isinstance(raw_line, str) else (raw_line or b"").decode("utf-8", "replace")
+        if not line:
+            if payload:
+                yield "\n".join(payload)
+                payload = []
+            continue
+        if line.startswith(":"):
+            # A comment: SSE's own keep-alive. Never an event.
+            continue
+        if line.startswith("data:"):
+            payload.append(line[len("data:"):].lstrip())
+    if payload:
+        yield "\n".join(payload)
+
+
+def normalise_run_event(payload) -> Optional[dict]:
+    """One event of the contract, with every field made safe to render.
+
+    Returns None for anything that is not a usable event. The panel that shows
+    these must not have to ask whether `fraction` came back as the string
+    "0.35", whether `depth` is negative, or whether `message` is a novel: an
+    event either arrives here in the shape the UI expects, or it does not
+    arrive at all.
+    """
+    if not isinstance(payload, dict):
+        return None
+    try:
+        seq = int(payload.get("seq"))
+    except (TypeError, ValueError):
+        # `seq` is what the client dedupes and orders on, so an event without
+        # a usable one cannot be placed and is not an event.
+        return None
+
+    fraction = payload.get("fraction")
+    if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
+        # Never fabricated, on either side: unknown stays unknown, and a
+        # determinate bar is only ever shown for a number the tool really sent.
+        fraction = None
+    else:
+        fraction = min(1.0, max(0.0, float(fraction)))
+
+    try:
+        depth = max(0, int(payload.get("depth") or 0))
+    except (TypeError, ValueError):
+        depth = 0
+
+    message = payload.get("message") or ""
+    if not isinstance(message, str):
+        message = str(message)
+
+    return {
+        "seq": seq,
+        "at": payload.get("at"),
+        "state": payload.get("state") or "",
+        "phase": payload.get("phase") or "",
+        "fraction": fraction,
+        "message": message[:_RUN_MESSAGE_MAX_LEN],
+        "depth": depth,
+    }
 
 
 def _download_message(received: int, expected: Optional[int], label: str = "results") -> str:
@@ -591,12 +766,33 @@ class ToolServerClient:
         files: Optional[dict] = None,
         output_dir: Optional[str] = None,
         progress_cb: Optional[Callable[[str], None]] = None,
+        run_id: Optional[str] = None,
+        event_cb: Optional[Callable[[dict], None]] = None,
+        cancel_event=None,
     ) -> ToolResult:
         """`files`: {schema_argument_name: local_file_path}, one entry per
         `type: "file"` argument you're providing. Each is uploaded as its own
         multipart field named after its schema argument - a tool can declare
         several independent file arguments (e.g. SurgMovPred's "model" +
-        "input"); there is no single reserved "file" key."""
+        "input"); there is no single reserved "file" key.
+
+        `run_id` (see new_run_id) names this run to the server, which is what
+        makes its progress readable and the run cancellable. Omitting it is
+        exactly today's request, byte for byte.
+
+        `event_cb` receives the run's progress events (see
+        normalise_run_event), from a SECOND thread opened for the duration of
+        the POST. It has to be a second connection: the thread calling this
+        method is blocked inside the POST for the whole inference, which is
+        precisely the window there is nothing to say from. Ignored without a
+        `run_id`, there being nothing to subscribe to.
+
+        `cancel_event` is a `threading.Event` the caller sets to withdraw the
+        run. It cannot interrupt the POST itself - only the server's DELETE
+        does that - but it stops this side doing any more work for a run
+        nobody wants: no further parts uploaded, and above all no result
+        archive pulled down after the answer arrives.
+        """
         args = args or {}
         files = files or {}
         schema = self.get_tool_schema(tool_name)
@@ -604,6 +800,8 @@ class ToolServerClient:
 
         headers = {"Authorization": f"Bearer {self._token}"}
         data = self._stringify(args)
+
+        self._raise_if_cancelled(cancel_event, tool_name)
 
         # Anything big enough to be worth it goes up FIRST, in parallel parts,
         # and this request then only references it. What stays in `files` is
@@ -613,8 +811,19 @@ class ToolServerClient:
         if upload_references:
             data[_UPLOADS_FIELD] = json.dumps(upload_references)
 
+        self._raise_if_cancelled(cancel_event, tool_name)
+
         if progress_cb:
             progress_cb(f"Sending '{tool_name}' request...")
+
+        post_headers = {**headers, **_RESULT_DELIVERY_HEADER}
+        if run_id:
+            # A header, so a server that has never heard of it ignores an
+            # unknown header and answers exactly as it always did. Sent even
+            # without an `event_cb`: the id is also what DELETE /runs/{id}
+            # addresses, and a caller may well want to be able to cancel a run
+            # it is not watching.
+            post_headers[RUN_ID_HEADER] = run_id
 
         # Debug visibility only: argument/file *names*, never the token or the
         # argument/file contents. Silent unless the caller has raised this
@@ -628,53 +837,292 @@ class ToolServerClient:
             sorted(upload_references),
         )
 
-        file_handles = []
-        try:
-            files_payload = {}
-            for arg_name, path in files.items():
-                file_handle = open(path, "rb")
-                file_handles.append(file_handle)
-                # The filename (with extension) must travel with the upload: the
-                # server validates extensions (.nii/.nii.gz/...) from it. Without
-                # it, requests defaults to a bare filename and every upload with
-                # an extension check fails server-side.
-                files_payload[arg_name] = (os.path.basename(path), file_handle)
+        # Started BEFORE the POST, necessarily: from the next line on, this
+        # thread is inside the request for the whole inference and cannot poll
+        # anything. The cost is that the run is not registered server-side
+        # until the request lands - and on the multipart path, landing means
+        # the upload finishing - so the first attempts can legitimately answer
+        # 404. That gap is what watch_run's startup window absorbs; it is not
+        # an error condition. Torn down in the `finally` below whatever the
+        # outcome, a watcher left retrying against a run that has already
+        # answered being a thread holding a connection open for no one.
+        watch_stop = threading.Event()
+        watcher = self._start_watcher(run_id, event_cb, watch_stop, cancel_event)
 
+        try:
+            file_handles = []
             try:
-                # stream=True: the body is NOT downloaded here but inside
-                # _build_result, chunk by chunk straight to disk. Without it,
-                # requests buffers the entire result archive in RAM before a
-                # single byte can be written -- the larger a run's output, the
-                # closer that gets to taking Slicer down with it. The read
-                # timeout then applies between chunks, not to the whole
-                # download, so a big-but-flowing response can never time out
-                # merely for being big.
-                response = self._session.post(
-                    f"{self._server_url}/run/{tool_name}",
-                    headers={**headers, **_RESULT_DELIVERY_HEADER},
-                    data=data,
-                    files=files_payload or None,
-                    timeout=self._timeout,
-                    verify=self._verify_tls,
+                files_payload = {}
+                for arg_name, path in files.items():
+                    file_handle = open(path, "rb")
+                    file_handles.append(file_handle)
+                    # The filename (with extension) must travel with the upload:
+                    # the server validates extensions (.nii/.nii.gz/...) from it.
+                    # Without it, requests defaults to a bare filename and every
+                    # upload with an extension check fails server-side.
+                    files_payload[arg_name] = (os.path.basename(path), file_handle)
+
+                try:
+                    # stream=True: the body is NOT downloaded here but inside
+                    # _build_result, chunk by chunk straight to disk. Without it,
+                    # requests buffers the entire result archive in RAM before a
+                    # single byte can be written -- the larger a run's output, the
+                    # closer that gets to taking Slicer down with it. The read
+                    # timeout then applies between chunks, not to the whole
+                    # download, so a big-but-flowing response can never time out
+                    # merely for being big.
+                    response = self._session.post(
+                        f"{self._server_url}/run/{tool_name}",
+                        headers=post_headers,
+                        data=data,
+                        files=files_payload or None,
+                        timeout=self._timeout,
+                        verify=self._verify_tls,
+                        stream=True,
+                    )
+                except requests.RequestException as exc:
+                    raise ServerToolError(f"Network error while calling '{tool_name}': {exc}") from exc
+            finally:
+                for file_handle in file_handles:
+                    file_handle.close()
+
+            logger.debug(
+                "Response from %s: status=%s content-type=%s",
+                tool_name,
+                response.status_code,
+                response.headers.get("Content-Type"),
+            )
+
+            # Before the body, not after. A cancelled run's answer may still be
+            # a several-hundred-megabyte archive, and pulling it down for a
+            # panel that has already closed is the one expensive thing this
+            # side can still avoid doing.
+            self._raise_if_cancelled(cancel_event, tool_name, response=response)
+
+            if progress_cb:
+                progress_cb("Processing response...")
+
+            return self._build_result(tool_name, response, schema, output_dir, progress_cb)
+        finally:
+            # Whatever happened - a result, a 499, a dropped connection - the
+            # run this watcher was reading is over. Left running, it would keep
+            # reconnecting to a stream that will never say anything again.
+            watch_stop.set()
+            if watcher is not None:
+                # Joined, but briefly. The thread is a daemon holding nothing
+                # the caller needs; what makes the wait worth a few
+                # milliseconds is the pooled connection it owns. It is never
+                # waited on for longer, since it can legitimately be blocked in
+                # a read for _RUN_EVENTS_READ_TIMEOUT.
+                watcher.join(timeout=0.5)
+
+    # ------------------------------------------------------------------
+    # Run progress and cancellation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _raise_if_cancelled(cancel_event, tool_name: str, response=None) -> None:
+        """Stop doing work for a run nobody is waiting for any more.
+
+        Raises RunCancelled rather than returning a sentinel, because every
+        caller of `run()` already has an error path and none of them has a
+        "the caller changed their mind" path. `RunCancelled` is a class of its
+        own precisely so a panel can close quietly on it instead of opening
+        the error dialog a failure deserves.
+        """
+        if cancel_event is None or not cancel_event.is_set():
+            return
+        if response is not None:
+            # The body was never read (stream=True), so this releases the
+            # connection instead of leaving it draining an archive nobody will
+            # look at.
+            response.close()
+        raise RunCancelled(f"'{tool_name}' was cancelled.", 499)
+
+    def _start_watcher(self, run_id, event_cb, watch_stop, cancel_event):
+        """The second connection, on its own daemon thread, or None.
+
+        None whenever there is nothing to watch (no id) or nobody to tell (no
+        callback), so the ordinary scripted call pays neither a thread nor a
+        connection for a feature it is not using.
+        """
+        if not run_id or event_cb is None:
+            return None
+
+        stop = _AnyEvent([watch_stop, cancel_event])
+
+        def watch():
+            try:
+                self.watch_run(run_id, event_cb, stop_event=stop)
+            except Exception:
+                # Never propagates, and never fails a run. This thread exists
+                # to make a wait legible; a run that completed must not be
+                # reported as failed because the thread narrating it hit
+                # something. Logged at debug: an exception here says nothing
+                # the user can act on.
+                logger.debug("Run watcher stopped on an error", exc_info=True)
+
+        thread = threading.Thread(target=watch, name="sadt-run-watch", daemon=True)
+        thread.start()
+        return thread
+
+    def watch_run(self, run_id: str, on_event: Callable[[dict], None], stop_event=None) -> bool:
+        """Stream a run's progress events, calling `on_event` for each.
+
+        Blocks until the run reaches a terminal state, until `stop_event` is
+        set, or until it is clear no events will come. Returns whether any
+        event was delivered - False is how a caller learns it is talking to a
+        server that predates all of this.
+
+        Three things about the loop are load-bearing:
+
+        - **A 404 is tolerated for a startup window** (see
+          _RUN_EVENTS_STARTUP_GRACE_SECONDS). The run only exists server-side
+          once the POST arrives, and on the multipart path the POST *is* the
+          upload. Giving up on the first 404 would go quiet on exactly the
+          long uploads this exists for. Once ANY event has arrived the window
+          is over: a 404 then means the run was reaped.
+        - **It reconnects.** A stream that ends without a terminal event -
+          a dropped connection, a proxy's idle timeout, a read timeout - is
+          resumed rather than abandoned, which matters most on the runs that
+          last hours.
+        - **Which makes deduplication mandatory, not decorative.** Every
+          connection replays the run's events from the beginning by design
+          ("a watcher that attaches late is never behind"), so `seq` is what
+          keeps a reconnect from re-announcing an hour of progress.
+
+        Nothing here is ever fatal to a run. It raises only what the caller
+        chooses to let escape; `_start_watcher` lets nothing.
+        """
+        url = f"{self._server_url}/runs/{quote(run_id, safe='')}/events"
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Accept": "text/event-stream",
+            # Compressing a stream is how a proxy ends up buffering it, and a
+            # buffered progress stream is no progress stream at all.
+            "Accept-Encoding": "identity",
+        }
+        started = time.monotonic()
+        delivered_seq = -1
+        delivered_any = False
+
+        def stopped() -> bool:
+            return stop_event is not None and stop_event.is_set()
+
+        def pause() -> None:
+            if stop_event is not None:
+                stop_event.wait(_RUN_EVENTS_RETRY_SECONDS)
+            else:
+                time.sleep(_RUN_EVENTS_RETRY_SECONDS)
+
+        def within_startup_window() -> bool:
+            return (
+                not delivered_any
+                and (time.monotonic() - started) < _RUN_EVENTS_STARTUP_GRACE_SECONDS
+            )
+
+        while not stopped():
+            try:
+                response = self._session.get(
+                    url,
+                    headers=headers,
                     stream=True,
+                    # (connect, read). The read half is long on purpose: the
+                    # contract has no heartbeat, so silence is the normal state
+                    # of a running inference.
+                    timeout=(_TOOLS_FETCH_TIMEOUT, _RUN_EVENTS_READ_TIMEOUT),
+                    verify=self._verify_tls,
+                )
+            except requests.RequestException:
+                if stopped() or not within_startup_window():
+                    return delivered_any
+                pause()
+                continue
+
+            with response:
+                if response.status_code == 404:
+                    # Three different things, and only one is worth waiting
+                    # for: the run is not registered YET (keep trying), the
+                    # server has no such endpoint (stop, silently - this is an
+                    # older deployment and the panel keeps its elapsed timer),
+                    # or the run has been reaped (stop, there is nothing left).
+                    if not within_startup_window():
+                        return delivered_any
+                    pause()
+                    continue
+                if not response.ok:
+                    # 401, 5xx, anything else: retrying would only repeat it.
+                    logger.debug(
+                        "Run event stream refused: HTTP %d", response.status_code
+                    )
+                    return delivered_any
+
+                try:
+                    for frame in _sse_data_frames(
+                        response.iter_lines(decode_unicode=True)
+                    ):
+                        if stopped():
+                            return delivered_any
+                        try:
+                            event = normalise_run_event(json.loads(frame))
+                        except ValueError:
+                            # A frame we cannot read is one frame, not the end
+                            # of the stream: the run keeps going and so does
+                            # this. Its content is never logged - a progress
+                            # message is written by a tool and may name a file.
+                            logger.debug("Unreadable run event frame, skipped")
+                            continue
+                        if event is None or event["seq"] <= delivered_seq:
+                            continue
+                        delivered_seq = event["seq"]
+                        delivered_any = True
+                        on_event(event)
+                        if event["state"] in TERMINAL_RUN_STATES:
+                            return True
+                except requests.RequestException:
+                    # A read timeout or a dropped connection mid-stream. The
+                    # run is very probably still going; reconnect and let the
+                    # replay-plus-dedupe pick up where this left off.
+                    pass
+
+            if stopped():
+                return delivered_any
+            pause()
+
+        return delivered_any
+
+    def cancel_run(self, run_id: str) -> bool:
+        """Ask the server to stop a run: DELETE /runs/{id}. Never raises.
+
+        Returns whether the server acknowledged. False covers three cases a
+        caller cannot act on differently anyway - an older server with no such
+        route, a run already finished and reaped, and an unreachable server -
+        and in all three the local side has already released the panel.
+
+        Retried once, like _release_result and for the same reason: this is the
+        difference between a two-hour segmentation stopping now and it holding
+        the card until it finishes for nobody, and a single dropped packet
+        should not decide that.
+        """
+        url = f"{self._server_url}/runs/{quote(run_id, safe='')}"
+        headers = {"Authorization": f"Bearer {self._token}"}
+        for attempt in range(2):
+            try:
+                response = self._session.delete(
+                    url, headers=headers, timeout=_TOOLS_FETCH_TIMEOUT, verify=self._verify_tls
                 )
             except requests.RequestException as exc:
-                raise ServerToolError(f"Network error while calling '{tool_name}': {exc}") from exc
-        finally:
-            for file_handle in file_handles:
-                file_handle.close()
-
-        logger.debug(
-            "Response from %s: status=%s content-type=%s",
-            tool_name,
-            response.status_code,
-            response.headers.get("Content-Type"),
-        )
-
-        if progress_cb:
-            progress_cb("Processing response...")
-
-        return self._build_result(tool_name, response, schema, output_dir, progress_cb)
+                logger.debug("Could not cancel a run (attempt %d): %s", attempt, exc)
+                continue
+            if response.ok:
+                logger.info("Cancelled a run on %s", self._server_url)
+                return True
+            if response.status_code == 404:
+                # Nothing to cancel: no such endpoint, or the run is already
+                # over. Neither is worth a retry.
+                return False
+            logger.debug("Server refused to cancel a run: HTTP %d", response.status_code)
+        return False
 
     # ------------------------------------------------------------------
     # Bulk transfer (see transfer.py for why it is not one request)

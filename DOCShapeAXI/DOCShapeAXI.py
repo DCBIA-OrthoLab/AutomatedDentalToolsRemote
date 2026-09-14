@@ -5,7 +5,7 @@ conda `shapeaxi` environment, a WSL detour on Windows, and a checkpoint
 downloaded from a GitHub release on every run). Nothing is computed in Slicer
 any more: the panel is generated from the server's `GET /tools` entry, the
 surfaces go up, the grades and the GradCAM surfaces come back.
-DOCShapeAXI_utils/ is left in the tree but is no longer wired to this module.
+DOCShapeAXI_utils/ went with it and is no longer in the tree.
 
 Two things about DOCShapeAXI's schema are worth knowing when reading this file:
 
@@ -21,12 +21,8 @@ Two things about DOCShapeAXI's schema are worth knowing when reading this file:
   surfaces are what this module offers to load into the scene - not the table.
 """
 
-import glob
-import json
 import logging
-import os
 
-import qt
 import slicer
 from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule
@@ -69,6 +65,8 @@ class DOCShapeAXIWidget(ServerToolWidgetBase):
     in ServerToolsCoreLib. See ARCHITECTURE.md."""
 
     TOOL_NAME = "DOCShapeAXI"
+    LOAD_RESULTS_LABEL = _("Load the explainability surfaces into the scene when done")
+    RUN_REPORT = "DOCShapeAXI_report.json"
 
     # No FILE_INPUTS: `meshes` and `model` are a packaged tool's `path`, which
     # the client already gives a picker taking a file or a folder
@@ -92,19 +90,9 @@ class DOCShapeAXIWidget(ServerToolWidgetBase):
         ("*.vtp", "model"),
     )
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._loadResultsCheckBox = None
-
     # ------------------------------------------------------------------
     # Panel
     # ------------------------------------------------------------------
-
-    def addExtraWidgets(self, layout) -> None:
-        self._loadResultsCheckBox = qt.QCheckBox(
-            _("Load the explainability surfaces into the scene when done"))
-        self._loadResultsCheckBox.setChecked(True)
-        layout.addWidget(self._loadResultsCheckBox)
 
     # ------------------------------------------------------------------
     # Result
@@ -127,26 +115,7 @@ class DOCShapeAXIWidget(ServerToolWidgetBase):
         if report:
             slicer.util.showStatusMessage(self._summarize(report), 8000)
 
-        if self._loadResultsCheckBox and self._loadResultsCheckBox.isChecked():
-            self._loadResults(outputDir)
-
-    @staticmethod
-    def _readRunReport(outputDir: str):
-        """The run report, or None when there isn't a readable one.
-
-        Never fatal: the grades are already on disk and are what the user asked
-        for. A missing report costs them the summary, not the run.
-        """
-        found = glob.glob(
-            os.path.join(outputDir, "**", "DOCShapeAXI_report.json"), recursive=True)
-        if not found:
-            return None
-        try:
-            with open(found[0], encoding="utf-8") as handle:
-                return json.load(handle)
-        except (OSError, ValueError) as exc:
-            logger.warning("Could not read %s: %s", found[0], exc)
-            return None
+        self._maybeLoadResults()
 
     @staticmethod
     def _summarize(report: dict) -> str:
@@ -159,41 +128,3 @@ class DOCShapeAXIWidget(ServerToolWidgetBase):
             task=report.get("task") or "?",
             checkpoint=report.get("checkpoint") or "?",
         )
-
-    @classmethod
-    def _findResults(cls, outputDir: str) -> list:
-        """[(path, kind)] for every result with a loader."""
-        return sorted(
-            (path, kind)
-            for pattern, kind in cls._LOADABLE
-            for path in glob.glob(os.path.join(outputDir, "**", pattern), recursive=True)
-        )
-
-    def _loadResults(self, outputDir: str) -> None:
-        found = self._findResults(outputDir)
-        if not found:
-            slicer.util.showStatusMessage(
-                _("DOCShapeAXI: no explainability surface found to load."), 5000)
-            return
-
-        if len(found) > self.MAX_RESULTS_TO_LOAD:
-            slicer.util.infoDisplay(
-                _(
-                    "{count} surfaces were produced - too many to load at once.\n"
-                    "They are all saved in {path}."
-                ).format(count=len(found), path=outputDir)
-            )
-            return
-
-        failed = []
-        for path, kind in found:
-            try:
-                slicer_io.load_result(path, kind)
-            except Exception as exc:  # one bad file must not lose the others
-                failed.append(f"{os.path.basename(path)}: {exc}")
-
-        if failed:
-            slicer.util.errorDisplay(
-                _("Some results could not be loaded:\n{details}").format(
-                    details="\n".join(failed))
-            )
