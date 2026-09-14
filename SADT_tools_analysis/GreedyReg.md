@@ -78,7 +78,7 @@ avec `-m NMI`, `-m NCC 4x4x4` ou `-m SSD` (`GreedyReg_CLI.py:103-108`) et `-dof 
 - macOS : archive `.tar.gz` **arm64 uniquement** (`Logic.py:124-125`) ;
 - Windows : installeur NSIS `.exe`, extrait soit via 7-Zip s'il est installé (`Logic.py:187-202`), soit par installation silencieuse dans un dossier sans espace puis désinstallation (`Logic.py:209-260`).
 
-**Dépendances Python.** `nibabel` est requis (binarisation des masques, écriture NIfTI) : vérifié/installé côté module par `Logic.ensureNibabelInstalled` (`Logic.py:82-104`), et le CLI échoue proprement s'il manque (`GreedyReg_CLI.py:14-22`). Le mode Distant requiert en plus `itk`, `dicom2nifti==2.3.0`, `pydicom==2.2.2`, `monai` (`Logic.py:336-338`) et les modèles ALI, téléchargés au besoin depuis la release `v0.1-v2.0_models` (`Logic.py:37-39`, `Logic.py:427-469`).
+**Dépendances Python.** `nibabel` est requis (binarisation des masques, écriture NIfTI) : vérifié/installé côté module par `Logic.ensureNibabelInstalled` (`Logic.py:82-104`), et le CLI échoue proprement s'il manque (`GreedyReg_CLI.py:14-22`). Le mode Distant requiert en plus `itk`, `dicom2nifti==2.6.2`, `pydicom==3.0.2`, `monai` (`Logic.py:336-338`) et les modèles ALI, téléchargés au besoin depuis la release `v0.1-v2.0_models` (`Logic.py:37-39`, `Logic.py:427-469`).
 
 ---
 
