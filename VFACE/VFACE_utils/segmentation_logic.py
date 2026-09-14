@@ -21,7 +21,7 @@ formatter = logging.Formatter('%(name)s - %(levelname)s - (%(filename)s:%(lineno
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-# Desactivate les warnings VTK
+# Silence the VTK warnings
 vtk.vtkObject.GlobalWarningDisplayOff()
 
 # ─── Model descriptions ──────────────────────────────────────────────────────
@@ -88,7 +88,7 @@ class SegmentationLogic:
         """Define input folder"""
         self.folderPath = folderPath
         folder = Path(folderPath)
-        # Filtrer selon vos formats, ex. tous les fichiers NIfTI
+        # Filter by the formats we accept, e.g. every NIfTI file
         self.folderFiles = list(folder.rglob("*.nii*")) + list(folder.rglob("*.gipl")) + list(folder.rglob("*.gipl.gz"))
         self.currentFileIndex = 0
         self.log_info(f"Found {len(self.folderFiles)} file(s) in the folder.")
@@ -114,7 +114,7 @@ class SegmentationLogic:
         self.exportFormats = formats
     
     def log_info(self, message):
-        """Log d'information"""
+        """Information log"""
         logger.info(f"[SEGMENTATION] {message}")
         self.fullInfoLogs.append(message)
     
@@ -164,7 +164,7 @@ class SegmentationLogic:
         return True
     
     def processFile(self, file_path):
-        """Traite un seul fichier"""
+        """Process a single file"""
         try:
             #Load volume
             loadedVolume = slicer.util.loadVolume(str(file_path))
@@ -469,7 +469,7 @@ class SegmentationLogic:
         else:
             labels = ["Upper Skull", "Mandible", "Upper Teeth", "Lower Teeth", "Mandibular canal"]
         
-        # Application des labels
+        # Apply the labels
         segmentIds = list(segmentation.GetSegmentIDs())
         for i, (segmentId, label) in enumerate(zip(segmentIds, labels)):
             segment = segmentation.GetSegment(segmentId)
@@ -477,7 +477,7 @@ class SegmentationLogic:
                 segment.SetName(label)
     
     def _saveSegmentationAsNifti(self, segmentationNode, volumeNode):
-        """Sauvegarde la segmentation au format NIfTI"""
+        """Save the segmentation in NIfTI format"""
         try:
             self.log_info("Saving segmentation as NIfTI")
             
@@ -500,7 +500,7 @@ class SegmentationLogic:
             else:
                 self.log_error(f"Failed to save segmentation to {output_path}")
             
-            # Nettoyage du label-map temporaire
+            # Clean up the temporary label map
             slicer.mrmlScene.RemoveNode(labelmapVolumeNode)
             return saved
             
@@ -509,7 +509,7 @@ class SegmentationLogic:
             return False
     
     def _exportSTL(self, segmentationNode):
-        """Export au format STL"""
+        """Export to STL format"""
         try:
             self.log_info("Exporting to STL format")
             slicer.vtkSlicerSegmentationsModuleLogic.ExportSegmentsClosedSurfaceRepresentationToFiles(
@@ -519,7 +519,7 @@ class SegmentationLogic:
             self.log_error(f"Error exporting STL: {str(e)}")
     
     def _exportOBJ(self, segmentationNode):
-        """Export au format OBJ"""
+        """Export to OBJ format"""
         try:
             self.log_info("Exporting to OBJ format")
             slicer.vtkSlicerSegmentationsModuleLogic.ExportSegmentsClosedSurfaceRepresentationToFiles(
@@ -566,7 +566,7 @@ class SegmentationLogic:
             ws.NormalizeCoordinatesOn()
             ws.Update()
 
-            # Normales
+            # Normals
             self.log_info("MergedVTK: Computing normals")
             flatN = vtk.vtkPolyDataNormals()
             flatN.SetInputConnection(ws.GetOutputPort())
@@ -583,7 +583,7 @@ class SegmentationLogic:
             labels = np.unique(vtk_to_numpy(labelArray))
             append = vtk.vtkAppendPolyData()
 
-            # Parcours des labels
+            # Walk the labels
             for i, labelValue in enumerate(labels, start=1):
                 if labelValue == 0:
                     continue
@@ -666,7 +666,7 @@ class SegmentationLogic:
             self.log_error(f"Error exporting MergedVTK: {str(e)}")
     
     def _exportVTKPerLabel(self, segmentationNode):
-        """Export VTK par label - un fichier VTK par segment"""
+        """Export VTK per label - one VTK file per segment"""
         try:
             import os, re
             
@@ -710,7 +710,7 @@ class SegmentationLogic:
                 ws.NormalizeCoordinatesOn()
                 ws.Update()
 
-                # Normales
+                # Normals
                 flatN = vtk.vtkPolyDataNormals()
                 flatN.SetInputConnection(ws.GetOutputPort())
                 flatN.ComputePointNormalsOff()
@@ -763,7 +763,7 @@ class SegmentationLogic:
         try:
             self.log_info("Starting cleanup")
             
-            # Suppression des nodes
+            # Remove the nodes
             if segmentationNode and slicer.mrmlScene.IsNodePresent(segmentationNode):
                 slicer.mrmlScene.RemoveNode(segmentationNode)
             
@@ -850,7 +850,7 @@ class SegmentationLogic:
     
     @classmethod
     def nnUnetFolder(cls) -> Path:
-        """Retourne le dossier NNUNet"""
+        """Return the NNUNet folder"""
         fileDir = Path(__file__).parent
         return fileDir.joinpath("VFACE", "Resources", "ML").resolve()
 
@@ -887,7 +887,7 @@ def run_dental_segmentation(input_folder, output_folder, model_name="DentalSegme
         logic.setDevice(device)
         logic.setExportFormats(export_formats)
         
-        # Traitement de tous les fichiers
+        # Process every file
         success = logic.processAllFiles()
         
         return success
@@ -897,5 +897,5 @@ def run_dental_segmentation(input_folder, output_folder, model_name="DentalSegme
         return False
     
     finally:
-        # Nettoyage
+        # Cleanup
         logic.stop()
