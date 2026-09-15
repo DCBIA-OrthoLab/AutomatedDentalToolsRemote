@@ -623,3 +623,189 @@ class OneDialogPerCohortTest(unittest.TestCase):
         self._announce(_Run(9, "one.nii.gz", {}, {}, "/out", None))
 
         self.assertEqual(self.dialogs, ["done"])
+
+
+class CohortPanelTest(unittest.TestCase):
+    """What a cohort in flight looks like.
+
+    Five lines of the same sentence and five Cancel buttons read as five
+    unrelated jobs someone started by accident. A cohort is ONE piece of work
+    made of parts, and the panel has to say so -- in scans, which is the unit
+    the work is actually in.
+    """
+
+    def setUp(self):
+        import qt_stubs
+        qt_stubs.install()
+        from ServerToolsCoreLib.base_widget import ServerToolWidgetBase, _Cohort, _Run
+        import qt
+
+        self.qt = qt
+        self.Run, self.Cohort = _Run, _Cohort
+        panel = ServerToolWidgetBase.__new__(ServerToolWidgetBase)
+        panel.TOOL_NAME = "ALI"
+        panel._runs = []
+        panel._cohortView = None
+        panel._runControlsLayout = qt.QVBoxLayout()
+        panel._runControlsWidget = None
+        panel._progressBar = None
+        panel._progressLabel = None
+        panel.applyButton = qt.QPushButton("Apply")
+        panel.cancelButton = qt.QPushButton("Cancel")
+        self.phases = []
+        panel._showPhase = self.phases.append
+        self.panel = panel
+
+    def _cohort(self, batches=5, scans_per_batch=4, started=1):
+        """A cohort of `batches`, the first `started` of them running."""
+        cohort = self.Cohort(batches, batches * scans_per_batch)
+        for index in range(1, batches + 1):
+            run = self.Run(index, f"cohort ({index}/{batches})", {}, {}, "/out", None,
+                           cohort=cohort, cohort_index=index, scan_count=scans_per_batch)
+            if index <= started:
+                run.started_at = 0.0
+            self.panel._runs.append(run)
+        return cohort
+
+    def _view(self):
+        self.panel._syncRunControls()
+        return self.panel._cohortView
+
+    # --- no cancelling one batch of five -------------------------------
+
+    def test_a_cohort_offers_no_per_batch_cancel_button(self):
+        """Abandoning batch 3 of 5 leaves results covering an arbitrary part of
+        the cohort. Nobody wants that outcome, so the panel does not offer it."""
+        self._cohort()
+
+        self._view()
+
+        buttons = [w for w in self.panel._runControlsWidget.layout.widgets
+                   if isinstance(w, self.qt.QPushButton)]
+        self.assertEqual(buttons, [])
+
+    def test_unrelated_runs_keep_their_own_cancel_buttons(self):
+        """The regression that matters: a queue of independent runs is not a
+        cohort, and cancelling the one that is stuck is the whole point there."""
+        for number in (1, 2):
+            self.panel._runs.append(
+                self.Run(number, f"patient_{number}.nii.gz", {}, {}, "/out", None))
+
+        self._view()
+
+        buttons = [w for w in self.panel._runControlsWidget.layout.widgets
+                   if isinstance(w, self.qt.QPushButton)]
+        self.assertEqual(len(buttons), 2)
+
+    def test_the_panel_s_cancel_speaks_for_the_cohort(self):
+        self._cohort()
+        self._view()
+
+        self.assertIn("cohort", self.panel.cancelButton.text.lower())
+
+    # --- the number the user asked for ---------------------------------
+
+    def test_the_headline_counts_scans_and_not_batches(self):
+        """"2 of 5" would be true and useless: nobody has five batches of work
+        to do, they have twenty scans."""
+        cohort = self._cohort(batches=5, scans_per_batch=4)
+        cohort.scans_done = 8
+        view = self._view()
+
+        self.panel._renderProgress()
+
+        self.assertIn("8", view.total.text)
+        self.assertIn("20", view.total.text)
+        self.assertIn("scans", view.total.text)
+
+    def test_scans_lost_to_a_failed_batch_are_named_not_folded_in(self):
+        """"16 of 20" with four lost in silence is the report this whole
+        feature exists not to produce."""
+        cohort = self._cohort()
+        cohort.scans_done, cohort.scans_failed = 12, 4
+        view = self._view()
+
+        self.panel._renderProgress()
+
+        self.assertIn("12", view.total.text)
+        self.assertIn("4", view.total.text)
+        self.assertIn("failed", view.total.text.lower())
+
+    def test_nothing_failed_says_nothing_about_failures(self):
+        cohort = self._cohort()
+        cohort.scans_done = 8
+        view = self._view()
+
+        self.panel._renderProgress()
+
+        self.assertNotIn("failed", view.total.text.lower())
+
+    # --- the bars ------------------------------------------------------
+
+    def test_the_cohort_bar_counts_the_batch_in_flight(self):
+        """Otherwise it steps five times over an hour and looks frozen between
+        them, which is the complaint progress reporting exists to answer."""
+        cohort = self._cohort(batches=5, scans_per_batch=4)
+        cohort.scans_done = 8            # two batches finished: 8/20 = 40%
+        self.panel._runs[0].fraction = 0.5   # half of a third batch: +2 scans
+        view = self._view()
+
+        self.panel._renderProgress()
+
+        self.assertEqual(view.bar.value, 50)
+
+    def test_a_queued_batch_shows_no_bar_of_its_own(self):
+        """Three empty bars are three things that look stuck."""
+        self._cohort(batches=3, started=1)
+        self.panel._runs[0].fraction = 0.4
+        view = self._view()
+
+        self.panel._renderProgress()
+
+        self.assertTrue(view.rows[1][1].isVisible())
+        self.assertFalse(view.rows[2][1].isVisible())
+        self.assertFalse(view.rows[3][1].isVisible())
+
+    def test_a_running_batch_with_nothing_to_report_shows_no_bar_either(self):
+        """Most tools report no fraction at all. A bar inventing motion to look
+        busy is worse than the elapsed time beside it."""
+        self._cohort(batches=3, started=1)
+        view = self._view()
+
+        self.panel._renderProgress()
+
+        self.assertFalse(view.rows[1][1].isVisible())
+
+    # --- the lines -----------------------------------------------------
+
+    def test_a_batch_is_numbered_by_its_place_in_the_cohort(self):
+        """"Batch 2 of 5" is where the user is; "Run 7" is bookkeeping."""
+        self._cohort(batches=5, started=1)
+        view = self._view()
+
+        self.panel._renderProgress()
+
+        self.assertIn("2", view.rows[2][0].text)
+        self.assertIn("5", view.rows[2][0].text)
+        self.assertIn("queued", view.rows[2][0].text.lower())
+
+    def test_the_box_says_it_all_so_the_label_above_stays_empty(self):
+        """The same sentence twice reads as two different runs."""
+        self._cohort()
+        self._view()
+
+        self.panel._renderProgress()
+
+        self.assertEqual(self.phases[-1], "")
+
+    # --- what is not a cohort ------------------------------------------
+
+    def test_a_cohort_with_a_stranger_queued_behind_it_is_not_drawn_as_one(self):
+        """It is a queue that happens to contain a cohort. Drawing it as one
+        would put another run's progress inside the box and its scans outside
+        the count."""
+        self._cohort(batches=2)
+        self.panel._runs.append(
+            self.Run(99, "other.nii.gz", {}, {}, "/out", None))
+
+        self.assertIsNone(self._view())

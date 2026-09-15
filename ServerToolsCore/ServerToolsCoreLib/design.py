@@ -656,3 +656,112 @@ def progress_label() -> qt.QLabel:
     t = tokens()
     label.setStyleSheet(f"color: {t['TEXT_MUTED']}; padding: {SPACING_XS}px;")
     return label
+
+
+# --- a cohort in flight ----------------------------------------------------
+#
+# One Apply can now be several runs (a folder of 20 scans sent in batches), and
+# the panel had nothing for that shape: it showed five lines of the same
+# sentence and five Cancel buttons, which reads as five unrelated jobs a user
+# started by accident. These four factories say the opposite -- ONE piece of
+# work, made of parts -- and the design follows from it:
+#
+#   * one frame, so the cohort is one object on the panel. Not a card per
+#     batch: a border around each would be five objects again.
+#   * one headline count, in the size `selection_label` uses, because both
+#     answer the same kind of question ("what have I actually got") and a
+#     second size here would invent a vocabulary the panel does not have.
+#   * bars WITHOUT their percentage. The exact figure is written underneath in
+#     words; a "%" painted on the bar is a second, vaguer answer to a question
+#     already answered precisely.
+#   * the batch bars slim and the cohort bar full height, which is the only
+#     hierarchy needed: what matters is the whole, what moves is a part.
+
+
+def cohort_frame() -> qt.QFrame:
+    """The box a whole cohort's progress lives in.
+
+    Surface and a hairline border, nothing stronger: it separates the cohort
+    from the form above it without competing with Apply, the one control on the
+    panel that starts anything.
+    """
+    t = tokens()
+    frame = qt.QFrame()
+    frame.setStyleSheet(
+        f"QFrame {{ background-color: {t['SURFACE']};"
+        f" border: 1px solid {t['BORDER']}; border-radius: 4px;"
+        f" padding: {SPACING_SM}px; }}"
+    )
+    frame.setVisible(False)
+    return frame
+
+
+def cohort_total_label(text: str) -> qt.QLabel:
+    """"8 of 20 scans" -- the one number the user actually asked for.
+
+    The largest text in the box, and deliberately the same 12pt semi-bold as
+    `selection_label`: that one says what an input row holds, this says what a
+    run has finished, and both are the answer rather than the offer. Counted in
+    SCANS and not in batches, because a batch is an implementation detail of
+    the transfer and nobody has twenty batches of work to do.
+    """
+    t = tokens()
+    label = qt.QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet(
+        f"color: {t['TEXT']}; font-size: 12pt; font-weight: 600;"
+        f" border: none; padding: 0px;"
+    )
+    return label
+
+
+def cohort_bar() -> qt.QProgressBar:
+    """The whole cohort's progress, in one bar.
+
+    Text off: the count underneath is exact and this is the impression. Unlike
+    `progress_bar` it is shown for as long as the cohort runs -- there is always
+    a real number behind it, because the number of scans in each batch is known
+    before anything is sent.
+    """
+    bar = qt.QProgressBar()
+    bar.setRange(0, 100)
+    bar.setValue(0)
+    bar.setTextVisible(False)
+    return bar
+
+
+def batch_bar() -> qt.QProgressBar:
+    """One batch's own progress, slim, under its line.
+
+    Slim because a batch is a part: given the same weight as the cohort's bar,
+    five of them would drown the one bar that answers the question. Shown only
+    for a batch actually running -- an empty bar on each of four queued batches
+    is four things that look stuck.
+    """
+    bar = qt.QProgressBar()
+    bar.setRange(0, 100)
+    bar.setValue(0)
+    bar.setTextVisible(False)
+    bar.setMaximumHeight(BATCH_BAR_HEIGHT)
+    return bar
+
+
+# Slim enough to read as a rule rather than a control, tall enough that its
+# rounded chunk is not clipped to a sliver by the 1px border and 2px padding
+# the base stylesheet gives every QProgressBar.
+BATCH_BAR_HEIGHT = 8
+
+
+def batch_label(text: str) -> qt.QLabel:
+    """One batch's line: which batch it is, and what it is doing.
+
+    Muted and small, the `hint_label` register: these are the detail under the
+    headline, and a reader who only wants to know how far along the run is
+    should be able to skip every one of them.
+    """
+    t = tokens()
+    label = qt.QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet(
+        f"color: {t['TEXT_MUTED']}; font-size: 9pt; border: none; padding: 0px;")
+    return label

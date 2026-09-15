@@ -101,6 +101,23 @@ def _merged_report(first, second):
     return first
 
 
+class _CohortView:
+    """The widgets a cohort's progress is written into.
+
+    Kept so the one-second tick writes VALUES rather than rebuilding Qt objects:
+    a panel that recreates its own widgets every second flickers, and cannot be
+    interacted with at all. A plain Python object, so holding references on it
+    is allowed -- PythonQt refuses new attributes on a C++ one.
+    """
+
+    def __init__(self, frame, total, bar, rows, cohort):
+        self.frame = frame
+        self.total = total
+        self.bar = bar
+        self.rows = rows  # {run number: (label, bar)}
+        self.cohort = cohort
+
+
 class _Cohort:
     """The few things several batches of one Apply have in common.
 
@@ -110,8 +127,15 @@ class _Cohort:
     have ended, and the report so far.
     """
 
-    def __init__(self, total: int):
+    def __init__(self, total: int, total_scans: int = 0):
         self.total = total
+        # In SCANS, not batches: a batch is how the transfer was cut up and
+        # nobody has twenty batches of work to do. Known before anything is
+        # sent, which is what lets the panel answer "how many of my scans are
+        # done" with a number rather than an impression.
+        self.total_scans = total_scans
+        self.scans_done = 0
+        self.scans_failed = 0
         self.finished = 0
         # The merge of every batch's report so far, written back to disk each
         # time so `_readRunReport` answers for the cohort and no module has to
@@ -121,6 +145,21 @@ class _Cohort:
     @property
     def complete(self) -> bool:
         return self.finished >= self.total
+
+    def progress(self, running) -> float:
+        """0..1 for the cohort's bar, counting what is in flight.
+
+        The scans of the finished batches are exact; a running batch
+        contributes its own reported fraction of its own size. The bar is the
+        impression and the count below it is the fact -- which is why the count
+        never includes a batch that has not finished.
+        """
+        if self.total_scans <= 0:
+            return 0.0
+        done = float(self.scans_done + self.scans_failed)
+        for run in running:
+            done += (run.fraction or 0.0) * run.scan_count
+        return max(0.0, min(1.0, done / self.total_scans))
 
 
 class _Run:
@@ -138,7 +177,7 @@ class _Run:
     """
 
     def __init__(self, number, label, args, files, output_dir, workspace,
-                 cohort=None, cohort_index=None):
+                 cohort=None, cohort_index=None, scan_count=0):
         self.number = number
         self.label = label
         self.args = args
@@ -151,6 +190,9 @@ class _Run:
         # observable at all.
         self.cohort = cohort
         self.cohort_index = cohort_index
+        # Entries in this batch -- top-level ones, so a per-patient folder
+        # counts as the one patient it is. 0 for a run that was not divided.
+        self.scan_count = scan_count
         self.job = None
         self.phase = ""
         self.started_at = None  # None while the run is still queued
@@ -312,6 +354,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # host widget stays put in the layout; only its single child is
         # replaced, the same swap _buildForm makes for the schema-driven part.
         self._runControlsLayout = None
+        # Set while a cohort is in flight; see _buildCohortView.
+        self._cohortView = None
         self._runControlsWidget = None
         self._elapsedTimer = None  # ticks once a second while any run is active
 
@@ -1647,7 +1691,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer.util.errorDisplay(str(exc))
             return
 
-        cohort = _Cohort(len(prepared)) if len(prepared) > 1 else None
+        sizes = [len(batch[1]) for batch in batches] if batches[0] else []
+        cohort = _Cohort(len(prepared), sum(sizes)) if len(prepared) > 1 else None
         for index, (workspace, files) in enumerate(prepared, start=1):
             outputDir = (self._outputFolderWidget.currentPath
                          if self._outputFolderWidget else workspace.path)
@@ -1659,6 +1704,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 # of them could still be reading when another is written to.
                 dict(args), files, outputDir, workspace,
                 cohort=cohort, cohort_index=index if cohort else None,
+                scan_count=sizes[index - 1] if sizes else 0,
             ))
         self._pumpRuns()
 
@@ -1888,15 +1934,24 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not run.cohort:
             self._suggestOutputFolder()
 
-    def _countBatch(self, run) -> None:
-        """Record that one batch of a cohort has ended, however it ended.
+    def _countBatch(self, run, succeeded: bool = True) -> None:
+        """Record that one batch of a cohort has ended, and how.
 
-        Failures and cancellations count: `complete` asks whether anything is
-        still coming, not whether everything worked. A cohort whose third batch
-        failed must still say its last word when the fourth lands.
+        Failures count towards `finished`: it asks whether anything is still
+        coming, not whether everything worked. A cohort whose third batch failed
+        must still say its last word when the fourth lands.
+
+        The SCANS are counted apart, and done apart from failed, because that
+        is the number on the panel: "16 of 20 scans" must never include four a
+        batch lost. A batch that failed is reported as failed, not as absent.
         """
-        if run.cohort:
-            run.cohort.finished += 1
+        if not run.cohort:
+            return
+        run.cohort.finished += 1
+        if succeeded:
+            run.cohort.scans_done += run.scan_count
+        else:
+            run.cohort.scans_failed += run.scan_count
 
     def _announce(self, message: str) -> None:
         """Tell the user something, in a dialog they have to dismiss.
@@ -1915,7 +1970,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _onJobError(self, run, exc) -> None:
         """One run failing takes only that run: the rest of a cohort goes on."""
         self._finishRun(run)
-        self._countBatch(run)
+        self._countBatch(run, succeeded=False)
         if isinstance(exc, RunCancelled):
             # 499: the user asked for this. A cancellation is not a failure and
             # must never open an error dialog -- the panel simply closes the
@@ -1983,11 +2038,58 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """Apply stays visible whatever is running: clicking it queues another."""
         if self.cancelButton is not None:
             self.cancelButton.setVisible(bool(self._runs))
-            self.cancelButton.setText(_("Cancel all") if len(self._runs) > 1 else _("Cancel"))
+            if self._cohortInFlight() is not None:
+                self.cancelButton.setText(_("Cancel the cohort"))
+            else:
+                self.cancelButton.setText(
+                    _("Cancel all") if len(self._runs) > 1 else _("Cancel"))
         if self.applyButton is not None:
             self.applyButton.setVisible(True)
         self._rebuildRunCancelButtons()
         self._renderProgress()
+
+    def _cohortInFlight(self):
+        """The one cohort every run in flight belongs to, or None.
+
+        All of them, deliberately. A cohort plus an unrelated run queued behind
+        it is not a cohort any more -- it is a queue that happens to contain
+        one -- and drawing it as one would put a stranger's progress inside the
+        cohort's box and its scans outside the count.
+        """
+        cohorts = {id(run.cohort): run.cohort for run in self._runs}
+        if len(cohorts) != 1:
+            return None
+        cohort = next(iter(cohorts.values()))
+        return cohort if cohort is not None else None
+
+    def _buildCohortView(self, layout, cohort):
+        """The cohort's own progress box, built once per change to the run set.
+
+        Built here rather than in the one-second tick for the reason the Cancel
+        buttons were: a widget rebuilt under the pointer is a widget the user
+        was about to interact with. The tick only writes values into these.
+        """
+        frame = design.cohort_frame()
+        inner = qt.QVBoxLayout(frame)
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.setSpacing(design.SPACING_XS)
+
+        total = design.cohort_total_label("")
+        bar = design.cohort_bar()
+        inner.addWidget(total)
+        inner.addWidget(bar)
+
+        rows = {}
+        for run in self._runs:
+            label = design.batch_label("")
+            batch_bar = design.batch_bar()
+            inner.addWidget(label)
+            inner.addWidget(batch_bar)
+            rows[run.number] = (label, batch_bar)
+
+        frame.setVisible(True)
+        layout.addWidget(frame)
+        return _CohortView(frame, total, bar, rows, cohort)
 
     def _rebuildRunCancelButtons(self) -> None:
         """One Cancel per run -- but only once there is more than one run.
@@ -2015,7 +2117,15 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         layout = qt.QVBoxLayout(host)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(design.SPACING_XS)
-        if len(self._runs) > 1:
+        cohort = self._cohortInFlight()
+        self._cohortView = None
+        if cohort is not None:
+            # A cohort gets NO per-batch Cancel. Abandoning batch 3 of 5 leaves
+            # a run whose results cover an arbitrary part of the cohort and
+            # whose report says so in a footnote -- an outcome nobody wants and
+            # which the panel should not offer. One Apply, one thing to stop.
+            self._cohortView = self._buildCohortView(layout, cohort)
+        elif len(self._runs) > 1:
             for run in self._runs:
                 button = design.compact_danger_button(
                     _("Cancel run {number} ({label})").format(
@@ -2160,8 +2270,62 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _renderProgress(self) -> None:
         if not self._runs:
             return
+        # getattr: a panel built without __init__ (the unit tests do exactly
+        # that) has no view, and no cohort either.
+        view = getattr(self, "_cohortView", None)
+        if view is not None:
+            self._renderCohort(view)
+            # The label above the box stays empty: the box says all of it, and
+            # the same sentence twice reads as two different runs.
+            self._showPhase("")
+            return
         self._showPhase("\n".join(self._describeRun(run) for run in self._runs))
         self._renderProgressBar()
+
+    def _renderCohort(self, view) -> None:
+        """Write the current state into the cohort box. Values only."""
+        cohort = view.cohort
+        done, failed = cohort.scans_done, cohort.scans_failed
+        text = _("{done} of {total} scans done").format(
+            done=done, total=cohort.total_scans)
+        if failed:
+            # Named, not folded into the count. "16 of 20" with four lost in
+            # silence is the report this whole feature exists not to produce.
+            text += _("  ·  {failed} failed").format(failed=failed)
+        view.total.setText(text)
+        view.bar.setValue(int(round(100 * cohort.progress(
+            [run for run in self._runs if run.started_at is not None]))))
+
+        for run in self._runs:
+            row = view.rows.get(run.number)
+            if row is None:
+                continue
+            label, bar = row
+            label.setText(self._describeBatch(run))
+            # Only for a batch actually running: an empty bar under each queued
+            # batch is three things that look stuck.
+            if run.started_at is None or run.fraction is None:
+                bar.setVisible(False)
+            else:
+                bar.setValue(int(round(100 * run.fraction)))
+                bar.setVisible(True)
+
+    def _describeBatch(self, run) -> str:
+        """One batch's line inside the cohort box.
+
+        Numbered by its place in the cohort rather than by the panel's run
+        counter: "Batch 2 of 5" is where the user is, "Run 7" is bookkeeping
+        that means nothing to them.
+        """
+        where = _("Batch {index} of {total}").format(
+            index=run.cohort_index, total=run.cohort.total)
+        if run.started_at is None:
+            return _("{where}  ·  queued").format(where=where)
+        elapsed = int(time.monotonic() - run.started_at)
+        return _("{where}  ·  {phase}  ·  {minutes}:{seconds:02d}").format(
+            where=where, phase=self._runPhaseText(run) or _("Working..."),
+            minutes=elapsed // 60, seconds=elapsed % 60,
+        )
 
     def _renderProgressBar(self) -> None:
         """The determinate bar, shown only when there is a real number behind it.
