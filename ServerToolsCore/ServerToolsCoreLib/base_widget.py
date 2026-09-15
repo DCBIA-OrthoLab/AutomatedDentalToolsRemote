@@ -87,13 +87,20 @@ class _Run:
     do not both want the GPU.
     """
 
-    def __init__(self, number, label, args, files, output_dir, workspace):
+    def __init__(self, number, label, args, files, output_dir, workspace,
+                 cohort_index=None, cohort_total=None):
         self.number = number
         self.label = label
         self.args = args
         self.files = files
         self.output_dir = output_dir
         self.workspace = workspace
+        # Which slice of one cohort this run carries, 1-based, or None when the
+        # input travelled whole. Presentation only for now: a batch is an
+        # ordinary run in every other respect, which is what keeps this feature
+        # out of the queue, the cancel path and the error path entirely.
+        self.cohort_index = cohort_index
+        self.cohort_total = cohort_total
         self.job = None
         self.phase = ""
         self.started_at = None  # None while the run is still queued
@@ -1026,18 +1033,30 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 chosen[arg_name] = name
         return chosen
 
-    def prepareInputFiles(self, workspace: slicer_io.TempWorkspace) -> dict:
+    def prepareInputFiles(self, workspace: slicer_io.TempWorkspace, batch=None) -> dict:
         """Override for exotic input cases. Default behavior covers every file
         input mode, for each of the tool's file arguments. Returns
-        {schema_argument_name: local_file_path}."""
+        {schema_argument_name: local_file_path}.
+
+        `batch` is `(argument name, [top-level entries])` when this run carries
+        one slice of a cohort: that argument is packed from those entries only,
+        and every other argument is prepared whole. Sending the rest whole with
+        each batch is what keeps a tool matching landmarks or masks to scans by
+        patient name working -- it can still find the patient it is looking at.
+        """
+        axis, entries = batch if batch else (None, None)
         files = {}
         for arg_name, mode in self._inputModes.items():
-            path = self._prepareOneInputFile(workspace, arg_name, mode)
+            path = self._prepareOneInputFile(
+                workspace, arg_name, mode,
+                entries=entries if arg_name == axis else None,
+            )
             if path is not None:
                 files[arg_name] = path
         return files
 
-    def _prepareOneInputFile(self, workspace: slicer_io.TempWorkspace, arg_name: str, mode: str):
+    def _prepareOneInputFile(self, workspace: slicer_io.TempWorkspace, arg_name: str, mode: str,
+                             entries=None):
         # Hidden by its `visible_when`: the argument does not apply to this
         # run, so nothing is uploaded for it — same rule as collectArgs.
         if arg_name in self._hiddenArgs:
@@ -1084,14 +1103,14 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if mode == "single_file":
             return widget.currentPath
         if mode == "folder_zip":
-            return self._zipFolder(workspace, arg_name, widget.currentPath)
+            return self._zipFolder(workspace, arg_name, widget.currentPath, entries)
         if mode == "file_or_folder":
             # HTTP carries no folder: a folder selection goes up as a .zip,
             # which the server extracts (stripping a lone root directory).
             # Which one the user gave is read off the path itself — they never
             # had to declare it, so they cannot have declared it wrong.
             if widget.is_folder():
-                return self._zipFolder(workspace, arg_name, widget.currentPath)
+                return self._zipFolder(workspace, arg_name, widget.currentPath, entries)
             return widget.currentPath
         if mode == "volume_node":
             node = widget.currentNode()
@@ -1100,8 +1119,18 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return slicer_io.export_volume(node, workspace.file(f"{self.TOOL_NAME}_{arg_name}.nii.gz"))
         return None
 
-    def _zipFolder(self, workspace: slicer_io.TempWorkspace, arg_name: str, folder: str) -> str:
-        return slicer_io.zip_folder(folder, workspace.file(f"{self.TOOL_NAME}_{arg_name}.zip"))
+    def _zipFolder(self, workspace: slicer_io.TempWorkspace, arg_name: str, folder: str,
+                   entries=None) -> str:
+        """Pack a folder argument. `entries` limits it to one batch of a cohort.
+
+        The archive is built straight out of the user's folder either way, so
+        splitting a cohort costs no local disk: there is no per-batch staging
+        copy to make, and a laptop sending 20 GB in pieces never holds 40.
+        """
+        destination = workspace.file(f"{self.TOOL_NAME}_{arg_name}.zip")
+        if entries is None:
+            return slicer_io.zip_folder(folder, destination)
+        return slicer_io.zip_subset(folder, entries, destination)
 
     def handleResult(self, result) -> None:
         """Override for custom result display."""
@@ -1479,43 +1508,136 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return True
 
     def onApplyButton(self) -> None:
-        """Queue one run. Apply stays available, so clicking it again adds another.
+        """Queue this cohort: one run, or one run per batch of it.
 
         The inputs are read HERE, not when the run starts: what the panel says
         now is what the user asked for. A run that starts three minutes later
         because two others were ahead of it must not silently pick up whatever
-        the pickers hold by then.
-        """
-        workspace = slicer_io.TempWorkspace()
-        workspace.__enter__()
+        the pickers hold by then. A cohort is divided here for the same reason,
+        and every batch is packed now, from the folder as it is now.
 
+        A batch is an ORDINARY run. It queues through `_pumpRuns`, reports on
+        its own line, cancels on its own button and fails without taking the
+        others -- none of which needed a line of code, because a cohort sent in
+        pieces is exactly the cohort a clinician could already queue by hand.
+        """
         try:
-            files = self.prepareInputFiles(workspace)
             args = self.collectArgs()
+            batches = self._cohortBatches()
         except Exception as exc:
-            workspace.__exit__(None, None, None)
             slicer.util.errorDisplay(str(exc))
             return
 
-        outputDir = self._outputFolderWidget.currentPath if self._outputFolderWidget else workspace.path
+        prepared = []
+        try:
+            for batch in batches:
+                workspace = slicer_io.TempWorkspace()
+                workspace.__enter__()
+                try:
+                    # Called with one argument when there is no batch, which is
+                    # every run today: an override written against the old
+                    # signature is never handed something it cannot take.
+                    files = (self.prepareInputFiles(workspace, batch) if batch
+                             else self.prepareInputFiles(workspace))
+                    prepared.append((workspace, files))
+                except Exception:
+                    workspace.__exit__(None, None, None)
+                    raise
+        except Exception as exc:
+            # All or nothing: half a cohort queued and half of it reported as an
+            # error is the one outcome nobody can act on.
+            for workspace, _files in prepared:
+                workspace.__exit__(None, None, None)
+            slicer.util.errorDisplay(str(exc))
+            return
 
-        self._runsStarted += 1
-        self._runs.append(_Run(self._runsStarted, self._runLabel(files),
-                               args, files, outputDir, workspace))
+        total = len(prepared) if len(prepared) > 1 else None
+        for index, (workspace, files) in enumerate(prepared, start=1):
+            outputDir = (self._outputFolderWidget.currentPath
+                         if self._outputFolderWidget else workspace.path)
+            self._runsStarted += 1
+            self._runs.append(_Run(
+                self._runsStarted, self._runLabel(files, index, total),
+                # A copy per run: one dict shared by five runs is one dict any
+                # of them could still be reading when another is written to.
+                dict(args), files, outputDir, workspace,
+                cohort_index=index if total else None, cohort_total=total,
+            ))
         self._pumpRuns()
 
-    def _runLabel(self, files: dict) -> str:
+    def _cohortBatches(self) -> list:
+        """How to divide this run's inputs: `[(axis, [entries]), ...]`, or
+        `[None]` for a cohort that travels whole.
+
+        The server decides IF and HOW MUCH (its `GET /tools` `batch` field, and
+        see its conventions.py for why a tool pairing two folders is never
+        offered here). This decides only whether there is anything to divide:
+        an axis that is a folder on this machine, holding more than one batch's
+        worth. Everything else -- a single file, a volume picked out of the
+        scene, a name the server hosts, a server that publishes no plan at all
+        -- is one run, byte for byte what it was before this existed.
+        """
+        # getattr throughout: this runs before anything else reads the panel's
+        # state, so it must hold for a panel whose form was never built -- a
+        # server that was down at setup(), or a widget under test.
+        plan = (getattr(self, "_schema", None) or {}).get("batch")
+        axis = (plan or {}).get("axis")
+        if not axis:
+            return [None]
+        widget = (getattr(self, "_inputWidgets", None) or {}).get(axis)
+        if not widget or axis in (getattr(self, "_hiddenArgs", None) or ()):
+            return [None]
+        # A module that builds its own inputs is doing something no rule here
+        # anticipated, and dividing what it produces is a guess about work
+        # somebody else wrote. It sends its cohort whole, as it always did.
+        # Read off the INSTANCE, so an override assigned to one panel is caught
+        # as well as one declared on a class.
+        prepare = getattr(self, "prepareInputFiles", None)
+        if getattr(prepare, "__func__", None) is not ServerToolWidgetBase.prepareInputFiles:
+            return [None]
+        # Without somewhere for every batch to write, the results of a divided
+        # cohort scatter across per-run temporary folders that are removed as
+        # each run ends. One output folder is a precondition, not a detail.
+        if not getattr(self, "_outputFolderWidget", None):
+            return [None]
+        # The same order _prepareOneInputFile reads them in: a scene node or a
+        # hosted name wins over the path widget, and neither is a folder here.
+        for attribute in ("volume_name", "server_name"):
+            reader = getattr(widget, attribute, None)
+            if reader and reader():
+                return [None]
+
+        folder = getattr(widget, "currentPath", "")
+        if not folder or not os.path.isdir(folder):
+            return [None]
+        batches = slicer_io.split_cohort(
+            folder, plan.get("max_mb") or 0, plan.get("max_files") or 0)
+        if len(batches) < 2:
+            return [None]
+        logger.info(
+            "'%s': %s holds %d entries, sent as %d batches (<= %s MB, <= %s each)",
+            self.TOOL_NAME, axis, sum(len(batch) for batch in batches), len(batches),
+            plan.get("max_mb"), plan.get("max_files"),
+        )
+        return [(axis, entries) for entries in batches]
+
+    def _runLabel(self, files: dict, index=None, total=None) -> str:
         """Name a run after what it was given, so several lines of progress read.
 
         The tool name alone would make every line of a cohort identical, which
-        is exactly when a user needs to tell them apart.
+        is exactly when a user needs to tell them apart. Batches of one cohort
+        are named after the same folder, so they carry their number too.
         """
+        name = self.TOOL_NAME
         for path in files.values():
             if isinstance(path, str) and path:
-                name = os.path.basename(path.rstrip(os.sep))
-                if name:
-                    return name
-        return self.TOOL_NAME
+                basename = os.path.basename(path.rstrip(os.sep))
+                if basename:
+                    name = basename
+                    break
+        if total:
+            return _("{name} ({index}/{total})").format(name=name, index=index, total=total)
+        return name
 
     def _concurrentRuns(self) -> int:
         """How many runs may be in flight at once, never below one."""

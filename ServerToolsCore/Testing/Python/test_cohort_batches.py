@@ -255,3 +255,195 @@ class ZipSubsetTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _Widget:
+    """An input row as `_prepareOneInputFile` reads one."""
+
+    def __init__(self, path):
+        self.currentPath = path
+
+    def is_folder(self):
+        return os.path.isdir(self.currentPath)
+
+
+class ApplyQueuesOneRunPerBatchTest(unittest.TestCase):
+    """The whole feature, from the panel's side: one Apply, several runs.
+
+    Nothing below stubs `prepareInputFiles` -- that is the code under test.
+    `_pumpRuns` is stubbed, because whether a queued run STARTS is test_runs.py's
+    subject and has nothing to learn from a cohort.
+    """
+
+    PLAN = {"axis": "scans", "max_mb": 0, "max_files": 2}
+
+    def setUp(self):
+        from ServerToolsCoreLib.base_widget import ServerToolWidgetBase
+
+        self.cohort = _Cohort()
+        self.addCleanup(self.cohort.close)
+        self.output = tempfile.mkdtemp(prefix="out_")
+        self.addCleanup(shutil.rmtree, self.output, True)
+
+        panel = ServerToolWidgetBase.__new__(ServerToolWidgetBase)
+        panel.TOOL_NAME = "AMASSS"
+        panel._runs = []
+        panel._runsStarted = 0
+        panel._schema = {"arguments": {"scans": {"type": "path"}}, "batch": dict(self.PLAN)}
+        panel._inputModes = {"scans": "folder_zip"}
+        panel._inputWidgets = {"scans": _Widget(self.cohort.path)}
+        panel._hiddenArgs = set()
+        panel._outputFolderWidget = _Widget(self.output)
+        panel.collectArgs = lambda: {"suffix": "_seg"}
+        panel._pumpRuns = lambda: None
+        self.panel = panel
+        # The workspaces outlive onApplyButton -- a run holds one until it ends.
+        self.addCleanup(self._cleanWorkspaces)
+
+    def _cleanWorkspaces(self):
+        for run in self.panel._runs:
+            run.workspace.__exit__(None, None, None)
+
+    def _packed(self, run):
+        with zipfile.ZipFile(run.files["scans"]) as archive:
+            return sorted(info.filename for info in archive.infolist() if not info.is_dir())
+
+    def test_one_apply_queues_one_run_per_batch(self):
+        for index in range(5):
+            self.cohort.scan(f"patient{index}.nii.gz")
+
+        self.panel.onApplyButton()
+
+        self.assertEqual(len(self.panel._runs), 3)
+        self.assertEqual([self._packed(run) for run in self.panel._runs],
+                         [["patient0.nii.gz", "patient1.nii.gz"],
+                          ["patient2.nii.gz", "patient3.nii.gz"],
+                          ["patient4.nii.gz"]])
+
+    def test_every_batch_writes_to_the_one_output_folder_the_user_picked(self):
+        """Otherwise a cohort's results scatter across three folders and the
+        clinician has to put them back together by hand."""
+        for index in range(5):
+            self.cohort.scan(f"patient{index}.nii.gz")
+
+        self.panel.onApplyButton()
+
+        self.assertEqual({run.output_dir for run in self.panel._runs}, {self.output})
+
+    def test_each_batch_says_which_one_it_is(self):
+        for index in range(3):
+            self.cohort.scan(f"patient{index}.nii.gz")
+
+        self.panel.onApplyButton()
+
+        labels = [run.label for run in self.panel._runs]
+        self.assertTrue(all("(%d/2)" % (index + 1) in labels[index] for index in range(2)), labels)
+        self.assertEqual([run.cohort_index for run in self.panel._runs], [1, 2])
+        self.assertEqual([run.cohort_total for run in self.panel._runs], [2, 2])
+
+    def test_each_batch_gets_its_own_copy_of_the_arguments(self):
+        """One dict shared by three runs is one dict any of them could still be
+        reading when another is written to."""
+        for index in range(3):
+            self.cohort.scan(f"patient{index}.nii.gz")
+
+        self.panel.onApplyButton()
+        self.panel._runs[0].args["suffix"] = "_touched"
+
+        self.assertEqual(self.panel._runs[1].args["suffix"], "_seg")
+
+    def test_the_arguments_are_read_once_for_the_whole_cohort(self):
+        """Read at Apply, like every other input: five batches must not pick up
+        a value the user changed while the first was uploading."""
+        reads = []
+        self.panel.collectArgs = lambda: reads.append(1) or {"suffix": "_seg"}
+        for index in range(5):
+            self.cohort.scan(f"patient{index}.nii.gz")
+
+        self.panel.onApplyButton()
+
+        self.assertEqual(len(reads), 1)
+
+    # --- everything that must stay exactly one run ---------------------
+
+    def _assertOneWholeRun(self):
+        self.panel.onApplyButton()
+        self.assertEqual(len(self.panel._runs), 1)
+        run = self.panel._runs[0]
+        self.assertIsNone(run.cohort_index)
+        self.assertNotIn("/", run.label)
+        return run
+
+    def test_a_cohort_that_fits_in_one_batch_is_one_run(self):
+        """The invariant: below the caps, this feature is not observable."""
+        self.cohort.scan("only.nii.gz")
+
+        self.assertEqual(self._packed(self._assertOneWholeRun()), ["only.nii.gz"])
+
+    def test_a_single_file_is_sent_as_the_file_it_is(self):
+        """Not zipped and not divided: `file_or_folder` reads which one it was
+        given off the path, and a cohort of one is not a cohort."""
+        scan = self.cohort.scan("single.nii.gz")
+        self.panel._inputModes = {"scans": "file_or_folder"}
+        self.panel._inputWidgets = {"scans": _Widget(scan)}
+
+        self.assertEqual(self._assertOneWholeRun().files["scans"], scan)
+
+    def test_a_server_that_publishes_no_plan_sends_the_cohort_whole(self):
+        """An older server, or a tool pairing two folders per patient."""
+        self.panel._schema.pop("batch")
+        for index in range(5):
+            self.cohort.scan(f"patient{index}.nii.gz")
+
+        self.assertEqual(len(self._packed(self._assertOneWholeRun())), 5)
+
+    def test_a_panel_with_nowhere_to_write_sends_the_cohort_whole(self):
+        """Without one output folder the batches' results land in per-run
+        temporary directories that are removed as each run ends."""
+        self.panel._outputFolderWidget = None
+        for index in range(5):
+            self.cohort.scan(f"patient{index}.nii.gz")
+
+        self._assertOneWholeRun()
+
+    def test_a_module_that_builds_its_own_inputs_sends_the_cohort_whole(self):
+        """Dividing what an override produces is a guess about somebody else's
+        work. Note it is still called the way it always was -- with one
+        argument -- which is what stops this from breaking such a module."""
+        seen = []
+        self.panel.prepareInputFiles = lambda workspace: seen.append(workspace) or {"scans": "x"}
+        for index in range(5):
+            self.cohort.scan(f"patient{index}.nii.gz")
+
+        self.panel.onApplyButton()
+
+        self.assertEqual(len(self.panel._runs), 1)
+        self.assertEqual(len(seen), 1)
+
+    def test_an_axis_that_is_not_a_folder_on_this_machine_sends_one_run(self):
+        """A single scan, a volume picked out of the scene, a name the server
+        hosts: there is no cohort here to divide."""
+        self.panel._inputModes = {"scans": "file_or_folder"}
+        self.panel._inputWidgets = {"scans": _Widget(self.cohort.scan("single.nii.gz"))}
+
+        self._assertOneWholeRun()
+
+    def test_nothing_is_queued_when_one_batch_cannot_be_packed(self):
+        """All or nothing: half a cohort queued and half of it reported as an
+        error is the one outcome nobody can act on."""
+        for index in range(5):
+            self.cohort.scan(f"patient{index}.nii.gz")
+        packed = []
+        real = self.panel._zipFolder
+
+        def failing(workspace, arg_name, folder, entries=None):
+            if len(packed) == 2:
+                raise IOError("the disk filled up")
+            packed.append(entries)
+            return real(workspace, arg_name, folder, entries)
+
+        self.panel._zipFolder = failing
+
+        self.panel.onApplyButton()
+
+        self.assertEqual(self.panel._runs, [])
