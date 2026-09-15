@@ -338,12 +338,20 @@ SCENE_NODE_KINDS = {
     # takes them takes them from the scene too: placing points IS the reason a
     # clinician has Slicer open beside the panel.
     "markups": ("vtkMRMLMarkupsFiducialNode", ".mrk.json"),
+    # A crop box, and a kind of its own because Slicer's is NOT a markups
+    # fiducial: `vtkMRMLMarkupsROINode.IsA("vtkMRMLMarkupsFiducialNode")` is
+    # false, so offering it under "markups" offers nothing at all. Same file
+    # format, different node -- and worth the entry, because a ROI is DRAWN in
+    # Slicer. It is already in the scene when the panel is opened; asking for it
+    # as a file would mean saving it first for no reason.
+    "roi": ("vtkMRMLMarkupsROINode", ".mrk.json"),
 }
 
 # What a pick of each kind is called on the row's second line. A row accepting
 # more than one says "Scene", because naming one of them would be wrong for
 # the others -- ALI takes all three.
-SCENE_LABELS = {"volume": "Volume", "model": "Surface", "markups": "Landmarks"}
+SCENE_LABELS = {"volume": "Volume", "model": "Surface", "markups": "Landmarks",
+                "roi": "ROI"}
 
 # Landmark formats, the third thing the scene can answer with. Separate table
 # for the same reason as the other two: they map to their own node class.
@@ -363,6 +371,8 @@ _MARKUP_EXTENSIONS = {".mrk.json", ".fcsv", ".json"}
 # guessing one wrong is worse than offering none.
 SCENE_NAME_KINDS = (
     ("landmark", ("markups",)),
+    # Before the rest, because it is the narrowest: a box, not points.
+    ("roi", ("roi",)),
     # A mask is labelled voxels, which is a volume node like any other.
     ("mask", ("volume",)),
     ("mesh", ("model",)),
