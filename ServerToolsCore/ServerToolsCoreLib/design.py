@@ -681,19 +681,32 @@ def progress_label() -> qt.QLabel:
 def cohort_frame() -> qt.QFrame:
     """The box a whole cohort's progress lives in.
 
-    Surface and a hairline border, nothing stronger: it separates the cohort
-    from the form above it without competing with Apply, the one control on the
-    panel that starts anything.
+    **A hairline border and no fill at all**, so the box takes the panel's own
+    colour whatever Slicer's palette is. It first shipped painted `SURFACE`,
+    which is white in the light theme -- a white card on Slicer's grey panel
+    read as something pasted in from another application. A border is already
+    the whole of what this needs to say: these things belong together.
+
+    That also makes it the one widget here that cannot mismatch a theme,
+    including the themes this file's two token dicts do not describe.
     """
     t = tokens()
     frame = qt.QFrame()
     frame.setStyleSheet(
-        f"QFrame {{ background-color: {t['SURFACE']};"
+        f"QFrame {{ background-color: transparent;"
         f" border: 1px solid {t['BORDER']}; border-radius: 4px;"
         f" padding: {SPACING_SM}px; }}"
     )
     frame.setVisible(False)
     return frame
+
+
+# How many batch lines the box shows before it stops listing them. Four fits
+# the shape the queue actually takes -- at most two runs in flight plus the
+# next couple waiting -- and a cohort of a hundred scans is twenty-five batches,
+# which listed in full would be the tallest thing on the panel by a wide margin
+# and would tell the reader nothing the headline count does not.
+MAX_BATCH_ROWS = 4
 
 
 def cohort_total_label(text: str) -> qt.QLabel:

@@ -110,12 +110,13 @@ class _CohortView:
     is allowed -- PythonQt refuses new attributes on a C++ one.
     """
 
-    def __init__(self, frame, total, bar, rows, cohort):
+    def __init__(self, frame, total, bar, rows, cohort, remainder=None):
         self.frame = frame
         self.total = total
         self.bar = bar
-        self.rows = rows  # {run number: (label, bar)}
+        self.rows = rows  # {run number: (label, bar)}, the batches listed
         self.cohort = cohort
+        self.remainder = remainder  # the "+ N more" line, or None
 
 
 class _Cohort:
@@ -2079,17 +2080,31 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         inner.addWidget(total)
         inner.addWidget(bar)
 
+        # `_runs` is in queue order and a finished run leaves it, so the first
+        # entries are the ones in flight and the rest are what comes next. A
+        # cohort of a hundred scans is twenty-five batches; listing them all
+        # would make the queue the tallest thing on the panel and say nothing
+        # the headline count does not.
+        shown = self._runs[:design.MAX_BATCH_ROWS]
         rows = {}
-        for run in self._runs:
+        for run in shown:
             label = design.batch_label("")
             batch_bar = design.batch_bar()
             inner.addWidget(label)
             inner.addWidget(batch_bar)
             rows[run.number] = (label, batch_bar)
 
+        remainder = None
+        if len(self._runs) > len(shown):
+            # Counted, not listed. What a reader needs from the batches beyond
+            # the fold is that they exist and how many -- the rest is the
+            # headline's job.
+            remainder = design.batch_label("")
+            inner.addWidget(remainder)
+
         frame.setVisible(True)
         layout.addWidget(frame)
-        return _CohortView(frame, total, bar, rows, cohort)
+        return _CohortView(frame, total, bar, rows, cohort, remainder)
 
     def _rebuildRunCancelButtons(self) -> None:
         """One Cancel per run -- but only once there is more than one run.
@@ -2295,6 +2310,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         view.total.setText(text)
         view.bar.setValue(int(round(100 * cohort.progress(
             [run for run in self._runs if run.started_at is not None]))))
+
+        if view.remainder is not None:
+            waiting = len(self._runs) - len(view.rows)
+            view.remainder.setText(_("+ {count} more batches queued").format(
+                count=waiting))
 
         for run in self._runs:
             row = view.rows.get(run.number)

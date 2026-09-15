@@ -809,3 +809,60 @@ class CohortPanelTest(unittest.TestCase):
             self.Run(99, "other.nii.gz", {}, {}, "/out", None))
 
         self.assertIsNone(self._view())
+
+    # --- a cohort bigger than the box ----------------------------------
+
+    def test_a_long_queue_lists_the_next_few_and_counts_the_rest(self):
+        """A hundred scans is twenty-five batches. Listed in full they would be
+        the tallest thing on the panel and would say nothing the headline
+        count does not."""
+        self._cohort(batches=12, started=1)
+        view = self._view()
+
+        self.panel._renderProgress()
+
+        self.assertEqual(len(view.rows), 4)
+        self.assertIn("8", view.remainder.text)
+        self.assertIn("more", view.remainder.text.lower())
+
+    def test_the_batches_listed_are_the_ones_in_flight_and_next(self):
+        """`_runs` is in queue order and a finished run leaves it, so the fold
+        always falls after what is happening, never before it."""
+        self._cohort(batches=12, started=2)
+        view = self._view()
+
+        self.assertEqual(sorted(view.rows), [1, 2, 3, 4])
+
+    def test_a_short_cohort_has_no_remainder_line_at_all(self):
+        """Three batches, three lines, and nothing saying "+0 more"."""
+        self._cohort(batches=3)
+        view = self._view()
+
+        self.panel._renderProgress()
+
+        self.assertIsNone(view.remainder)
+
+    def test_the_count_shrinks_as_batches_finish(self):
+        """Rebuilt whenever the run set changes, so the fold moves with it."""
+        self._cohort(batches=12, started=1)
+        view = self._view()
+        self.panel._renderProgress()
+        self.assertIn("8", view.remainder.text)
+
+        del self.panel._runs[:5]
+        view = self._view()
+        self.panel._renderProgress()
+
+        self.assertIn("3", view.remainder.text)
+
+    # --- it has to look like it belongs in Slicer ----------------------
+
+    def test_the_box_paints_no_background_of_its_own(self):
+        """It first shipped painted white, which on Slicer's grey panel read as
+        something pasted in from another application. A border is the whole of
+        what it needs to say."""
+        self._cohort()
+        view = self._view()
+
+        self.assertIn("transparent", view.frame.styleSheet)
+        self.assertIn("border", view.frame.styleSheet)
