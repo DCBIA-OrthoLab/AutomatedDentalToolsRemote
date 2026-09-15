@@ -9,6 +9,7 @@ Two rules carry the whole thing, and both are tested by what they REFUSE to do:
 a top-level entry is never opened, and nothing is ever lost between the batches.
 """
 
+import json
 import os
 import shutil
 import sys
@@ -339,7 +340,9 @@ class ApplyQueuesOneRunPerBatchTest(unittest.TestCase):
         labels = [run.label for run in self.panel._runs]
         self.assertTrue(all("(%d/2)" % (index + 1) in labels[index] for index in range(2)), labels)
         self.assertEqual([run.cohort_index for run in self.panel._runs], [1, 2])
-        self.assertEqual([run.cohort_total for run in self.panel._runs], [2, 2])
+        self.assertEqual({run.cohort.total for run in self.panel._runs}, {2})
+        # One cohort, not one per batch: it is what the batches have in common.
+        self.assertEqual(len({id(run.cohort) for run in self.panel._runs}), 1)
 
     def test_each_batch_gets_its_own_copy_of_the_arguments(self):
         """One dict shared by three runs is one dict any of them could still be
@@ -447,3 +450,176 @@ class ApplyQueuesOneRunPerBatchTest(unittest.TestCase):
         self.panel.onApplyButton()
 
         self.assertEqual(self.panel._runs, [])
+
+
+class MergedReportTest(unittest.TestCase):
+    """Folding several batches' run reports back into one.
+
+    The failure this prevents is the quietest one the feature could produce: a
+    cohort of forty patients, every result on disk, and a summary describing the
+    four the last batch happened to hold.
+    """
+
+    def merge(self, first, second):
+        from ServerToolsCoreLib.base_widget import _merged_report
+        return _merged_report(first, second)
+
+    def test_counters_add_up(self):
+        merged = self.merge({"summary": {"cropped": 4, "scans_found": 5}},
+                            {"summary": {"cropped": 3, "scans_found": 3}})
+
+        self.assertEqual(merged["summary"], {"cropped": 7, "scans_found": 8})
+
+    def test_per_scan_lists_are_concatenated(self):
+        merged = self.merge({"without_a_roi": [{"patient": "a"}]},
+                            {"without_a_roi": [{"patient": "b"}]})
+
+        self.assertEqual(merged["without_a_roi"], [{"patient": "a"}, {"patient": "b"}])
+
+    def test_a_flag_is_a_property_of_the_run_not_a_counter(self):
+        """A bool IS an int in Python, so two `true`s add to 2 unless this is
+        checked first -- and `"gpu_resampling": 2` is not a thing."""
+        merged = self.merge({"gpu_resampling": True}, {"gpu_resampling": True})
+
+        self.assertIs(merged["gpu_resampling"], True)
+
+    def test_what_names_the_run_keeps_the_first_batch_s_word(self):
+        merged = self.merge({"tool": "AMASSS", "model_bundle": "AMASSS_Models"},
+                            {"tool": "AMASSS", "model_bundle": "AMASSS_Models"})
+
+        self.assertEqual(merged["model_bundle"], "AMASSS_Models")
+
+    def test_a_key_only_one_batch_produced_survives(self):
+        """A batch where nothing failed writes no `failures` key at all; the
+        one that did must not lose it to the one that did not."""
+        self.assertEqual(self.merge({"summary": {}}, {"failures": ["x"]})["failures"], ["x"])
+        self.assertEqual(self.merge({"failures": ["x"]}, {"summary": {}})["failures"], ["x"])
+
+    def test_it_does_not_care_what_a_tool_puts_in_its_report(self):
+        """The rule is on the JSON types, never on a field name: every tool
+        writes its own shape and this is one function for all of them."""
+        merged = self.merge(
+            {"deep": {"nested": {"count": 1, "names": ["a"]}}},
+            {"deep": {"nested": {"count": 2, "names": ["b"]}}},
+        )
+
+        self.assertEqual(merged["deep"]["nested"], {"count": 3, "names": ["a", "b"]})
+
+
+class CohortReportOnDiskTest(unittest.TestCase):
+    """The merge where it matters: the file every module reads afterwards."""
+
+    def setUp(self):
+        from ServerToolsCoreLib.base_widget import ServerToolWidgetBase, _Cohort, _Run
+
+        self.output = tempfile.mkdtemp(prefix="out_")
+        self.addCleanup(shutil.rmtree, self.output, True)
+
+        class _Panel(ServerToolWidgetBase):
+            RUN_REPORT = "AMASSS_report.json"
+
+        self.panel = _Panel.__new__(_Panel)
+        self.cohort = _Cohort(2)
+        self.run = _Run(1, "cohort (1/2)", {}, {}, self.output, None,
+                        cohort=self.cohort, cohort_index=1)
+        self.lone = _Run(2, "one.nii.gz", {}, {}, self.output, None)
+
+    def _write(self, payload):
+        path = os.path.join(self.output, "AMASSS_report.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+
+    def test_the_report_on_disk_ends_up_describing_the_whole_cohort(self):
+        self.panel._runInHand = self.run
+        self._write({"summary": {"segmented": 4}, "scans": ["a", "b"]})
+        self.panel._mergeRunReport(self.output)
+        # The second batch overwrites the file, exactly as the server's archive
+        # does -- which is the whole reason this exists.
+        self._write({"summary": {"segmented": 3}, "scans": ["c"]})
+        self.panel._mergeRunReport(self.output)
+
+        report = self.panel._readRunReport(self.output)
+
+        self.assertEqual(report["summary"]["segmented"], 7)
+        self.assertEqual(report["scans"], ["a", "b", "c"])
+
+    def test_it_is_complete_at_every_step_not_only_at_the_end(self):
+        """A cohort abandoned halfway leaves a report of exactly what ran."""
+        self.panel._runInHand = self.run
+        self._write({"summary": {"segmented": 4}})
+        self.panel._mergeRunReport(self.output)
+
+        self.assertEqual(self.panel._readRunReport(self.output)["summary"]["segmented"], 4)
+
+    def test_an_ordinary_run_s_report_is_left_exactly_as_the_tool_wrote_it(self):
+        self.panel._runInHand = self.lone
+        self._write({"summary": {"segmented": 4}})
+        self.panel._mergeRunReport(self.output)
+
+        self.assertIsNone(self.cohort.report)
+        self.assertEqual(self.panel._readRunReport(self.output), {"summary": {"segmented": 4}})
+
+    def test_a_batch_that_produced_no_report_costs_the_summary_and_not_the_run(self):
+        self.panel._runInHand = self.run
+
+        self.panel._mergeRunReport(self.output)  # nothing on disk at all
+
+        self.assertIsNone(self.cohort.report)
+
+    def test_a_report_that_cannot_be_parsed_is_not_fatal(self):
+        self.panel._runInHand = self.run
+        with open(os.path.join(self.output, "AMASSS_report.json"), "w") as handle:
+            handle.write("{ this is not json")
+
+        self.panel._mergeRunReport(self.output)
+
+        self.assertIsNone(self.cohort.report)
+
+
+class OneDialogPerCohortTest(unittest.TestCase):
+    """Five modal dialogs for one Apply are four clicks nobody asked for, each
+    one interrupting the upload of the next batch."""
+
+    def setUp(self):
+        from ServerToolsCoreLib.base_widget import ServerToolWidgetBase, _Cohort, _Run
+        import slicer
+
+        self.panel = ServerToolWidgetBase.__new__(ServerToolWidgetBase)
+        self.cohort = _Cohort(3)
+        self.runs = [_Run(index, "c", {}, {}, "/out", None,
+                          cohort=self.cohort, cohort_index=index)
+                     for index in (1, 2, 3)]
+
+        self.dialogs, self.status = [], []
+        self.addCleanup(setattr, slicer.util, "infoDisplay", slicer.util.infoDisplay)
+        self.addCleanup(setattr, slicer.util, "showStatusMessage", slicer.util.showStatusMessage)
+        slicer.util.infoDisplay = lambda message, *a, **k: self.dialogs.append(message)
+        slicer.util.showStatusMessage = lambda message, *a, **k: self.status.append(message)
+
+    def _announce(self, run):
+        self.panel._runInHand = run
+        self.panel._countBatch(run)
+        self.panel._announce("done")
+
+    def test_only_the_last_batch_opens_a_dialog(self):
+        for run in self.runs:
+            self._announce(run)
+
+        self.assertEqual(self.dialogs, ["done"])
+        self.assertEqual(self.status, ["done", "done"])
+
+    def test_a_failed_batch_still_counts_so_the_last_one_still_speaks(self):
+        """`complete` asks whether anything is still coming, not whether
+        everything worked."""
+        self.panel._countBatch(self.runs[0])  # failed: counted, never announced
+        self._announce(self.runs[1])
+        self._announce(self.runs[2])
+
+        self.assertEqual(self.dialogs, ["done"])
+
+    def test_an_ordinary_run_always_opens_its_dialog(self):
+        from ServerToolsCoreLib.base_widget import _Run
+
+        self._announce(_Run(9, "one.nii.gz", {}, {}, "/out", None))
+
+        self.assertEqual(self.dialogs, ["done"])

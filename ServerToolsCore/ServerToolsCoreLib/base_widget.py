@@ -73,6 +73,56 @@ def _safe_name(name: str) -> str:
     return cleaned or "test_file"
 
 
+def _merged_report(first, second):
+    """Two run reports folded into one, without knowing what a tool puts in them.
+
+    Every tool writes its own shape, so the rule is on the JSON types rather
+    than on any field: lists concatenate (the per-scan entries), numbers add up
+    (the counters in `summary`), objects merge key by key, and anything else
+    keeps the first batch's value -- a tool name, a model bundle, a flag, all of
+    which are properties of the run and not of the batch.
+
+    Best effort, like every other use of a report: the results are on disk and
+    in the scene whatever this produces.
+    """
+    if isinstance(first, dict) and isinstance(second, dict):
+        merged = dict(first)
+        for key, value in second.items():
+            merged[key] = _merged_report(first[key], value) if key in first else value
+        return merged
+    if isinstance(first, list) and isinstance(second, list):
+        return first + second
+    # Before the number case: a bool IS an int in Python, and adding two
+    # `"gpu_resampling": true` gives 2.
+    if isinstance(first, bool) or isinstance(second, bool):
+        return first
+    if isinstance(first, (int, float)) and isinstance(second, (int, float)):
+        return first + second
+    return first
+
+
+class _Cohort:
+    """The few things several batches of one Apply have in common.
+
+    Deliberately thin. A batch is an ordinary run in every way that matters --
+    it queues, reports, cancels and fails on its own -- and this holds only what
+    genuinely cannot be answered one run at a time: how many there are, how many
+    have ended, and the report so far.
+    """
+
+    def __init__(self, total: int):
+        self.total = total
+        self.finished = 0
+        # The merge of every batch's report so far, written back to disk each
+        # time so `_readRunReport` answers for the cohort and no module has to
+        # know this feature exists.
+        self.report = None
+
+    @property
+    def complete(self) -> bool:
+        return self.finished >= self.total
+
+
 class _Run:
     """One tool execution: its own inputs, its own scratch directory, its own thread.
 
@@ -88,19 +138,19 @@ class _Run:
     """
 
     def __init__(self, number, label, args, files, output_dir, workspace,
-                 cohort_index=None, cohort_total=None):
+                 cohort=None, cohort_index=None):
         self.number = number
         self.label = label
         self.args = args
         self.files = files
         self.output_dir = output_dir
         self.workspace = workspace
-        # Which slice of one cohort this run carries, 1-based, or None when the
-        # input travelled whole. Presentation only for now: a batch is an
-        # ordinary run in every other respect, which is what keeps this feature
-        # out of the queue, the cancel path and the error path entirely.
+        # The cohort this run is one batch of, and which batch, 1-based. Both
+        # None when the input travelled whole -- which is every run that is not
+        # a divided cohort, and the state in which this feature is not
+        # observable at all.
+        self.cohort = cohort
         self.cohort_index = cohort_index
-        self.cohort_total = cohort_total
         self.job = None
         self.phase = ""
         self.started_at = None  # None while the run is still queued
@@ -1136,7 +1186,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """Override for custom result display."""
         kind = self.resultKind
         if kind == "text":
-            slicer.util.infoDisplay(result.text or "")
+            self._announce(result.text or "")
         elif kind in ("segmentation", "labelmap", "volume", "model"):
             slicer_io.load_result(result.path, kind)
         elif kind == "save_as":
@@ -1165,11 +1215,12 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             finally:
                 self._hideProgress()
             os.remove(result.path)
-            slicer.util.infoDisplay(_("Results saved to {path}").format(path=resultDir))
+            self._mergeRunReport(resultDir)
+            self._announce(_("Results saved to {path}").format(path=resultDir))
         else:
             self._producedFiles = [result.path]
             self._producedRoot = os.path.dirname(result.path)
-            slicer.util.infoDisplay(_("Result saved to {path}").format(path=result.path))
+            self._announce(_("Result saved to {path}").format(path=result.path))
 
     # ------------------------------------------------------------------
     # Apply / cancel
@@ -1261,24 +1312,69 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         rather than at the root. Matches are sorted, so a run that somehow
         produced two reports picks the same one every time.
         """
-        if not cls.RUN_REPORT:
+        path = cls._runReportPath(outputDir)
+        if not path:
             return None
-
-        path = os.path.join(outputDir, cls.RUN_REPORT)
-        if not os.path.exists(path):
-            found = sorted(glob.glob(
-                os.path.join(outputDir, "**", cls.RUN_REPORT), recursive=True))
-            if not found:
-                logger.warning("No %s was produced by this run", cls.RUN_REPORT)
-                return None
-            path = found[0]
-
         try:
             with open(path, encoding="utf-8") as handle:
                 return json.load(handle)
         except (OSError, ValueError) as exc:
             logger.warning("Could not read %s: %s", cls.RUN_REPORT, exc)
             return None
+
+    def _mergeRunReport(self, outputDir: str) -> None:
+        """Fold this batch's report into the cohort's, on disk.
+
+        Every batch of a cohort writes the SAME file name into the SAME folder,
+        so without this the last one to land is the only report that survives:
+        a cohort of forty patients would report the four its final batch held,
+        and say nothing at all about the thirty-six before it. That is the
+        failure this feature could most easily have introduced -- a run that
+        succeeded, results all present, and a summary quietly describing a
+        tenth of them.
+
+        The merged report is written back where the report was, so
+        `_readRunReport` and every module reading it see one report for the
+        cohort with nothing to change. It is also complete at every step: a
+        cohort abandoned halfway leaves a report of exactly what ran.
+        """
+        run = getattr(self, "_runInHand", None)
+        if run is None or not run.cohort:
+            return
+        path = self._runReportPath(outputDir)
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as handle:
+                fresh = json.load(handle)
+        except (OSError, ValueError) as exc:
+            logger.warning("Could not read %s to merge it: %s", self.RUN_REPORT, exc)
+            return
+
+        run.cohort.report = (fresh if run.cohort.report is None
+                             else _merged_report(run.cohort.report, fresh))
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(run.cohort.report, handle, indent=2)
+        except OSError as exc:
+            # The batch's own report stays on disk, which is worse than the
+            # merge and better than nothing. Never fatal: the results are there.
+            logger.warning("Could not write the merged %s: %s", self.RUN_REPORT, exc)
+
+    @classmethod
+    def _runReportPath(cls, outputDir: str):
+        """Where this run's report landed, or None if it produced none."""
+        if not cls.RUN_REPORT:
+            return None
+        path = os.path.join(outputDir, cls.RUN_REPORT)
+        if os.path.exists(path):
+            return path
+        found = sorted(glob.glob(
+            os.path.join(outputDir, "**", cls.RUN_REPORT), recursive=True))
+        if not found:
+            logger.warning("No %s was produced by this run", cls.RUN_REPORT)
+            return None
+        return found[0]
 
     def _loadResults(self) -> None:
         """Open what THIS run produced.
@@ -1551,17 +1647,18 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer.util.errorDisplay(str(exc))
             return
 
-        total = len(prepared) if len(prepared) > 1 else None
+        cohort = _Cohort(len(prepared)) if len(prepared) > 1 else None
         for index, (workspace, files) in enumerate(prepared, start=1):
             outputDir = (self._outputFolderWidget.currentPath
                          if self._outputFolderWidget else workspace.path)
             self._runsStarted += 1
             self._runs.append(_Run(
-                self._runsStarted, self._runLabel(files, index, total),
+                self._runsStarted,
+                self._runLabel(files, index, cohort.total if cohort else None),
                 # A copy per run: one dict shared by five runs is one dict any
                 # of them could still be reading when another is written to.
                 dict(args), files, outputDir, workspace,
-                cohort_index=index if total else None, cohort_total=total,
+                cohort=cohort, cohort_index=index if cohort else None,
             ))
         self._pumpRuns()
 
@@ -1769,17 +1866,56 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def _onJobSuccess(self, run, result) -> None:
         self._finishRun(run)
-        with slicer.util.tryWithErrorDisplay(_("Failed to handle the tool result."), waitCursor=False):
-            self.handleResult(result)
+        self._countBatch(run)
+        # Which run `handleResult` is handling. It takes only the result -- the
+        # signature every module overrides -- so the run it belongs to travels
+        # here, the way `_producedRoot` already does. Cleared on every path: a
+        # stale one would make the next ordinary run look like a batch.
+        self._runInHand = run
+        try:
+            with slicer.util.tryWithErrorDisplay(_("Failed to handle the tool result."), waitCursor=False):
+                self.handleResult(result)
+        finally:
+            self._runInHand = None
         # Move the SUGGESTION on, now that this folder holds a result. The next
         # run then lands beside this one instead of into it, which is the whole
         # reason the folders are numbered. A path the user chose is left alone
         # (see _suggestOutputFolder) -- someone who picked a folder meant it.
-        self._suggestOutputFolder()
+        #
+        # Not between two batches of one cohort: they were all given the folder
+        # the user had at Apply, and moving the suggestion under them would put
+        # the next Apply somewhere the current cohort is still writing.
+        if not run.cohort:
+            self._suggestOutputFolder()
+
+    def _countBatch(self, run) -> None:
+        """Record that one batch of a cohort has ended, however it ended.
+
+        Failures and cancellations count: `complete` asks whether anything is
+        still coming, not whether everything worked. A cohort whose third batch
+        failed must still say its last word when the fourth lands.
+        """
+        if run.cohort:
+            run.cohort.finished += 1
+
+    def _announce(self, message: str) -> None:
+        """Tell the user something, in a dialog they have to dismiss.
+
+        Once per COHORT, not once per batch: five modal dialogs for one Apply
+        are four clicks nobody asked for, each interrupting the upload of the
+        next batch. The batches before the last say the same thing in the status
+        bar, which is where a running commentary belongs.
+        """
+        run = getattr(self, "_runInHand", None)
+        if run is not None and run.cohort and not run.cohort.complete:
+            slicer.util.showStatusMessage(message, 3000)
+            return
+        slicer.util.infoDisplay(message)
 
     def _onJobError(self, run, exc) -> None:
         """One run failing takes only that run: the rest of a cohort goes on."""
         self._finishRun(run)
+        self._countBatch(run)
         if isinstance(exc, RunCancelled):
             # 499: the user asked for this. A cancellation is not a failure and
             # must never open an error dialog -- the panel simply closes the
