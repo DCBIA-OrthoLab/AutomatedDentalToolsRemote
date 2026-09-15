@@ -73,6 +73,96 @@ def _safe_name(name: str) -> str:
     return cleaned or "test_file"
 
 
+def _merged_report(first, second):
+    """Two run reports folded into one, without knowing what a tool puts in them.
+
+    Every tool writes its own shape, so the rule is on the JSON types rather
+    than on any field: lists concatenate (the per-scan entries), numbers add up
+    (the counters in `summary`), objects merge key by key, and anything else
+    keeps the first batch's value -- a tool name, a model bundle, a flag, all of
+    which are properties of the run and not of the batch.
+
+    Best effort, like every other use of a report: the results are on disk and
+    in the scene whatever this produces.
+    """
+    if isinstance(first, dict) and isinstance(second, dict):
+        merged = dict(first)
+        for key, value in second.items():
+            merged[key] = _merged_report(first[key], value) if key in first else value
+        return merged
+    if isinstance(first, list) and isinstance(second, list):
+        return first + second
+    # Before the number case: a bool IS an int in Python, and adding two
+    # `"gpu_resampling": true` gives 2.
+    if isinstance(first, bool) or isinstance(second, bool):
+        return first
+    if isinstance(first, (int, float)) and isinstance(second, (int, float)):
+        return first + second
+    return first
+
+
+class _CohortView:
+    """The widgets a cohort's progress is written into.
+
+    Kept so the one-second tick writes VALUES rather than rebuilding Qt objects:
+    a panel that recreates its own widgets every second flickers, and cannot be
+    interacted with at all. A plain Python object, so holding references on it
+    is allowed -- PythonQt refuses new attributes on a C++ one.
+    """
+
+    def __init__(self, frame, total, bar, rows, cohort, remainder=None):
+        self.frame = frame
+        self.total = total
+        self.bar = bar
+        self.rows = rows  # {run number: (label, bar)}, the batches listed
+        self.cohort = cohort
+        self.remainder = remainder  # the "+ N more" line, or None
+
+
+class _Cohort:
+    """The few things several batches of one Apply have in common.
+
+    Deliberately thin. A batch is an ordinary run in every way that matters --
+    it queues, reports, cancels and fails on its own -- and this holds only what
+    genuinely cannot be answered one run at a time: how many there are, how many
+    have ended, and the report so far.
+    """
+
+    def __init__(self, total: int, total_scans: int = 0):
+        self.total = total
+        # In SCANS, not batches: a batch is how the transfer was cut up and
+        # nobody has twenty batches of work to do. Known before anything is
+        # sent, which is what lets the panel answer "how many of my scans are
+        # done" with a number rather than an impression.
+        self.total_scans = total_scans
+        self.scans_done = 0
+        self.scans_failed = 0
+        self.finished = 0
+        # The merge of every batch's report so far, written back to disk each
+        # time so `_readRunReport` answers for the cohort and no module has to
+        # know this feature exists.
+        self.report = None
+
+    @property
+    def complete(self) -> bool:
+        return self.finished >= self.total
+
+    def progress(self, running) -> float:
+        """0..1 for the cohort's bar, counting what is in flight.
+
+        The scans of the finished batches are exact; a running batch
+        contributes its own reported fraction of its own size. The bar is the
+        impression and the count below it is the fact -- which is why the count
+        never includes a batch that has not finished.
+        """
+        if self.total_scans <= 0:
+            return 0.0
+        done = float(self.scans_done + self.scans_failed)
+        for run in running:
+            done += (run.fraction or 0.0) * run.scan_count
+        return max(0.0, min(1.0, done / self.total_scans))
+
+
 class _Run:
     """One tool execution: its own inputs, its own scratch directory, its own thread.
 
@@ -87,13 +177,23 @@ class _Run:
     do not both want the GPU.
     """
 
-    def __init__(self, number, label, args, files, output_dir, workspace):
+    def __init__(self, number, label, args, files, output_dir, workspace,
+                 cohort=None, cohort_index=None, scan_count=0):
         self.number = number
         self.label = label
         self.args = args
         self.files = files
         self.output_dir = output_dir
         self.workspace = workspace
+        # The cohort this run is one batch of, and which batch, 1-based. Both
+        # None when the input travelled whole -- which is every run that is not
+        # a divided cohort, and the state in which this feature is not
+        # observable at all.
+        self.cohort = cohort
+        self.cohort_index = cohort_index
+        # Entries in this batch -- top-level ones, so a per-patient folder
+        # counts as the one patient it is. 0 for a run that was not divided.
+        self.scan_count = scan_count
         self.job = None
         self.phase = ""
         self.started_at = None  # None while the run is still queued
@@ -255,6 +355,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # host widget stays put in the layout; only its single child is
         # replaced, the same swap _buildForm makes for the schema-driven part.
         self._runControlsLayout = None
+        # Set while a cohort is in flight; see _buildCohortView.
+        self._cohortView = None
         self._runControlsWidget = None
         self._elapsedTimer = None  # ticks once a second while any run is active
 
@@ -1026,18 +1128,30 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 chosen[arg_name] = name
         return chosen
 
-    def prepareInputFiles(self, workspace: slicer_io.TempWorkspace) -> dict:
+    def prepareInputFiles(self, workspace: slicer_io.TempWorkspace, batch=None) -> dict:
         """Override for exotic input cases. Default behavior covers every file
         input mode, for each of the tool's file arguments. Returns
-        {schema_argument_name: local_file_path}."""
+        {schema_argument_name: local_file_path}.
+
+        `batch` is `(argument name, [top-level entries])` when this run carries
+        one slice of a cohort: that argument is packed from those entries only,
+        and every other argument is prepared whole. Sending the rest whole with
+        each batch is what keeps a tool matching landmarks or masks to scans by
+        patient name working -- it can still find the patient it is looking at.
+        """
+        axis, entries = batch if batch else (None, None)
         files = {}
         for arg_name, mode in self._inputModes.items():
-            path = self._prepareOneInputFile(workspace, arg_name, mode)
+            path = self._prepareOneInputFile(
+                workspace, arg_name, mode,
+                entries=entries if arg_name == axis else None,
+            )
             if path is not None:
                 files[arg_name] = path
         return files
 
-    def _prepareOneInputFile(self, workspace: slicer_io.TempWorkspace, arg_name: str, mode: str):
+    def _prepareOneInputFile(self, workspace: slicer_io.TempWorkspace, arg_name: str, mode: str,
+                             entries=None):
         # Hidden by its `visible_when`: the argument does not apply to this
         # run, so nothing is uploaded for it — same rule as collectArgs.
         if arg_name in self._hiddenArgs:
@@ -1084,14 +1198,14 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if mode == "single_file":
             return widget.currentPath
         if mode == "folder_zip":
-            return self._zipFolder(workspace, arg_name, widget.currentPath)
+            return self._zipFolder(workspace, arg_name, widget.currentPath, entries)
         if mode == "file_or_folder":
             # HTTP carries no folder: a folder selection goes up as a .zip,
             # which the server extracts (stripping a lone root directory).
             # Which one the user gave is read off the path itself — they never
             # had to declare it, so they cannot have declared it wrong.
             if widget.is_folder():
-                return self._zipFolder(workspace, arg_name, widget.currentPath)
+                return self._zipFolder(workspace, arg_name, widget.currentPath, entries)
             return widget.currentPath
         if mode == "volume_node":
             node = widget.currentNode()
@@ -1100,14 +1214,24 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return slicer_io.export_volume(node, workspace.file(f"{self.TOOL_NAME}_{arg_name}.nii.gz"))
         return None
 
-    def _zipFolder(self, workspace: slicer_io.TempWorkspace, arg_name: str, folder: str) -> str:
-        return slicer_io.zip_folder(folder, workspace.file(f"{self.TOOL_NAME}_{arg_name}.zip"))
+    def _zipFolder(self, workspace: slicer_io.TempWorkspace, arg_name: str, folder: str,
+                   entries=None) -> str:
+        """Pack a folder argument. `entries` limits it to one batch of a cohort.
+
+        The archive is built straight out of the user's folder either way, so
+        splitting a cohort costs no local disk: there is no per-batch staging
+        copy to make, and a laptop sending 20 GB in pieces never holds 40.
+        """
+        destination = workspace.file(f"{self.TOOL_NAME}_{arg_name}.zip")
+        if entries is None:
+            return slicer_io.zip_folder(folder, destination)
+        return slicer_io.zip_subset(folder, entries, destination)
 
     def handleResult(self, result) -> None:
         """Override for custom result display."""
         kind = self.resultKind
         if kind == "text":
-            slicer.util.infoDisplay(result.text or "")
+            self._announce(result.text or "")
         elif kind in ("segmentation", "labelmap", "volume", "model"):
             slicer_io.load_result(result.path, kind)
         elif kind == "save_as":
@@ -1136,11 +1260,12 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             finally:
                 self._hideProgress()
             os.remove(result.path)
-            slicer.util.infoDisplay(_("Results saved to {path}").format(path=resultDir))
+            self._mergeRunReport(resultDir)
+            self._announce(_("Results saved to {path}").format(path=resultDir))
         else:
             self._producedFiles = [result.path]
             self._producedRoot = os.path.dirname(result.path)
-            slicer.util.infoDisplay(_("Result saved to {path}").format(path=result.path))
+            self._announce(_("Result saved to {path}").format(path=result.path))
 
     # ------------------------------------------------------------------
     # Apply / cancel
@@ -1232,24 +1357,69 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         rather than at the root. Matches are sorted, so a run that somehow
         produced two reports picks the same one every time.
         """
-        if not cls.RUN_REPORT:
+        path = cls._runReportPath(outputDir)
+        if not path:
             return None
-
-        path = os.path.join(outputDir, cls.RUN_REPORT)
-        if not os.path.exists(path):
-            found = sorted(glob.glob(
-                os.path.join(outputDir, "**", cls.RUN_REPORT), recursive=True))
-            if not found:
-                logger.warning("No %s was produced by this run", cls.RUN_REPORT)
-                return None
-            path = found[0]
-
         try:
             with open(path, encoding="utf-8") as handle:
                 return json.load(handle)
         except (OSError, ValueError) as exc:
             logger.warning("Could not read %s: %s", cls.RUN_REPORT, exc)
             return None
+
+    def _mergeRunReport(self, outputDir: str) -> None:
+        """Fold this batch's report into the cohort's, on disk.
+
+        Every batch of a cohort writes the SAME file name into the SAME folder,
+        so without this the last one to land is the only report that survives:
+        a cohort of forty patients would report the four its final batch held,
+        and say nothing at all about the thirty-six before it. That is the
+        failure this feature could most easily have introduced -- a run that
+        succeeded, results all present, and a summary quietly describing a
+        tenth of them.
+
+        The merged report is written back where the report was, so
+        `_readRunReport` and every module reading it see one report for the
+        cohort with nothing to change. It is also complete at every step: a
+        cohort abandoned halfway leaves a report of exactly what ran.
+        """
+        run = getattr(self, "_runInHand", None)
+        if run is None or not run.cohort:
+            return
+        path = self._runReportPath(outputDir)
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as handle:
+                fresh = json.load(handle)
+        except (OSError, ValueError) as exc:
+            logger.warning("Could not read %s to merge it: %s", self.RUN_REPORT, exc)
+            return
+
+        run.cohort.report = (fresh if run.cohort.report is None
+                             else _merged_report(run.cohort.report, fresh))
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(run.cohort.report, handle, indent=2)
+        except OSError as exc:
+            # The batch's own report stays on disk, which is worse than the
+            # merge and better than nothing. Never fatal: the results are there.
+            logger.warning("Could not write the merged %s: %s", self.RUN_REPORT, exc)
+
+    @classmethod
+    def _runReportPath(cls, outputDir: str):
+        """Where this run's report landed, or None if it produced none."""
+        if not cls.RUN_REPORT:
+            return None
+        path = os.path.join(outputDir, cls.RUN_REPORT)
+        if os.path.exists(path):
+            return path
+        found = sorted(glob.glob(
+            os.path.join(outputDir, "**", cls.RUN_REPORT), recursive=True))
+        if not found:
+            logger.warning("No %s was produced by this run", cls.RUN_REPORT)
+            return None
+        return found[0]
 
     def _loadResults(self) -> None:
         """Open what THIS run produced.
@@ -1479,43 +1649,139 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return True
 
     def onApplyButton(self) -> None:
-        """Queue one run. Apply stays available, so clicking it again adds another.
+        """Queue this cohort: one run, or one run per batch of it.
 
         The inputs are read HERE, not when the run starts: what the panel says
         now is what the user asked for. A run that starts three minutes later
         because two others were ahead of it must not silently pick up whatever
-        the pickers hold by then.
-        """
-        workspace = slicer_io.TempWorkspace()
-        workspace.__enter__()
+        the pickers hold by then. A cohort is divided here for the same reason,
+        and every batch is packed now, from the folder as it is now.
 
+        A batch is an ORDINARY run. It queues through `_pumpRuns`, reports on
+        its own line, cancels on its own button and fails without taking the
+        others -- none of which needed a line of code, because a cohort sent in
+        pieces is exactly the cohort a clinician could already queue by hand.
+        """
         try:
-            files = self.prepareInputFiles(workspace)
             args = self.collectArgs()
+            batches = self._cohortBatches()
         except Exception as exc:
-            workspace.__exit__(None, None, None)
             slicer.util.errorDisplay(str(exc))
             return
 
-        outputDir = self._outputFolderWidget.currentPath if self._outputFolderWidget else workspace.path
+        prepared = []
+        try:
+            for batch in batches:
+                workspace = slicer_io.TempWorkspace()
+                workspace.__enter__()
+                try:
+                    # Called with one argument when there is no batch, which is
+                    # every run today: an override written against the old
+                    # signature is never handed something it cannot take.
+                    files = (self.prepareInputFiles(workspace, batch) if batch
+                             else self.prepareInputFiles(workspace))
+                    prepared.append((workspace, files))
+                except Exception:
+                    workspace.__exit__(None, None, None)
+                    raise
+        except Exception as exc:
+            # All or nothing: half a cohort queued and half of it reported as an
+            # error is the one outcome nobody can act on.
+            for workspace, _files in prepared:
+                workspace.__exit__(None, None, None)
+            slicer.util.errorDisplay(str(exc))
+            return
 
-        self._runsStarted += 1
-        self._runs.append(_Run(self._runsStarted, self._runLabel(files),
-                               args, files, outputDir, workspace))
+        sizes = [len(batch[1]) for batch in batches] if batches[0] else []
+        cohort = _Cohort(len(prepared), sum(sizes)) if len(prepared) > 1 else None
+        for index, (workspace, files) in enumerate(prepared, start=1):
+            outputDir = (self._outputFolderWidget.currentPath
+                         if self._outputFolderWidget else workspace.path)
+            self._runsStarted += 1
+            self._runs.append(_Run(
+                self._runsStarted,
+                self._runLabel(files, index, cohort.total if cohort else None),
+                # A copy per run: one dict shared by five runs is one dict any
+                # of them could still be reading when another is written to.
+                dict(args), files, outputDir, workspace,
+                cohort=cohort, cohort_index=index if cohort else None,
+                scan_count=sizes[index - 1] if sizes else 0,
+            ))
         self._pumpRuns()
 
-    def _runLabel(self, files: dict) -> str:
+    def _cohortBatches(self) -> list:
+        """How to divide this run's inputs: `[(axis, [entries]), ...]`, or
+        `[None]` for a cohort that travels whole.
+
+        The server decides IF and HOW MUCH (its `GET /tools` `batch` field, and
+        see its conventions.py for why a tool pairing two folders is never
+        offered here). This decides only whether there is anything to divide:
+        an axis that is a folder on this machine, holding more than one batch's
+        worth. Everything else -- a single file, a volume picked out of the
+        scene, a name the server hosts, a server that publishes no plan at all
+        -- is one run, byte for byte what it was before this existed.
+        """
+        # getattr throughout: this runs before anything else reads the panel's
+        # state, so it must hold for a panel whose form was never built -- a
+        # server that was down at setup(), or a widget under test.
+        plan = (getattr(self, "_schema", None) or {}).get("batch")
+        axis = (plan or {}).get("axis")
+        if not axis:
+            return [None]
+        widget = (getattr(self, "_inputWidgets", None) or {}).get(axis)
+        if not widget or axis in (getattr(self, "_hiddenArgs", None) or ()):
+            return [None]
+        # A module that builds its own inputs is doing something no rule here
+        # anticipated, and dividing what it produces is a guess about work
+        # somebody else wrote. It sends its cohort whole, as it always did.
+        # Read off the INSTANCE, so an override assigned to one panel is caught
+        # as well as one declared on a class.
+        prepare = getattr(self, "prepareInputFiles", None)
+        if getattr(prepare, "__func__", None) is not ServerToolWidgetBase.prepareInputFiles:
+            return [None]
+        # Without somewhere for every batch to write, the results of a divided
+        # cohort scatter across per-run temporary folders that are removed as
+        # each run ends. One output folder is a precondition, not a detail.
+        if not getattr(self, "_outputFolderWidget", None):
+            return [None]
+        # The same order _prepareOneInputFile reads them in: a scene node or a
+        # hosted name wins over the path widget, and neither is a folder here.
+        for attribute in ("volume_name", "server_name"):
+            reader = getattr(widget, attribute, None)
+            if reader and reader():
+                return [None]
+
+        folder = getattr(widget, "currentPath", "")
+        if not folder or not os.path.isdir(folder):
+            return [None]
+        batches = slicer_io.split_cohort(
+            folder, plan.get("max_mb") or 0, plan.get("max_files") or 0)
+        if len(batches) < 2:
+            return [None]
+        logger.info(
+            "'%s': %s holds %d entries, sent as %d batches (<= %s MB, <= %s each)",
+            self.TOOL_NAME, axis, sum(len(batch) for batch in batches), len(batches),
+            plan.get("max_mb"), plan.get("max_files"),
+        )
+        return [(axis, entries) for entries in batches]
+
+    def _runLabel(self, files: dict, index=None, total=None) -> str:
         """Name a run after what it was given, so several lines of progress read.
 
         The tool name alone would make every line of a cohort identical, which
-        is exactly when a user needs to tell them apart.
+        is exactly when a user needs to tell them apart. Batches of one cohort
+        are named after the same folder, so they carry their number too.
         """
+        name = self.TOOL_NAME
         for path in files.values():
             if isinstance(path, str) and path:
-                name = os.path.basename(path.rstrip(os.sep))
-                if name:
-                    return name
-        return self.TOOL_NAME
+                basename = os.path.basename(path.rstrip(os.sep))
+                if basename:
+                    name = basename
+                    break
+        if total:
+            return _("{name} ({index}/{total})").format(name=name, index=index, total=total)
+        return name
 
     def _concurrentRuns(self) -> int:
         """How many runs may be in flight at once, never below one."""
@@ -1647,17 +1913,65 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def _onJobSuccess(self, run, result) -> None:
         self._finishRun(run)
-        with slicer.util.tryWithErrorDisplay(_("Failed to handle the tool result."), waitCursor=False):
-            self.handleResult(result)
+        self._countBatch(run)
+        # Which run `handleResult` is handling. It takes only the result -- the
+        # signature every module overrides -- so the run it belongs to travels
+        # here, the way `_producedRoot` already does. Cleared on every path: a
+        # stale one would make the next ordinary run look like a batch.
+        self._runInHand = run
+        try:
+            with slicer.util.tryWithErrorDisplay(_("Failed to handle the tool result."), waitCursor=False):
+                self.handleResult(result)
+        finally:
+            self._runInHand = None
         # Move the SUGGESTION on, now that this folder holds a result. The next
         # run then lands beside this one instead of into it, which is the whole
         # reason the folders are numbered. A path the user chose is left alone
         # (see _suggestOutputFolder) -- someone who picked a folder meant it.
-        self._suggestOutputFolder()
+        #
+        # Not between two batches of one cohort: they were all given the folder
+        # the user had at Apply, and moving the suggestion under them would put
+        # the next Apply somewhere the current cohort is still writing.
+        if not run.cohort:
+            self._suggestOutputFolder()
+
+    def _countBatch(self, run, succeeded: bool = True) -> None:
+        """Record that one batch of a cohort has ended, and how.
+
+        Failures count towards `finished`: it asks whether anything is still
+        coming, not whether everything worked. A cohort whose third batch failed
+        must still say its last word when the fourth lands.
+
+        The SCANS are counted apart, and done apart from failed, because that
+        is the number on the panel: "16 of 20 scans" must never include four a
+        batch lost. A batch that failed is reported as failed, not as absent.
+        """
+        if not run.cohort:
+            return
+        run.cohort.finished += 1
+        if succeeded:
+            run.cohort.scans_done += run.scan_count
+        else:
+            run.cohort.scans_failed += run.scan_count
+
+    def _announce(self, message: str) -> None:
+        """Tell the user something, in a dialog they have to dismiss.
+
+        Once per COHORT, not once per batch: five modal dialogs for one Apply
+        are four clicks nobody asked for, each interrupting the upload of the
+        next batch. The batches before the last say the same thing in the status
+        bar, which is where a running commentary belongs.
+        """
+        run = getattr(self, "_runInHand", None)
+        if run is not None and run.cohort and not run.cohort.complete:
+            slicer.util.showStatusMessage(message, 3000)
+            return
+        slicer.util.infoDisplay(message)
 
     def _onJobError(self, run, exc) -> None:
         """One run failing takes only that run: the rest of a cohort goes on."""
         self._finishRun(run)
+        self._countBatch(run, succeeded=False)
         if isinstance(exc, RunCancelled):
             # 499: the user asked for this. A cancellation is not a failure and
             # must never open an error dialog -- the panel simply closes the
@@ -1725,11 +2039,72 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """Apply stays visible whatever is running: clicking it queues another."""
         if self.cancelButton is not None:
             self.cancelButton.setVisible(bool(self._runs))
-            self.cancelButton.setText(_("Cancel all") if len(self._runs) > 1 else _("Cancel"))
+            if self._cohortInFlight() is not None:
+                self.cancelButton.setText(_("Cancel the cohort"))
+            else:
+                self.cancelButton.setText(
+                    _("Cancel all") if len(self._runs) > 1 else _("Cancel"))
         if self.applyButton is not None:
             self.applyButton.setVisible(True)
         self._rebuildRunCancelButtons()
         self._renderProgress()
+
+    def _cohortInFlight(self):
+        """The one cohort every run in flight belongs to, or None.
+
+        All of them, deliberately. A cohort plus an unrelated run queued behind
+        it is not a cohort any more -- it is a queue that happens to contain
+        one -- and drawing it as one would put a stranger's progress inside the
+        cohort's box and its scans outside the count.
+        """
+        cohorts = {id(run.cohort): run.cohort for run in self._runs}
+        if len(cohorts) != 1:
+            return None
+        cohort = next(iter(cohorts.values()))
+        return cohort if cohort is not None else None
+
+    def _buildCohortView(self, layout, cohort):
+        """The cohort's own progress box, built once per change to the run set.
+
+        Built here rather than in the one-second tick for the reason the Cancel
+        buttons were: a widget rebuilt under the pointer is a widget the user
+        was about to interact with. The tick only writes values into these.
+        """
+        frame = design.cohort_frame()
+        inner = qt.QVBoxLayout(frame)
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.setSpacing(design.SPACING_XS)
+
+        total = design.cohort_total_label("")
+        bar = design.cohort_bar()
+        inner.addWidget(total)
+        inner.addWidget(bar)
+
+        # `_runs` is in queue order and a finished run leaves it, so the first
+        # entries are the ones in flight and the rest are what comes next. A
+        # cohort of a hundred scans is twenty-five batches; listing them all
+        # would make the queue the tallest thing on the panel and say nothing
+        # the headline count does not.
+        shown = self._runs[:design.MAX_BATCH_ROWS]
+        rows = {}
+        for run in shown:
+            label = design.batch_label("")
+            batch_bar = design.batch_bar()
+            inner.addWidget(label)
+            inner.addWidget(batch_bar)
+            rows[run.number] = (label, batch_bar)
+
+        remainder = None
+        if len(self._runs) > len(shown):
+            # Counted, not listed. What a reader needs from the batches beyond
+            # the fold is that they exist and how many -- the rest is the
+            # headline's job.
+            remainder = design.batch_label("")
+            inner.addWidget(remainder)
+
+        frame.setVisible(True)
+        layout.addWidget(frame)
+        return _CohortView(frame, total, bar, rows, cohort, remainder)
 
     def _rebuildRunCancelButtons(self) -> None:
         """One Cancel per run -- but only once there is more than one run.
@@ -1757,7 +2132,15 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         layout = qt.QVBoxLayout(host)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(design.SPACING_XS)
-        if len(self._runs) > 1:
+        cohort = self._cohortInFlight()
+        self._cohortView = None
+        if cohort is not None:
+            # A cohort gets NO per-batch Cancel. Abandoning batch 3 of 5 leaves
+            # a run whose results cover an arbitrary part of the cohort and
+            # whose report says so in a footnote -- an outcome nobody wants and
+            # which the panel should not offer. One Apply, one thing to stop.
+            self._cohortView = self._buildCohortView(layout, cohort)
+        elif len(self._runs) > 1:
             for run in self._runs:
                 button = design.compact_danger_button(
                     _("Cancel run {number} ({label})").format(
@@ -1902,8 +2285,67 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _renderProgress(self) -> None:
         if not self._runs:
             return
+        # getattr: a panel built without __init__ (the unit tests do exactly
+        # that) has no view, and no cohort either.
+        view = getattr(self, "_cohortView", None)
+        if view is not None:
+            self._renderCohort(view)
+            # The label above the box stays empty: the box says all of it, and
+            # the same sentence twice reads as two different runs.
+            self._showPhase("")
+            return
         self._showPhase("\n".join(self._describeRun(run) for run in self._runs))
         self._renderProgressBar()
+
+    def _renderCohort(self, view) -> None:
+        """Write the current state into the cohort box. Values only."""
+        cohort = view.cohort
+        done, failed = cohort.scans_done, cohort.scans_failed
+        text = _("{done} of {total} scans done").format(
+            done=done, total=cohort.total_scans)
+        if failed:
+            # Named, not folded into the count. "16 of 20" with four lost in
+            # silence is the report this whole feature exists not to produce.
+            text += _("  ·  {failed} failed").format(failed=failed)
+        view.total.setText(text)
+        view.bar.setValue(int(round(100 * cohort.progress(
+            [run for run in self._runs if run.started_at is not None]))))
+
+        if view.remainder is not None:
+            waiting = len(self._runs) - len(view.rows)
+            view.remainder.setText(_("+ {count} more batches queued").format(
+                count=waiting))
+
+        for run in self._runs:
+            row = view.rows.get(run.number)
+            if row is None:
+                continue
+            label, bar = row
+            label.setText(self._describeBatch(run))
+            # Only for a batch actually running: an empty bar under each queued
+            # batch is three things that look stuck.
+            if run.started_at is None or run.fraction is None:
+                bar.setVisible(False)
+            else:
+                bar.setValue(int(round(100 * run.fraction)))
+                bar.setVisible(True)
+
+    def _describeBatch(self, run) -> str:
+        """One batch's line inside the cohort box.
+
+        Numbered by its place in the cohort rather than by the panel's run
+        counter: "Batch 2 of 5" is where the user is, "Run 7" is bookkeeping
+        that means nothing to them.
+        """
+        where = _("Batch {index} of {total}").format(
+            index=run.cohort_index, total=run.cohort.total)
+        if run.started_at is None:
+            return _("{where}  ·  queued").format(where=where)
+        elapsed = int(time.monotonic() - run.started_at)
+        return _("{where}  ·  {phase}  ·  {minutes}:{seconds:02d}").format(
+            where=where, phase=self._runPhaseText(run) or _("Working..."),
+            minutes=elapsed // 60, seconds=elapsed % 60,
+        )
 
     def _renderProgressBar(self) -> None:
         """The determinate bar, shown only when there is a real number behind it.

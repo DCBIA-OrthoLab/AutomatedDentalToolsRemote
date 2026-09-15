@@ -624,6 +624,25 @@ class QProgressBar(QObject):
     def setTextVisible(self, visible):
         self.textVisible = bool(visible)
 
+    def setMaximumHeight(self, height):
+        """The slim bar one batch of a cohort gets (design.batch_bar)."""
+        self.maximumHeight = height
+
+
+class QFrame(QWidget):
+    """The box a cohort's progress is drawn in (design.cohort_frame).
+
+    A QWidget that takes a stylesheet and nothing else: everything else about
+    it is the layout put inside it, which is modelled already.
+    """
+
+    def __init__(self, parent=None):
+        QWidget.__init__(self, parent)
+        self.styleSheet = ""
+
+    def setStyleSheet(self, sheet):
+        self.styleSheet = sheet
+
 
 class QPalette:
     Window = 0
