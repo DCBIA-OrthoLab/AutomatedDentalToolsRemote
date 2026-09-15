@@ -1,0 +1,257 @@
+"""Dividing a folder of inputs into batches, and packing one of them.
+
+A cohort of 20 CBCTs is ~2 GB in one archive: the server's card waits for its
+last byte, a connection dropped at 95% starts again from zero, and it is over
+MAX_UPLOAD_MB anyway. The server publishes how much to send at once (see its
+`GET /tools` `batch` field); everything here is the half that acts on it.
+
+Two rules carry the whole thing, and both are tested by what they REFUSE to do:
+a top-level entry is never opened, and nothing is ever lost between the batches.
+"""
+
+import os
+import shutil
+import sys
+import tempfile
+import unittest
+import zipfile
+
+_HERE = os.path.abspath(os.path.dirname(__file__))
+_CORE = os.path.abspath(os.path.join(_HERE, "..", ".."))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, _CORE)
+
+import test_hosted_test_files as fixtures  # noqa: F401,E402 - installs the stubs
+
+from ServerToolsCoreLib import slicer_io  # noqa: E402
+
+
+MB = 1024 * 1024
+
+
+class _Cohort:
+    """A folder on disk, built entry by entry."""
+
+    def __init__(self):
+        self.path = tempfile.mkdtemp(prefix="cohort_")
+
+    def close(self):
+        shutil.rmtree(self.path, ignore_errors=True)
+
+    def scan(self, name: str, size: int = 32) -> str:
+        """One file of `size` bytes. Sparse above a few kB, so a 50 MB scan
+        costs an inode and nothing else -- these tests are about the arithmetic
+        of sizing a batch, not about moving bytes."""
+        path = os.path.join(self.path, name)
+        with open(path, "wb") as handle:
+            handle.truncate(size)
+        return path
+
+    def patient(self, name: str, slices: int = 3, size: int = 32) -> str:
+        """A subfolder, the shape a DICOM series and a per-patient cohort take."""
+        folder = os.path.join(self.path, name)
+        os.makedirs(folder, exist_ok=True)
+        for index in range(slices):
+            with open(os.path.join(folder, f"{index:03d}.dcm"), "wb") as handle:
+                handle.truncate(size)
+        return folder
+
+
+class SplitCohortTest(unittest.TestCase):
+    def setUp(self):
+        self.cohort = _Cohort()
+        self.addCleanup(self.cohort.close)
+
+    def split(self, max_mb=400, max_files=25):
+        return slicer_io.split_cohort(self.cohort.path, max_mb, max_files)
+
+    # --- the invariant that must never break --------------------------
+
+    def test_a_folder_under_both_caps_is_one_batch(self):
+        """Which is what makes this change invisible for every cohort small
+        enough not to need it: one batch is one run, byte for byte today's."""
+        for index in range(5):
+            self.cohort.scan(f"patient{index}.nii.gz")
+
+        self.assertEqual(len(self.split()), 1)
+
+    def test_every_entry_lands_in_exactly_one_batch(self):
+        """Nothing lost, nothing sent twice. A patient silently dropped here is
+        a patient missing from a report that says the run succeeded."""
+        for index in range(23):
+            self.cohort.scan(f"scan{index:02d}.nii.gz", size=3 * MB)
+        self.cohort.patient("dicom_patient")
+
+        batches = self.split(max_mb=10, max_files=4)
+        seen = [name for batch in batches for name in batch]
+
+        self.assertEqual(sorted(seen), sorted(os.listdir(self.cohort.path)))
+        self.assertEqual(len(seen), len(set(seen)))
+
+    # --- what decides where the cut falls ------------------------------
+
+    def test_megabytes_are_what_normally_binds(self):
+        """The reason the server sizes in bytes rather than in files: 8 CBCTs
+        of 50 MB fill a 400 MB batch, and nobody had to write "CBCT" anywhere
+        for that to happen."""
+        for index in range(20):
+            self.cohort.scan(f"cbct{index:02d}.nii.gz", size=50 * MB)
+
+        batches = self.split(max_mb=400, max_files=25)
+
+        self.assertEqual([len(batch) for batch in batches], [8, 8, 4])
+
+    def test_small_files_batch_far_more_of_themselves(self):
+        """Same two numbers, same code, intraoral surfaces instead: 5 MB each,
+        so the FILE cap is what binds and a batch holds 25 of them."""
+        for index in range(60):
+            self.cohort.scan(f"arch{index:02d}.vtk", size=5 * MB)
+
+        batches = self.split(max_mb=400, max_files=25)
+
+        self.assertEqual([len(batch) for batch in batches], [25, 25, 10])
+
+    def test_the_file_cap_alone_can_bind(self):
+        """5 000 clinical notes are 100 MB -- one batch by bytes, and not one
+        partial result until the last note is done."""
+        for index in range(100):
+            self.cohort.scan(f"note{index:03d}.txt")
+
+        self.assertEqual([len(batch) for batch in self.split(max_files=25)], [25] * 4)
+
+    def test_a_cap_of_zero_does_not_bind(self):
+        for index in range(40):
+            self.cohort.scan(f"scan{index:02d}.nii.gz", size=50 * MB)
+
+        self.assertEqual([len(batch) for batch in self.split(max_mb=0, max_files=10)],
+                         [10, 10, 10, 10])
+        self.assertEqual(len(self.split(max_mb=0, max_files=0)), 1)
+
+    def test_an_entry_larger_than_a_whole_batch_travels_alone(self):
+        """Refused, dropped or split are all worse. It goes on its own and the
+        server's upload limit is what has the last word on it."""
+        self.cohort.scan("small_a.nii.gz", size=1 * MB)
+        self.cohort.scan("enormous.nii.gz", size=900 * MB)
+        self.cohort.scan("small_b.nii.gz", size=1 * MB)
+
+        batches = self.split(max_mb=400)
+
+        self.assertEqual(batches, [["enormous.nii.gz"], ["small_a.nii.gz", "small_b.nii.gz"]])
+
+    # --- a patient is never opened --------------------------------------
+
+    def test_a_subfolder_is_one_unit_however_many_files_it_holds(self):
+        """A DICOM series is hundreds of slices that mean nothing apart, and a
+        cohort filed per patient is the same shape. Splitting inside one hands
+        the tool half a patient and calls it a batch."""
+        for index in range(6):
+            self.cohort.patient(f"patient{index}", slices=200)
+
+        batches = self.split(max_files=2)
+
+        self.assertEqual([len(batch) for batch in batches], [2, 2, 2])
+        self.assertEqual(batches[0], ["patient0", "patient1"])
+
+    def test_a_subfolder_is_sized_by_everything_inside_it(self):
+        """Counted as one entry, weighed as all of it: a 300 MB series must not
+        ride along as if it were a single small file."""
+        self.cohort.patient("heavy", slices=3, size=150 * MB)
+        self.cohort.scan("light.nii.gz", size=1 * MB)
+
+        batches = self.split(max_mb=400)
+
+        self.assertEqual(batches, [["heavy"], ["light.nii.gz"]])
+
+    # --- the same cohort divides the same way every time ----------------
+
+    def test_the_split_is_sorted_and_repeatable(self):
+        """A rerun after a failure resends the same batches, and two timepoints
+        of one patient stay adjacent rather than landing in different runs."""
+        for name in ("b_T2", "a_T2", "b_T1", "a_T1"):
+            self.cohort.scan(f"{name}.nii.gz")
+
+        first = self.split(max_files=2)
+
+        self.assertEqual(first, [["a_T1.nii.gz", "a_T2.nii.gz"],
+                                 ["b_T1.nii.gz", "b_T2.nii.gz"]])
+        self.assertEqual(self.split(max_files=2), first)
+
+    def test_an_empty_or_unreadable_folder_divides_into_nothing(self):
+        """The caller then sends what it has, and the server reports an empty
+        cohort the way it always did."""
+        self.assertEqual(self.split(), [])
+        self.assertEqual(slicer_io.split_cohort("/no/such/folder", 400, 25), [])
+
+
+class ZipSubsetTest(unittest.TestCase):
+    def setUp(self):
+        self.cohort = _Cohort()
+        self.addCleanup(self.cohort.close)
+        self.dest = tempfile.mkdtemp(prefix="batch_zip_")
+        self.addCleanup(shutil.rmtree, self.dest, True)
+
+    def _members(self, archive_path):
+        with zipfile.ZipFile(archive_path) as archive:
+            return sorted(info.filename for info in archive.infolist() if not info.is_dir())
+
+    def test_members_are_named_as_if_the_whole_folder_had_been_sent(self):
+        """What lets a batch be an ordinary run: the server unpacks the same
+        tree shape, so a tool mirroring its input tree keeps working per batch."""
+        self.cohort.scan("a.nii.gz")
+        self.cohort.patient("patient1", slices=2)
+        self.cohort.scan("b.nii.gz")
+        out = os.path.join(self.dest, "batch.zip")
+
+        slicer_io.zip_subset(self.cohort.path, ["a.nii.gz", "patient1"], out, compress=False)
+
+        self.assertEqual(
+            self._members(out),
+            ["a.nii.gz", os.path.join("patient1", "000.dcm"),
+             os.path.join("patient1", "001.dcm")],
+        )
+
+    def test_nothing_outside_the_batch_is_packed(self):
+        self.cohort.scan("wanted.nii.gz")
+        self.cohort.scan("not_this_time.nii.gz")
+        out = os.path.join(self.dest, "batch.zip")
+
+        slicer_io.zip_subset(self.cohort.path, ["wanted.nii.gz"], out, compress=False)
+
+        self.assertEqual(self._members(out), ["wanted.nii.gz"])
+
+    def test_packing_every_entry_gives_what_zipping_the_folder_gives(self):
+        """The refactor that made the two share a writer must not have changed
+        the whole-folder path, which every un-batched run still takes."""
+        self.cohort.scan("a.nii.gz")
+        self.cohort.patient("patient1", slices=2)
+        whole = os.path.join(self.dest, "whole.zip")
+        pieces = os.path.join(self.dest, "pieces.zip")
+
+        slicer_io.zip_folder(self.cohort.path, whole, compress=False)
+        slicer_io.zip_subset(self.cohort.path, ["a.nii.gz", "patient1"], pieces, compress=False)
+
+        self.assertEqual(self._members(whole), self._members(pieces))
+
+    def test_an_already_compressed_member_is_stored_rather_than_deflated(self):
+        """Pinned because it survives a refactor only if someone checks: a
+        .nii.gz re-deflated is CPU spent to save nothing, and it is what every
+        member of a CBCT cohort is."""
+        self.cohort.scan("scan.nii.gz", size=4096)
+        self.cohort.scan("landmarks.json", size=4096)
+        out = os.path.join(self.dest, "batch.zip")
+
+        slicer_io.zip_subset(
+            self.cohort.path, ["scan.nii.gz", "landmarks.json"], out, compress=True)
+
+        with zipfile.ZipFile(out) as archive:
+            kinds = {info.filename: info.compress_type for info in archive.infolist()}
+        self.assertEqual(kinds["scan.nii.gz"], zipfile.ZIP_STORED)
+        self.assertEqual(kinds["landmarks.json"], zipfile.ZIP_DEFLATED)
+
+    def test_a_path_that_is_not_a_folder_is_refused(self):
+        with self.assertRaises(IOError):
+            slicer_io.zip_subset("/no/such/folder", ["a"], os.path.join(self.dest, "x.zip"))
+
+
+if __name__ == "__main__":
+    unittest.main()
