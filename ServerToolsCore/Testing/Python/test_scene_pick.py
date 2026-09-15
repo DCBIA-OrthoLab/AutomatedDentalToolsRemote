@@ -632,3 +632,85 @@ class TheSceneFurnitureIsNotOfferedTest(unittest.TestCase):
         _util.scene_nodes = {"vtkMRMLModelNode": [_Model("Red_arch_T2")]}
 
         self.assertEqual(self._names(self._panel(input=MESH)), ["Red_arch_T2"])
+
+
+def _Roi(name):
+    """A crop box as Slicer makes one: NOT a markups fiducial.
+
+    `vtkMRMLMarkupsROINode.IsA("vtkMRMLMarkupsFiducialNode")` is 0 -- verified
+    against a real Slicer -- so a row offered "markups" is offered no box at
+    all. That is why it is a kind of its own.
+    """
+    return _SceneNode(name, "vtkMRMLMarkupsROINode")
+
+
+ROI = {"type": "path", "types": ["path"]}
+
+
+class ARoiIsItsOwnKindTest(unittest.TestCase):
+    """AutoCrop3D crops to a box the clinician DRAWS in Slicer, so the box is
+    already a node when the panel opens. Asking for it as a file would mean
+    saving it first, for no reason."""
+
+    def _panel(self, **arguments):
+        class _P(ServerToolWidgetBase):
+            TOOL_NAME = "AutoCrop3D"
+            SCENE_INPUTS = {"roi": ("roi",)}
+
+        panel = _P.__new__(_P)
+        panel._schema = {"arguments": arguments}
+        panel._checkCanApply = lambda *a: None
+        panel._inputWidgets = {
+            name: formgen.file_widget(dict(spec, server_selectable="testfile"),
+                                      "file_or_folder")
+            for name, spec in arguments.items()
+        }
+        return panel
+
+    def setUp(self):
+        _util.scene_nodes = {}
+
+    def test_the_argument_name_alone_answers_roi(self):
+        """`describe.py` publishes no extensions for a packaged tool, so the
+        name is all there is to go on -- and `roi` means nothing to the generic
+        rule."""
+        self.assertEqual(formgen.scene_kinds_for(ROI, "roi"), ("roi",))
+
+    def test_a_box_in_the_scene_is_offered(self):
+        _util.scene_nodes = {"vtkMRMLMarkupsROINode": [_Roi("Crop box")]}
+        panel = self._panel(roi=ROI)
+
+        panel._refreshSceneVolumes()
+        self.assertEqual(panel._inputWidgets["roi"]._volume_names, ["Crop box"])
+
+    def test_landmarks_are_not_a_box(self):
+        """A fiducial list is points, not an extent. Offering one here would
+        let a clinician send something the tool cannot read as a box."""
+        _util.scene_nodes = {
+            "vtkMRMLMarkupsFiducialNode": [_SceneNode("L", "vtkMRMLMarkupsFiducialNode")],
+        }
+        panel = self._panel(roi=ROI)
+
+        panel._refreshSceneVolumes()
+        self.assertEqual(panel._inputWidgets["roi"]._volume_names, [])
+
+    def test_a_scan_row_beside_it_is_narrowed_independently(self):
+        """The two rows of AutoCrop3D: one takes the volume, one takes the box,
+        and each is offered only its own."""
+        _util.scene_nodes = {
+            "vtkMRMLScalarVolumeNode": [_Volume("Pat_0002")],
+            "vtkMRMLMarkupsROINode": [_Roi("Crop box")],
+        }
+        panel = self._panel(scans=SCAN, roi=ROI)
+
+        panel._refreshSceneVolumes()
+        self.assertEqual(panel._inputWidgets["scans"]._volume_names, ["Pat_0002"])
+        self.assertEqual(panel._inputWidgets["roi"]._volume_names, ["Crop box"])
+
+    def test_the_row_says_what_it_takes(self):
+        self.assertEqual(formgen.scene_label_for(("roi",)), "ROI")
+
+    def test_a_box_is_written_back_out_as_markups(self):
+        """The file format is the same as a fiducial list's -- only the node
+        class differs -- so a picked box uploads as `.mrk.json`."""
+        self.assertEqual(formgen.SCENE_NODE_KINDS["roi"][1], ".mrk.json")

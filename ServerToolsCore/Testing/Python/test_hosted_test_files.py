@@ -57,6 +57,20 @@ def _stub_slicer():
         def __init__(self, parent=None):
             pass
 
+    class ScriptedLoadableModule:
+        """The half of the pair a module's OUTER class subclasses.
+
+        Absent until a module file was first imported in a test: the convention
+        had been to read declarations out of the source with `ast`, because
+        importing needed a real Slicer. It needs this and `slicer.i18n` and
+        nothing else, so the stub carries it and a test can hold the real class
+        rather than a transcription of it.
+        """
+
+        def __init__(self, parent):
+            self.parent = parent
+
+    framework.ScriptedLoadableModule = ScriptedLoadableModule
     framework.ScriptedLoadableModuleWidget = ScriptedLoadableModuleWidget
     sys.modules["slicer.ScriptedLoadableModule"] = framework
     slicer.ScriptedLoadableModule = framework
