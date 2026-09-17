@@ -76,4 +76,4 @@ ZIP_COMPRESS = None
 # while a cohort legitimately runs for longer. It also makes the wait
 # resumable -- the event stream reconnects and dedupes, where a dropped POST
 # simply lost an answer the GPU had already been spent computing.
-DETACHED_RUNS = False
+DETACHED_RUNS = True
