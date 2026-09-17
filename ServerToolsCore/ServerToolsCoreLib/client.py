@@ -825,11 +825,25 @@ class ToolServerClient:
 
         self._raise_if_cancelled(cancel_event, tool_name)
 
+        # Detaching needs an id to report through, so a caller that minted none
+        # keeps the blocking contract whatever the setting says. Decided BEFORE
+        # the uploads, because it changes which of them travel in the request.
+        detached = bool(self._detached_runs and run_id)
+
         # Anything big enough to be worth it goes up FIRST, in parallel parts,
         # and this request then only references it. What stays in `files` is
         # what is small enough that a second and third round trip would cost
         # more than the single-connection upload does.
-        files, upload_references = self._upload_large_inputs(files, progress_cb)
+        #
+        # ...unless the run is detached, in which case EVERY file goes up this
+        # way however small. The server answers 202 before the tool starts, so
+        # there is no point in the request at which it could stage a multipart
+        # body, and it refuses one -- correctly, and with a message naming
+        # POST /uploads. Sending an 80 kB landmark file on a detached run was a
+        # refusal, not a slow path: the size threshold and the delivery mode
+        # were decided independently of each other and could disagree.
+        files, upload_references = self._upload_large_inputs(
+            files, progress_cb, always=detached)
         if upload_references:
             data[_UPLOADS_FIELD] = json.dumps(upload_references)
 
@@ -839,9 +853,6 @@ class ToolServerClient:
             progress_cb(f"Sending '{tool_name}' request...")
 
         post_headers = {**headers, **_RESULT_DELIVERY_HEADER}
-        # Detaching needs an id to report through, so a caller that minted none
-        # keeps the blocking contract whatever the setting says.
-        detached = bool(self._detached_runs and run_id)
         if detached:
             post_headers.update(_RUN_DELIVERY_HEADER)
         if run_id:
@@ -1170,7 +1181,7 @@ class ToolServerClient:
     # Bulk transfer (see transfer.py for why it is not one request)
     # ------------------------------------------------------------------
 
-    def _upload_large_inputs(self, files: dict, progress_cb) -> tuple:
+    def _upload_large_inputs(self, files: dict, progress_cb, always=False) -> tuple:
         """Split `files` into what still travels inside the /run request and
         what has already been sent through the upload endpoints.
 
@@ -1179,14 +1190,22 @@ class ToolServerClient:
         this extension keeps working against a deployment that has not been
         updated, that fallback is the reason the return is a pair rather than
         an in-place mutation.
+
+        `always` sends every file this way whatever its size. A detached run
+        needs it: the request it would otherwise ride in is answered 202 before
+        the tool starts, and a server cannot stage a body it has already replied
+        to. The fallback still applies -- a server with no upload endpoints
+        cannot serve a detached run either, and the caller ends up on the
+        blocking path with its files in the request, which is what it wants.
         """
         if self._chunked_uploads is False:
             return files, {}
 
         remaining = dict(files)
         references = {}
+        minimum = 1 if always else max(self._chunk_bytes * 2, 1)
         for arg_name, path in files.items():
-            if not transfer.should_chunk(path, max(self._chunk_bytes * 2, 1)):
+            if not transfer.should_chunk(path, minimum):
                 continue
             try:
                 references[arg_name] = transfer.upload_file(

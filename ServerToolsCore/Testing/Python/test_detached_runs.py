@@ -36,7 +36,10 @@ from ServerToolsCoreLib.client import (
 from ServerToolsCoreLib.errors import RunCancelled, ServerToolError
 
 _TOOL = "Probe"
-_SCHEMA = [{"name": _TOOL, "arguments": {}, "output_kind": "text"}]
+# One optional path argument, so the same fake tool serves both the runs that
+# send no file and the ones that send a small one.
+_SCHEMA = [{"name": _TOOL, "output_kind": "text",
+            "arguments": {"input": {"type": "path", "required": False}}}]
 
 
 def _terminal(seq, state="done", result=None, message=""):
@@ -54,6 +57,10 @@ class _State:
         self.run_ids = []
         self.detached_status = 202
         self.streams = 0
+        self.uploads = []        # every file opened through POST /uploads
+        self.parts = 0
+        self.run_body_bytes = 0  # how much travelled inside the /run request
+        self.has_uploads_field = None
         self.lock = threading.Lock()
 
 
@@ -74,8 +81,16 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
-        if length:
-            self.rfile.read(length)
+        body = self.rfile.read(length) if length else b""
+        if self.path == "/uploads":
+            opened = json.loads(body or b"{}")
+            with self.state.lock:
+                self.state.uploads.append(opened.get("filename"))
+            return self._json({"upload_id": "u-%d" % len(self.state.uploads),
+                               "chunk_size": 8 * 1024 * 1024, "part_count": 1})
+        with self.state.lock:
+            self.state.run_body_bytes = len(body)
+            self.state.has_uploads_field = b"__uploads__" in body
         delivery = self.headers.get("X-Run-Delivery")
         run_id = self.headers.get("X-Run-Id")
         with self.state.lock:
@@ -110,6 +125,18 @@ class _Handler(BaseHTTPRequestHandler):
         for event in self.state.events:
             self._chunk(f"data: {json.dumps(event)}\n\n".encode())
         self._chunk(b"")
+
+    def do_PUT(self):
+        """A part of a chunked upload. Accepted without inspection: what is
+        under test is WHICH path the client chose, not the transfer itself."""
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
+        with self.state.lock:
+            self.state.parts += 1
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _chunk(self, body):
         self.wfile.write(b"%x\r\n" % len(body) + body + b"\r\n")
@@ -218,6 +245,49 @@ class CollectTest(_Live):
 # ----------------------------------------------------------------------
 # How it ends badly
 # ----------------------------------------------------------------------
+
+class SmallFileTest(_Live):
+    """A detached run has to send EVERY file through POST /uploads.
+
+    The client only chunked files of at least 2 x chunk_size -- 16 MB by
+    default -- and sent anything smaller as a multipart part of the /run
+    request. The server refuses exactly that on a detached run, and correctly:
+    it answers 202 before the tool starts, so there is no moment at which it
+    could stage a body it has already replied to.
+
+    Nothing tested either feature against the other, so every detached run
+    taking a small input -- a landmark file, an ROI box, a spreadsheet -- was a
+    400 the moment DETACHED_RUNS was turned on. Both halves worked; the pair
+    did not.
+    """
+
+    def _tiny(self):
+        import tempfile
+        handle = tempfile.NamedTemporaryFile(suffix=".vtk", delete=False)
+        handle.write(b"# vtk DataFile Version 3.0\n")
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        return handle.name
+
+    def test_a_small_file_goes_through_uploads_when_detached(self):
+        self.state.events = [_terminal(1, result={"result": "finished"})]
+        path = self._tiny()
+        self._client().run(_TOOL, run_id=new_run_id(), files={"input": path})
+        self.assertEqual(self.state.uploads, [os.path.basename(path)])
+        self.assertGreaterEqual(self.state.parts, 1)
+        self.assertTrue(self.state.has_uploads_field,
+                        "the run request must reference the upload, not carry the file")
+
+    def test_a_small_file_still_rides_the_request_when_blocking(self):
+        """The threshold is right for a blocking run: two extra round trips
+        cost more than a 26-byte multipart part. Only detaching changes it."""
+        path = self._tiny()
+        self._client(detached=False).run(_TOOL, run_id=new_run_id(),
+                                         files={"input": path})
+        self.assertEqual(self.state.uploads, [])
+        self.assertFalse(self.state.has_uploads_field)
+        self.assertGreater(self.state.run_body_bytes, 0)
+
 
 class FailureTest(_Live):
     def test_a_failed_run_raises_with_what_the_server_said(self):
