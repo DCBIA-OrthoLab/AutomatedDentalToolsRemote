@@ -37,6 +37,7 @@ def get_client() -> ToolServerClient:
             parallelism=config.TRANSFER_PARALLELISM,
             chunk_bytes=config.TRANSFER_CHUNK_MB * 1024 * 1024,
             compress_uploads=config.TRANSFER_COMPRESS,
+            detached_runs=getattr(config, "DETACHED_RUNS", False),
         )
     return _client
 

@@ -55,6 +55,16 @@ _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 # which is what makes this safe to send unconditionally.
 _RESULT_DELIVERY_HEADER = {"X-Result-Delivery": "reference"}
 
+# Opts one run out of the blocking contract: the POST answers 202 as soon as the
+# inputs are staged, and the result reference arrives on the terminal event of
+# the stream this client already watches.
+#
+# What it fixes is not hypothetical. The POST's read timeout is TIMEOUT seconds
+# (600 by default, an hour at the very most a user can dial in), while a cohort
+# legitimately runs for longer; and a dropped connection never stopped the run,
+# it only threw the answer away after the GPU had been spent on it.
+_RUN_DELIVERY_HEADER = {"X-Run-Delivery": "detached"}
+
 # Connections the pool keeps alive per host. Must exceed the transfer
 # parallelism, or the parallel parts queue up on each other inside urllib3 and
 # the whole point is lost.
@@ -229,7 +239,7 @@ def normalise_run_event(payload) -> Optional[dict]:
     if not isinstance(message, str):
         message = str(message)
 
-    return {
+    event = {
         "seq": seq,
         "at": payload.get("at"),
         "state": payload.get("state") or "",
@@ -238,6 +248,13 @@ def normalise_run_event(payload) -> Optional[dict]:
         "message": message[:_RUN_MESSAGE_MAX_LEN],
         "depth": depth,
     }
+    # Only on a detached run's terminal event, and it is how the answer gets
+    # back at all: the response that used to carry it was a 202, sent before
+    # the tool had started. Kept exactly as the server sent it -- this side
+    # does not interpret it, it hands it to _download_reference.
+    if isinstance(payload.get("result"), dict):
+        event["result"] = payload["result"]
+    return event
 
 
 def _download_message(received: int, expected: Optional[int], label: str = "results") -> str:
@@ -480,6 +497,7 @@ class ToolServerClient:
         parallelism=transfer.DEFAULT_PARALLELISM,
         chunk_bytes=transfer.DEFAULT_CHUNK_BYTES,
         compress_uploads=True,
+        detached_runs=False,
     ):
         self._server_url = server_url.rstrip("/")
         self._token = token
@@ -488,6 +506,10 @@ class ToolServerClient:
         self._parallelism = parallelism
         self._chunk_bytes = chunk_bytes
         self._compress_uploads = compress_uploads
+        # Opt in to the detached contract. Off by default: it needs a server
+        # that knows the header, and a client that says nothing keeps the
+        # behaviour it always had, byte for byte.
+        self._detached_runs = detached_runs
         self._tools_cache = None
         # None until the first big upload tells us; False pins every later one
         # to the single-request path, so an old server costs one failed probe
@@ -817,6 +839,11 @@ class ToolServerClient:
             progress_cb(f"Sending '{tool_name}' request...")
 
         post_headers = {**headers, **_RESULT_DELIVERY_HEADER}
+        # Detaching needs an id to report through, so a caller that minted none
+        # keeps the blocking contract whatever the setting says.
+        detached = bool(self._detached_runs and run_id)
+        if detached:
+            post_headers.update(_RUN_DELIVERY_HEADER)
         if run_id:
             # A header, so a server that has never heard of it ignores an
             # unknown header and answers exactly as it always did. Sent even
@@ -847,7 +874,11 @@ class ToolServerClient:
         # outcome, a watcher left retrying against a run that has already
         # answered being a thread holding a connection open for no one.
         watch_stop = threading.Event()
-        watcher = self._start_watcher(run_id, event_cb, watch_stop, cancel_event)
+        # Not for a detached run: that one reads the same stream on this thread
+        # and would otherwise have two readers of one run, both delivering every
+        # event to the same callback.
+        watcher = (None if self._detached_runs and run_id
+                   else self._start_watcher(run_id, event_cb, watch_stop, cancel_event))
 
         try:
             file_handles = []
@@ -898,6 +929,17 @@ class ToolServerClient:
             # panel that has already closed is the one expensive thing this
             # side can still avoid doing.
             self._raise_if_cancelled(cancel_event, tool_name, response=response)
+
+            if detached:
+                # 202 and nothing else: the run has not started yet. Everything
+                # from here arrives on the stream, read on THIS thread -- the
+                # caller has nothing else to do, and reading it here is what
+                # makes the wait resumable, since watch_run reconnects and
+                # dedupes on `seq` where a dropped POST simply lost the answer.
+                return self._collect_detached(
+                    tool_name, run_id, response, schema, output_dir,
+                    progress_cb, event_cb, cancel_event,
+                )
 
             if progress_cb:
                 progress_cb("Processing response...")
@@ -1170,6 +1212,69 @@ class ToolServerClient:
             self._chunked_uploads = True
             remaining.pop(arg_name)
         return remaining, references
+
+    def _collect_detached(self, tool_name, run_id, response, schema, output_dir,
+                          progress_cb, event_cb, cancel_event) -> ToolResult:
+        """Wait on the event stream for the verdict, then fetch what it names.
+
+        A server that does not know the header answers the ordinary 200 with
+        the ordinary body, and that is handled here rather than guarded against
+        -- which is what lets one client speak to both.
+        """
+        if response.status_code != 202:
+            return self._build_result(tool_name, response, schema, output_dir, progress_cb)
+        response.close()
+
+        if progress_cb:
+            progress_cb(f"'{tool_name}' accepted; waiting for it to finish...")
+
+        terminal = self._await_terminal(run_id, event_cb, cancel_event)
+        if terminal is None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RunCancelled(f"'{tool_name}' was cancelled.", 499)
+            raise ServerToolError(
+                f"Lost track of '{tool_name}': the server accepted the run, but "
+                "its event stream ended without saying how it finished. The run "
+                f"id was {run_id}."
+            )
+
+        state = terminal.get("state")
+        if state == "cancelled":
+            raise RunCancelled(f"'{tool_name}' was cancelled.", 499)
+        if state != "done":
+            raise ServerToolError(
+                terminal.get("message") or f"'{tool_name}' failed on the server."
+            )
+
+        # The terminal event carries either a pointer to fetch, or a small
+        # answer inline for a tool whose output is text.
+        answer = terminal.get("result") or {}
+        reference = answer.get("result_ref")
+        if reference:
+            return self._download_reference(tool_name, reference, output_dir, progress_cb)
+        if "result" in answer:
+            return ToolResult(kind="text", text=answer["result"])
+        raise ServerToolError(
+            f"'{tool_name}' finished, but said nothing about where its result is."
+        )
+
+    def _await_terminal(self, run_id, event_cb, cancel_event):
+        """Read the stream to its end and hand back the event that ended it.
+
+        `watch_run` already reconnects on a dropped stream and dedupes on
+        `seq`, so this wait survives what a blocking POST could not: the
+        connection can go away and come back without losing the answer.
+        """
+        holder = {}
+
+        def capture(event):
+            if event.get("state") in TERMINAL_RUN_STATES:
+                holder["event"] = event
+            if event_cb is not None:
+                event_cb(event)
+
+        self.watch_run(run_id, capture, stop_event=cancel_event)
+        return holder.get("event")
 
     def _download_reference(
         self,
