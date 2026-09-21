@@ -212,7 +212,33 @@ class SceneLoader:
             return None
         node.SetName(artifact.name)
         self._owned.append(node)
+        if artifact.kind == index.MARKUPS:
+            self._draw_anyway(node)
         return node
+
+    @staticmethod
+    def _draw_anyway(node) -> None:
+        """Switch the display node ON, whatever the file says.
+
+        The ONE thing this panel overrides, and it is not a preference.
+        `"visibility": false` in a markups file does not mean small or grey --
+        it means Slicer builds the node, lists it in the Markups module and
+        draws NOTHING. Both original ALI CLIs wrote it; ALI fixed it, and
+        every fixture written before that still carries it, including all
+        four landmark files of the first sample this panel offers.
+
+        A viewer whose whole job is to draw cannot honour "do not draw". Size,
+        colour and slice projection stay the file's, because those are choices
+        a reader can disagree with. This one is a file saying the reader
+        should see nothing, which is never what they opened it for.
+        """
+        display = node.GetDisplayNode()
+        if display is None:
+            return
+        try:
+            display.SetVisibility(True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not show the landmarks: %s", exc)
 
     @staticmethod
     def jump_to(node) -> None:
