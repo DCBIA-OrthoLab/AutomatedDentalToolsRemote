@@ -589,14 +589,38 @@ class PanelTest(unittest.TestCase):
         self.widget.exit()
         self.assertEqual(SCENE, [])
 
-    def test_landmarks_are_unlocked_point_by_point(self):
-        # ALI writes every control point locked, so a file loaded as it comes
-        # refuses to move.
+    def test_landmarks_start_locked_and_unlock_point_by_point(self):
+        # Locked at rest: a point nudged by a stray drag while scrolling is a
+        # correction nobody made and nobody sees. ALI locks each POINT and
+        # leaves the node unlocked, so both levels have to be set or the
+        # points go on refusing to move.
         self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json"])
-        markups = [node for node in SCENE if node.path.endswith(".mrk.json")]
-        self.assertEqual(len(markups), 1)
-        self.assertFalse(markups[0].locked)
-        self.assertEqual(markups[0].points, [False, False])
+        points = [node for node in SCENE if node.path.endswith(".mrk.json")][0]
+        self.assertTrue(points.locked)
+        self.assertEqual(points.points, [True, True])
+
+        self.widget.lockButton.setChecked(True)
+        self.widget.onLockToggled()
+        self.assertFalse(points.locked)
+        self.assertEqual(points.points, [False, False])
+        self.assertIn("Unlocked", self.widget.lockButton.text)
+
+    def test_the_lock_survives_stepping_to_the_next_patient(self):
+        # Freshly loaded nodes carry the file's own flags; unlocking once
+        # must not be undone by the next arrow.
+        self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json",
+                   "scans/p2_scan.nii.gz", "scans/p2_scan_lm_Pred.mrk.json"])
+        self.widget.lockButton.setChecked(True)
+        self.widget.onLockToggled()
+        self.widget.onNext()
+        points = [node for node in SCENE if node.path.endswith(".mrk.json")][0]
+        self.assertFalse(points.locked, "the next patient came back locked")
+
+    def test_the_button_says_the_state_it_is_in(self):
+        # A button reading "Unlock" while the points are already unlocked is
+        # the classic way to get this wrong.
+        self.assertIn("Locked", self.widget.lockButton.text)
+        self.assertNotIn("Unlocked", self.widget.lockButton.text)
 
     def test_the_panel_says_which_scan_the_points_are_drawn_on(self):
         # What ASO actually writes: the oriented scan, its landmarks and its

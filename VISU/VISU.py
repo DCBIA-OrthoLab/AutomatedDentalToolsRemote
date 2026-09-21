@@ -97,6 +97,12 @@ VOLUME_RENDERING = "CT-AAA"
 # shown.
 SEGMENTATION = "segmentation"
 
+# What the lock button reads in each of its two states. The word is the state
+# it is IN, not the action -- a button that says "Unlock" while the points are
+# already unlocked is the classic way to get this wrong.
+LOCKED_TEXT = "Locked"
+UNLOCKED_TEXT = "Unlocked - points can be dragged"
+
 # VISU draws a landmark exactly as its file asks. A `.mrk.json` carries three
 # fields for it -- `glyphScale` (percent of the view), `glyphSize`
 # (millimetres) and `useGlyphScale`, which picks between them -- and they are
@@ -206,8 +212,6 @@ class SceneLoader:
             return None
         node.SetName(artifact.name)
         self._owned.append(node)
-        if artifact.kind == index.MARKUPS:
-            self._unlock(node)
         return node
 
     @staticmethod
@@ -226,20 +230,25 @@ class SceneLoader:
             logger.warning("Could not jump to a landmark: %s", exc)
 
     @staticmethod
-    def _unlock(node) -> None:
-        """Let the points be dragged.
+    def set_locked(node, locked: bool) -> None:
+        """Lock or unlock every point of one markups node.
 
-        ALI writes every control point with `"locked": true` -- the node itself
-        is unlocked, each point is not -- so a landmark loaded as it comes
-        refuses to move and the view looks broken rather than read-only. The
-        file keeps its own flags; only the node in this scene is changed.
+        LOCKED is the resting state, and deliberately: a landmark set is
+        opened to be read far more often than to be changed, and a point
+        nudged by a stray drag while scrolling is a correction nobody made
+        and nobody sees. Unlocking is one click and it is visible.
+
+        ALI writes each control point with `"locked": true` and the node
+        itself unlocked, so both levels are set: a node-level unlock alone
+        leaves every point refusing to move. The FILE keeps its own flags --
+        only the node in this scene is touched.
         """
         try:
-            node.SetLocked(False)
+            node.SetLocked(locked)
             for point in range(node.GetNumberOfControlPoints()):
-                node.SetNthControlPointLocked(point, False)
+                node.SetNthControlPointLocked(point, locked)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not unlock the landmarks: %s", exc)
+            logger.warning("Could not set the landmark lock: %s", exc)
 
     @staticmethod
     def draw_on_slices(node) -> None:
@@ -516,15 +525,6 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         column = qt.QVBoxLayout(box)
 
         column.addWidget(design.hint_label(_(
-            "Drag a point in a slice or in 3D, then save. Only the points that "
-            "actually moved are written, and everything else in the file is left "
-            "exactly as the tool wrote it."
-        )))
-        self.saveLandmarksButton = design.primary_button(_("Save landmarks"))
-        self.saveLandmarksButton.connect("clicked()", self.onSaveLandmarks)
-        column.addWidget(self.saveLandmarksButton)
-
-        column.addWidget(design.hint_label(_(
             "Adjust position puts the scan under a transform you can drag. "
             "Saving writes that displacement beside it as a .tfm; the scan "
             "itself is never rewritten."
@@ -577,6 +577,24 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         row.addWidget(self.nextButton, 1)
 
         self.panel.addLayout(row)
+
+        # Under the arrows because this is where the reader's hands are while
+        # they step: the lock says whether a drag can happen at all, and Save
+        # is what a correction is worth nothing without.
+        actions = qt.QHBoxLayout()
+        actions.setSpacing(design.SPACING_SM)
+        self.lockButton = design.toggle_button(_(LOCKED_TEXT))
+        self.lockButton.toolTip = _(
+            "Landmarks are locked so a stray drag cannot move one. Unlock to "
+            "correct a point, then Save."
+        )
+        self.lockButton.connect("clicked()", self.onLockToggled)
+        actions.addWidget(self.lockButton, 1)
+
+        self.saveButton = design.primary_button(_("Save landmarks"))
+        self.saveButton.connect("clicked()", self.onSaveLandmarks)
+        actions.addWidget(self.saveButton, 1)
+        self.panel.addLayout(actions)
 
     # -- settings ----------------------------------------------------------
 
@@ -667,6 +685,17 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             box = self.showGroup.boxes.get(label)
             if box is not None:
                 box.setEnabled(kind in present)
+
+    def onLockToggled(self) -> None:
+        """Lock or unlock what is on screen, and say which it now is."""
+        self.lockButton.setText(_(UNLOCKED_TEXT if self.lockButton.isChecked()
+                                  else LOCKED_TEXT))
+        self._applyLock()
+
+    def _applyLock(self) -> None:
+        locked = not self.lockButton.isChecked()
+        for _artifact, node in self._points:
+            self.scene.set_locked(node, locked)
 
     def onShowChanged(self, *_args) -> None:
         # `reframe=False`: ticking a chip changes WHAT is on screen, never
@@ -772,6 +801,10 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             if overlay.kind == index.MARKUPS:
                 points.append(node)
                 self._points.append((overlay, node))
+        # Freshly loaded nodes carry the file's own flags; the reader's choice
+        # is applied over them, so stepping to the next patient does not
+        # quietly re-lock what they unlocked.
+        self._applyLock()
         self.scene.display(anchor, anchor_node, label_node, reframe=reframe)
         if reframe and points:
             # The slices open on the volume's centre and the points are not
