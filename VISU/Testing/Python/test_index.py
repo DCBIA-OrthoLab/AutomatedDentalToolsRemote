@@ -1,0 +1,245 @@
+"""The index, against the folder shapes the tools actually produce.
+
+Every tree here is taken from a real tool's naming code rather than invented:
+ALI writes landmarks and no scan, ASO writes an oriented scan BESIDE its
+landmarks, AMASSS puts the scan's stem in a folder name, Crown_Seg files half
+a batch one level deeper than the other half.
+"""
+
+import os
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+from VISULib import index  # noqa: E402
+
+
+def tree(root, paths):
+    for relative in paths:
+        full = os.path.join(root, relative)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as handle:
+            handle.write("x")
+
+
+class PatientStemTest(unittest.TestCase):
+    def test_every_tool_s_name_for_one_patient_answers_the_same(self):
+        for filename in (
+            "P1_scan.nii.gz",            # the acquisition
+            "P1_scan_lm_Pred.mrk.json",  # ALI
+            "P1_Or.nii.gz",              # ASO's oriented scan
+            "P1_lm_Or.mrk.json",         # ASO's landmarks
+            "P1_Seg.vtk",                # Crown_Seg
+            "P1_MERGED.nii.gz",          # AMASSS merged
+        ):
+            self.assertEqual(index.patient_stem(filename), "P1", filename)
+
+    def test_a_suffix_inside_a_token_does_not_truncate(self):
+        # `P_Seg1` and `P_Seg2` are two subjects. Matching `_Seg` anywhere
+        # collapsed them onto one upstream, and lost one of them.
+        self.assertEqual(index.patient_stem("P_Seg1_T1.nii.gz"), "P_Seg1_T1")
+        self.assertEqual(index.patient_stem("P_Seg2_T1.nii.gz"), "P_Seg2_T1")
+
+    def test_timepoints_are_separate_scans_unless_asked(self):
+        self.assertEqual(index.patient_stem("P1_T1_scan.nii.gz"), "P1_T1")
+        self.assertEqual(
+            index.patient_stem("P1_T1_scan.nii.gz", drop_timepoint=True), "P1"
+        )
+
+    def test_a_name_that_is_only_a_suffix_keeps_it(self):
+        self.assertEqual(index.patient_stem("_Or.nii.gz"), "_Or")
+
+
+class KindTest(unittest.TestCase):
+    def test_a_mask_token_makes_a_scan_labelled_voxels(self):
+        self.assertEqual(index.kind_of("P1_scan.nii.gz"), index.VOLUME)
+        self.assertEqual(index.kind_of("P1_Pred_MAND.nii.gz"), index.LABELMAP)
+        self.assertEqual(index.kind_of("P1_seg.nii.gz"), index.LABELMAP)
+
+    def test_a_patient_named_after_a_token_is_not_a_mask(self):
+        # Whole tokens: `"seg" in name` would make SEGOVIA_01 a segmentation.
+        self.assertEqual(index.kind_of("SEGOVIA_01.nii.gz"), index.VOLUME)
+
+    def test_the_other_kinds(self):
+        self.assertEqual(index.kind_of("P1_lm_Pred.mrk.json"), index.MARKUPS)
+        self.assertEqual(index.kind_of("arch.vtk"), index.MODEL)
+        self.assertEqual(index.kind_of("P1_Or_transform.tfm"), index.TRANSFORM)
+        self.assertIsNone(index.kind_of("notes.txt"))
+
+
+class BuildTest(unittest.TestCase):
+    def test_ali_landmarks_and_the_scan_they_belong_to_are_one_case(self):
+        with tempfile.TemporaryDirectory() as root:
+            tree(root, ["scans/P1_scan.nii.gz", "out/P1_scan_lm_Pred.mrk.json"])
+            cases = index.build(
+                [("Scans", os.path.join(root, "scans")),
+                 ("Results", os.path.join(root, "out"))]
+            )
+            self.assertEqual([case.key for case in cases], ["P1"])
+            self.assertEqual(len(cases[0].artifacts), 2)
+
+    def test_reports_and_killed_run_scratch_are_not_patients(self):
+        with tempfile.TemporaryDirectory() as root:
+            tree(root, [
+                "out/P1_scan_lm_Pred.mrk.json",
+                "out/run_report.json",
+                "out/AMASSS_report.json",
+                "out/.amasss_work/p_000_0000.nii.gz",
+            ])
+            cases = index.build([("Results", os.path.join(root, "out"))])
+            self.assertEqual([case.key for case in cases], ["P1"])
+
+    def test_two_patients_of_the_same_name_in_different_folders_stay_apart(self):
+        with tempfile.TemporaryDirectory() as root:
+            tree(root, ["out/siteA/p01_scan.nii.gz", "out/siteB/p01_scan.nii.gz"])
+            cases = index.build([("Results", os.path.join(root, "out"))])
+            self.assertEqual(
+                [case.key for case in cases],
+                [os.path.join("siteA", "p01"), os.path.join("siteB", "p01")],
+            )
+
+    def test_amasss_takes_the_patient_from_the_folder_it_invented(self):
+        # `<stem>_<prediction_ID>_SegOut/` is the only place the scan's stem
+        # survives: the files inside carry a free-text id in the middle.
+        with tempfile.TemporaryDirectory() as root:
+            tree(root, [
+                "scans/MG_test_scan.nii.gz",
+                "out/MG_test_scan_Pred_SegOut/MG_test_scan_Pred_MAND.nii.gz",
+                "out/MG_test_scan_Pred_SegOut/MG_test_scan_Pred_CB.nii.gz",
+            ])
+            cases = index.build(
+                [("Scans", os.path.join(root, "scans")),
+                 ("Results", os.path.join(root, "out"))]
+            )
+            self.assertEqual([case.key for case in cases], ["MG_test"])
+            self.assertEqual(len(cases[0].artifacts), 3)
+
+    def test_crown_seg_s_two_branches_land_in_one_case_each(self):
+        with tempfile.TemporaryDirectory() as root:
+            tree(root, [
+                "out/siteA/passed_Seg.vtk",                      # already labelled
+                "out/crownseg_input_Seg/siteA/fresh_Seg.vtk",     # segmented here
+            ])
+            cases = index.build([("Results", os.path.join(root, "out"))])
+            self.assertEqual(
+                [case.key for case in cases],
+                [os.path.join("siteA", "fresh"), os.path.join("siteA", "passed")],
+            )
+
+
+class RealShapesTest(unittest.TestCase):
+    """The three shapes the hosted test data has and a suffix table misses."""
+
+    def test_a_dicom_series_is_one_volume_named_after_its_folder(self):
+        # 577 slices called IMG0375.dcm are one scan, and the folder is the
+        # only place its patient name appears.
+        with tempfile.TemporaryDirectory() as root:
+            tree(root, [
+                "scans/CBCT_DCM/IC_0005/IMG0001.dcm",
+                "scans/CBCT_DCM/IC_0005/IMG0002.dcm",
+                "scans/CBCT_DCM/IC_0005_lm_Pred.mrk.json",
+            ])
+            cases = index.build([("Scans", os.path.join(root, "scans"))])
+            self.assertEqual([case.key for case in cases],
+                             [os.path.join("CBCT_DCM", "IC_0005")])
+            kinds = sorted(artifact.kind for artifact in cases[0].artifacts)
+            self.assertEqual(kinds, [index.MARKUPS, index.VOLUME])
+            series = cases[0].of_kind(index.VOLUME)[0]
+            self.assertTrue(os.path.isdir(series.path))
+
+    def test_a_bare_json_counts_as_markups_only_when_it_is_some(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "out"))
+            landmarks = os.path.join(root, "out", "P1_Upper_O_Pred.json")
+            with open(landmarks, "w", encoding="utf-8") as handle:
+                handle.write('{"@schema": "x", "markups": [{"type": "Fiducial"}]}')
+            with open(os.path.join(root, "out", "settings.json"), "w",
+                      encoding="utf-8") as handle:
+                handle.write('{"device": "cuda"}')
+            cases = index.build([("Results", os.path.join(root, "out"))])
+            self.assertEqual([case.key for case in cases], ["P1_Upper_O_Pred"])
+            self.assertEqual(cases[0].artifacts[0].kind, index.MARKUPS)
+
+    def test_aso_ios_landmarks_reach_the_surface_they_do_not_share_a_stem_with(self):
+        # `Upper_new_9.vtk` and `Upper_new_9_Upper_O_Pred.json`, the hosted
+        # IOS_SemiAuto pair. No suffix table reaches it; a token-aligned
+        # prefix does.
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "ios"))
+            with open(os.path.join(root, "ios", "Upper_new_9.vtk"), "w") as handle:
+                handle.write("x")
+            with open(os.path.join(root, "ios", "Upper_new_9_Upper_O_Pred.json"),
+                      "w", encoding="utf-8") as handle:
+                handle.write('{"markups": []}')
+            cases = index.build([("Scans", os.path.join(root, "ios"))])
+            self.assertEqual([case.key for case in cases], ["Upper_new_9"])
+            self.assertEqual(len(cases[0].artifacts), 2)
+
+    def test_a_prefix_that_is_another_patient_does_not_absorb_it(self):
+        # `P1` and `P10` are two patients. Matching on substring paired them
+        # upstream and padded the list with a sentinel to hide it.
+        self.assertTrue(index.is_token_prefix("P1", "P1_lm_Pred"))
+        self.assertFalse(index.is_token_prefix("P1", "P10_lm_Pred"))
+        self.assertFalse(index.is_token_prefix("P1", "P1"))
+
+
+class ViewTest(unittest.TestCase):
+    """Which scan an overlay is drawn on. The one thing that must not lie."""
+
+    def _case(self, root, paths, sources):
+        tree(root, paths)
+        cases = index.build([(label, os.path.join(root, path)) for label, path in sources])
+        self.assertEqual(len(cases), 1, [case.key for case in cases])
+        return cases[0]
+
+    def test_aso_landmarks_bind_to_the_oriented_scan_not_the_original(self):
+        # ASO's points carry the recentring AND the ICP rotation, so they match
+        # the scan ASO WROTE. Drawn on the acquisition they render fine and are
+        # wrong by a rotation.
+        with tempfile.TemporaryDirectory() as root:
+            case = self._case(
+                root,
+                ["scans/P1_scan.nii.gz",
+                 "out/P1_Or.nii.gz",
+                 "out/P1_lm_Or.mrk.json",
+                 "out/P1_Or_transform.tfm"],
+                [("Scans", "scans"), ("Results", "out")],
+            )
+            views = case.views(acquisition="Scans")
+            with_points = [view for view in views if view.overlays]
+            self.assertEqual(len(with_points), 1)
+            self.assertEqual(with_points[0].anchor.name, "P1_Or.nii.gz")
+            self.assertEqual(with_points[0].basis, index.BASIS_COLOCATED)
+            # And the acquisition is still offered, carrying nothing.
+            self.assertIn("P1_scan.nii.gz", [view.label for view in views])
+
+    def test_ali_landmarks_fall_back_to_the_acquisition_and_say_so(self):
+        # ALI writes no scan at all, so its points can only be drawn on the
+        # input -- where they are right, measured at 0.000 mm against ITK.
+        with tempfile.TemporaryDirectory() as root:
+            case = self._case(
+                root,
+                ["scans/P1_scan.nii.gz", "out/P1_scan_lm_Pred.mrk.json"],
+                [("Scans", "scans"), ("Results", "out")],
+            )
+            views = case.views(acquisition="Scans")
+            with_points = [view for view in views if view.overlays]
+            self.assertEqual(len(with_points), 1)
+            self.assertEqual(with_points[0].anchor.name, "P1_scan.nii.gz")
+            self.assertEqual(with_points[0].basis, index.BASIS_ACQUISITION)
+
+    def test_landmarks_with_no_scan_anywhere_are_offered_without_one(self):
+        with tempfile.TemporaryDirectory() as root:
+            case = self._case(
+                root, ["out/P1_scan_lm_Pred.mrk.json"], [("Results", "out")]
+            )
+            views = case.views(acquisition="Scans")
+            self.assertEqual(len(views), 1)
+            self.assertIsNone(views[0].anchor)
+            self.assertEqual(views[0].basis, index.BASIS_NONE)
+
+
+if __name__ == "__main__":
+    unittest.main()
