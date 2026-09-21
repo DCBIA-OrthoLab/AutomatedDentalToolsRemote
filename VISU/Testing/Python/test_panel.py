@@ -148,7 +148,32 @@ slicer.vtkMRMLLayoutNode = types.SimpleNamespace(
     SlicerLayoutFourUpView="four-up", SlicerLayoutOneUp3DView="3d",
 )
 LAYERS = {}
+class _Composite:
+    """A slice composite node: what really decides what a slice pane shows."""
+
+    def __init__(self):
+        self.background = None
+        self.label = None
+
+    def SetBackgroundVolumeID(self, node_id):
+        self.background = node_id
+
+    def SetLabelVolumeID(self, node_id):
+        self.label = node_id
+
+
+COMPOSITES = [_Composite(), _Composite(), _Composite()]
+
+
+def _nodes_by_class(name):
+    if name == "vtkMRMLSliceCompositeNode":
+        return COMPOSITES
+    return [n for n in SCENE if getattr(n, "kind_class", None) == name]
+
+
 slicer.util = types.SimpleNamespace(
+    getNodesByClass=_nodes_by_class,
+    resetSliceViews=lambda: LAYERS.update(fit=True),
     setSliceViewerLayers=lambda **kwargs: LAYERS.update(kwargs),
     showStatusMessage=lambda *_a, **_k: None,
     saveNode=lambda node, path: SAVED.append(path),
@@ -311,6 +336,8 @@ class PanelTest(unittest.TestCase):
     def setUp(self):
         del SCENE[:]
         LAYERS.clear()
+        for composite in COMPOSITES:
+            composite.background = composite.label = None
         VIEWS.update(layout=None, framed=0)
         del VIEWS["rendered"][:]
         del OPENED[:]
@@ -365,7 +392,7 @@ class PanelTest(unittest.TestCase):
         # on; so does this one.
         self.open(["scans/p1_scan.nii.gz"])
         self.assertEqual(VIEWS["layout"], "four-up")
-        self.assertEqual(VIEWS["rendered"], [(LAYERS["background"].path, "CT-AAA")])
+        self.assertEqual(VIEWS["rendered"], [(COMPOSITES[0].background, "CT-AAA")])
         self.assertGreaterEqual(VIEWS["framed"], 1)
 
     def test_a_mesh_gets_the_3d_view_to_itself(self):
@@ -386,12 +413,13 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(opened["p1_scan.nii.gz"], "volume")
         for mask in ("p1_Pred_MAND.nii.gz", "p1_Pred_MAX.nii.gz", "p1_Pred_CB.nii.gz"):
             self.assertEqual(opened[mask], "segmentation", mask)
-        self.assertIsNone(LAYERS.get("label"), "one mask was made the label layer")
+        self.assertTrue(all(c.label is None for c in COMPOSITES),
+                        "one mask was made the label layer")
 
     def test_a_single_mask_stays_the_label_layer(self):
         self.open(["scans/p1_scan.nii.gz", "scans/p1_Pred_MAND.nii.gz"])
         self.assertEqual(dict(OPENED)["p1_Pred_MAND.nii.gz"], "labelmap")
-        self.assertIsNotNone(LAYERS.get("label"))
+        self.assertTrue(all(c.label is not None for c in COMPOSITES))
 
     def test_a_mesh_on_a_scan_is_drawn_on_the_slices_too(self):
         # Where a reader checks whether a mesh sits on the anatomy it was
@@ -452,8 +480,11 @@ class PanelTest(unittest.TestCase):
         # the camera under someone who has just scrolled to what they were
         # checking.
         self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json"])
+        for composite in COMPOSITES:
+            composite.background = composite.label = None
         VIEWS.update(layout=None, framed=0)
         del JUMPS[:]
+        LAYERS.clear()
 
         self.widget.showGroup.boxes["Landmarks"].setChecked(False)
         self.widget.showGroup.boxes["Landmarks"].setChecked(True)
@@ -462,6 +493,8 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(VIEWS["framed"], 0, "the camera was recentred")
         self.assertEqual(JUMPS, [], "the slices moved")
         self.assertFalse(LAYERS.get("fit"), "the slices were refitted")
+        self.assertTrue(all(c.background is not None for c in COMPOSITES),
+                        "the scan left the slice views")
         # and the points are back on screen
         self.assertIn("p1_scan_lm_Pred.mrk.json",
                       [os.path.basename(n.path) for n in SCENE])

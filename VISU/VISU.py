@@ -286,9 +286,7 @@ class SceneLoader:
             else:
                 if reframe:
                     SceneLoader._layout("SlicerLayoutFourUpView")
-                slicer.util.setSliceViewerLayers(
-                    background=anchor_node, label=label_node, fit=reframe
-                )
+                SceneLoader._set_layers(anchor_node, label_node, fit=reframe)
                 if anchor_node is not None and anchor.kind == index.VOLUME:
                     # The same preset the CBCT panels use, with the shift
                     # `slicer_io` measured on a scan out of this pipeline.
@@ -297,6 +295,28 @@ class SceneLoader:
                 SceneLoader._frame3D()
         except Exception as exc:  # noqa: BLE001 - a view is never worth a failure
             logger.warning("Could not set the views up: %s", exc)
+
+    @staticmethod
+    def _set_layers(background, label, fit: bool) -> None:
+        """Put the scan in the slice views, through the SCENE.
+
+        NOT `slicer.util.setSliceViewerLayers`, and that is the whole point:
+        that helper walks the layout manager's current slice WIDGETS, and it
+        is called here one line after the layout was changed -- so it writes
+        into the views that are on their way out while the new ones come up
+        empty. Three grey panes with the volume loaded, visible, and windowed
+        correctly, which is what made this so hard to see.
+
+        A composite node lives in the MRML scene and survives any number of
+        layout changes, so setting it is order-independent by construction.
+        """
+        for composite in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
+            composite.SetBackgroundVolumeID(background.GetID() if background else None)
+            composite.SetLabelVolumeID(label.GetID() if label else None)
+        if fit:
+            # After the layers, and only when the picture changed: fitting is
+            # a camera move, and a reader who scrolled somewhere must keep it.
+            slicer.util.resetSliceViews()
 
     @staticmethod
     def _layout(name: str) -> None:
