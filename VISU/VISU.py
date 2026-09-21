@@ -90,6 +90,23 @@ VOLUME_RENDERING = "CT-AAA"
 # shown.
 SEGMENTATION = "segmentation"
 
+# What the check boxes offer, in the order they are drawn, and the kind each
+# one governs. Words a reader uses, not the loader's vocabulary: nobody calls
+# a mask a labelmap out loud.
+#
+# A TRANSFORM is on the list although there is nothing to draw: loaded, it is
+# a node the Transforms module can apply, which is the only way to see what a
+# registration did. Off by default for the same reason -- it shows nothing on
+# its own.
+SHOWABLE = (
+    ("Scan", index.VOLUME, True),
+    ("Masks", index.LABELMAP, True),
+    ("Surfaces", index.MODEL, True),
+    ("Landmarks", index.MARKUPS, True),
+    ("Transforms", index.TRANSFORM, False),
+)
+_KIND_OF_OPTION = {label: kind for label, kind, _on in SHOWABLE}
+
 # Read ahead by one, in a daemon thread, so pressing the arrow does not also
 # pay for the disk. It warms the page cache and touches no MRML node: loading
 # one is main-thread work whatever we do here, and a 130 MB CBCT that is
@@ -418,6 +435,15 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self.frameLabel = design.warning_label("")
         outer.addWidget(self.frameLabel)
 
+        # The same block every tool panel puts a multichoice in, `inline`
+        # because the words are short and there are five of them.
+        self.showGroup = formgen.MultiChoiceGroup(
+            {label: on for label, _kind, on in SHOWABLE}, layout="inline",
+        )
+        formgen.connect_changed(self.showGroup, self.onShowChanged)
+        outer.addWidget(design.section_title(_("Show")))
+        outer.addWidget(self.showGroup.container)
+
         self.contentsLabel = design.hint_label("")
         self.contentsLabel.setWordWrap(True)
         outer.addWidget(self.contentsLabel)
@@ -530,6 +556,15 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             self.position = position
             self._refresh()
 
+    def onShowChanged(self, *_args) -> None:
+        if not self._filling and not self._waiting:
+            self._show()
+
+    def wanted_kinds(self) -> set:
+        """The kinds the check boxes are letting through."""
+        return {_KIND_OF_OPTION[label]
+                for label, on in self.showGroup.value().items() if on}
+
     def onView(self, _position: int) -> None:
         if not self._filling and not self._waiting:
             self._show()
@@ -585,16 +620,26 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         position = max(0, self.viewCombo.currentIndex)
         view = self.views[min(position, len(self.views) - 1)]
 
-        anchor_node = self.scene.load(view.anchor) if view.anchor is not None else None
-        on_a_scan = view.anchor is not None and view.anchor.kind == index.VOLUME
-        masks = [o for o in view.overlays if o.kind == index.LABELMAP]
+        wanted = self.wanted_kinds()
+        anchor = view.anchor if (view.anchor is not None
+                                 and view.anchor.kind in wanted) else None
+        overlays = [o for o in view.overlays if o.kind in wanted]
+
+        anchor_node = self.scene.load(anchor) if anchor is not None else None
+        on_a_scan = anchor is not None and anchor.kind == index.VOLUME
+        masks = [o for o in overlays if o.kind == index.LABELMAP]
         # One mask can be the volume's label layer. Several cannot, so they
         # all become segmentations rather than one being shown and the rest
         # loaded invisibly -- which reads as a viewer that lost them.
         stack = on_a_scan and len(masks) > 1
 
         label_node = None
-        for overlay in view.overlays:
+        if index.TRANSFORM in wanted:
+            # Not an overlay: a transform has no geometry, so no view holds
+            # one. Taken from the case, which is where it sits.
+            for artifact in self.cases[self.position].of_kind(index.TRANSFORM):
+                self.scene.load(artifact)
+        for overlay in overlays:
             node = self.scene.load(overlay, opened_as=SEGMENTATION if
                                    (stack and overlay.kind == index.LABELMAP) else "")
             if node is None:
@@ -603,9 +648,9 @@ class VISUWidget(ScriptedLoadableModuleWidget):
                 label_node = node
             if overlay.kind == index.MODEL and on_a_scan:
                 self.scene.draw_on_slices(node)
-        self.scene.display(view.anchor, anchor_node, label_node)
+        self.scene.display(anchor, anchor_node, label_node)
 
-        if view.overlays:
+        if overlays:
             self.frameLabel.text = _("Overlays drawn on {scan} - {basis}").format(
                 scan=view.label, basis=view.basis
             )
@@ -617,7 +662,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             self.frameLabel.text = _("No landmarks or masks for this patient here.")
         self.contentsLabel.text = "\n".join(
             f"{artifact.kind}: {artifact.name}"
-            for artifact in [view.anchor] + view.overlays
+            for artifact in [anchor] + overlays
             if artifact is not None
         )
 

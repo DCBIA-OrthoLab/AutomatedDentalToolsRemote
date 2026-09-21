@@ -352,6 +352,42 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(len(mesh), 1)
         self.assertTrue(mesh[0].display.on_slices)
 
+    def test_unticking_a_kind_takes_it_off_the_screen(self):
+        self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json"])
+        self.assertEqual(len(SCENE), 2)
+
+        self.widget.showGroup.boxes["Landmarks"].setChecked(False)
+        self.assertEqual([os.path.basename(n.path) for n in SCENE],
+                         ["p1_scan.nii.gz"])
+
+        self.widget.showGroup.boxes["Landmarks"].setChecked(True)
+        self.assertEqual(len(SCENE), 2)
+
+    def test_unticking_the_scan_leaves_the_landmarks(self):
+        # Points on their own are what a reader wants when the scan is in the
+        # way -- and the panel must not then claim they are drawn on it.
+        self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json"])
+        self.widget.showGroup.boxes["Scan"].setChecked(False)
+        self.assertEqual([os.path.basename(n.path) for n in SCENE],
+                         ["p1_scan_lm_Pred.mrk.json"])
+
+    def test_transforms_are_off_until_asked_for(self):
+        # Nothing to draw, so nothing is loaded -- but ticked, the node is
+        # there for the Transforms module to apply.
+        self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_Or_transform.tfm"])
+        self.assertEqual([os.path.basename(n.path) for n in SCENE],
+                         ["p1_scan.nii.gz"])
+        self.widget.showGroup.boxes["Transforms"].setChecked(True)
+        self.assertIn("p1_scan_Or_transform.tfm",
+                      [os.path.basename(n.path) for n in SCENE])
+
+    def test_every_kind_has_a_box_and_they_start_the_way_they_mean_to(self):
+        boxes = self.widget.showGroup.value()
+        self.assertEqual(sorted(boxes),
+                         ["Landmarks", "Masks", "Scan", "Surfaces", "Transforms"])
+        self.assertFalse(boxes["Transforms"], "a transform draws nothing")
+        self.assertTrue(all(on for name, on in boxes.items() if name != "Transforms"))
+
     def test_a_patient_with_nothing_on_it_says_so(self):
         # `cohort_6` is six scans and no landmarks. A blank line there sends
         # the reader looking for a bug that is not one.
