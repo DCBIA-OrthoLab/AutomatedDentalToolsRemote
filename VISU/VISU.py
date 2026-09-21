@@ -59,19 +59,25 @@ SOURCE = "folder"
 # or a spreadsheet that a viewer has nothing to do with. Size does not separate
 # them either: 13 entries sit under 250 MB and 9 under 100.
 #
-# So it is chosen, and the choice is short. Each one holds at least three
-# subjects -- a viewer with one patient in it demonstrates nothing, the arrows
-# being the point -- and between them they cover both modalities. Counted with
-# this module's own index against the bundles on disk, not read off a README.
-# An entry the server does not have is simply not offered.
+# So it is chosen, and the rule the choice follows is: EVERY subject in it
+# carries landmarks. A scan on its own shows nothing this panel does that
+# opening the file would not -- the point is the several things that belong to
+# one scan, seen together -- and a sample where half the patients come up bare
+# teaches the reader that the panel lost them.
+#
+# Counted with this module's own index against the bundles on disk. Four
+# hosted folders pass that rule and only one of them holds three subjects, so
+# the other two are short: the server's test data is each tool's regression
+# fixture and was never assembled for looking at. `~/visu-testdata` is where a
+# richer one is kept, outside every repository.
 SAMPLE_DATA = (
-    # 3 subjects, CBCT and IOS, every one of them carrying the landmarks that
-    # were placed on it. The one to reach for first.
-    ("AREG", "IOSCBCT_RegTestFiles"),   # 233 MB
-    # 6 subjects of CBCT, for stepping through a cohort.
-    ("AMASSS", "cohort_6"),             # 592 MB
-    # 3 subjects, CBCT and IOS, no landmarks -- the geometry on its own.
-    ("AutoMatrix", "AutoMatrixRelease3"),  # 264 MB
+    # 3 subjects, CBCT and IOS, landmarks on every one. The one to reach for.
+    ("AREG", "IOSCBCT_RegTestFiles"),  # 233 MB
+    # 2 subjects of IOS, landmarks on both.
+    ("ASO", "IOS_SemiAuto"),           #  20 MB
+    # 1 subject, landmarks, and its scan is a DICOM SERIES -- the one path
+    # nothing else here exercises.
+    ("ASO", "CBCT_SemiAuto_DCM"),      # 680 MB
 )
 
 # What a CBCT is rendered with in 3D, and it is the tools' own choice: AMASSS
