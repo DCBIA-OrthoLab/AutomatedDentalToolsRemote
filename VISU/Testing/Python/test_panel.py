@@ -429,34 +429,42 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(len(mesh), 1)
         self.assertTrue(mesh[0].display.on_slices)
 
-    def test_unticking_a_kind_takes_it_off_the_screen(self):
+    def visible(self):
+        return sorted(os.path.basename(n.path) for n in SCENE if n.display.visible)
+
+    def test_unticking_a_kind_hides_it_without_unloading_anything(self):
+        # Unloading is what reset the view: the volume left the scene and was
+        # read off disk again -- a brand new node with none of the old one's
+        # view state.
         self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json"])
         self.assertEqual(len(SCENE), 2)
 
         self.widget.showGroup.boxes["Landmarks"].setChecked(False)
-        self.assertEqual([os.path.basename(n.path) for n in SCENE],
-                         ["p1_scan.nii.gz"])
+        self.assertEqual(len(SCENE), 2, "a chip unloaded something")
+        self.assertEqual(self.visible(), ["p1_scan.nii.gz"])
 
         self.widget.showGroup.boxes["Landmarks"].setChecked(True)
-        self.assertEqual(len(SCENE), 2)
+        self.assertEqual(self.visible(),
+                         ["p1_scan.nii.gz", "p1_scan_lm_Pred.mrk.json"])
 
     def test_unticking_the_scan_leaves_the_landmarks(self):
         # Points on their own are what a reader wants when the scan is in the
         # way -- and the panel must not then claim they are drawn on it.
         self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json"])
         self.widget.showGroup.boxes["CBCT"].setChecked(False)
-        self.assertEqual([os.path.basename(n.path) for n in SCENE],
-                         ["p1_scan_lm_Pred.mrk.json"])
+        self.assertEqual(self.visible(), ["p1_scan_lm_Pred.mrk.json"])
+        self.assertTrue(all(c.background is None for c in COMPOSITES),
+                        "the scan stayed in the slice views")
 
-    def test_transforms_are_off_until_asked_for(self):
-        # Nothing to draw, so nothing is loaded -- but ticked, the node is
-        # there for the Transforms module to apply.
+    def test_a_transform_is_loaded_but_not_shown_until_asked_for(self):
+        # It draws nothing either way; ticking it is what puts the node where
+        # the Transforms module can apply it.
         self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_Or_transform.tfm"])
-        self.assertEqual([os.path.basename(n.path) for n in SCENE],
-                         ["p1_scan.nii.gz"])
-        self.widget.showGroup.boxes["Transforms"].setChecked(True)
         self.assertIn("p1_scan_Or_transform.tfm",
                       [os.path.basename(n.path) for n in SCENE])
+        self.assertNotIn("p1_scan_Or_transform.tfm", self.visible())
+        self.widget.showGroup.boxes["Transforms"].setChecked(True)
+        self.assertIn("p1_scan_Or_transform.tfm", self.visible())
 
     def test_the_slices_go_to_a_landmark_when_a_patient_opens(self):
         # Measured on the hosted CBCT: the volume spans 230 mm, opens on its
@@ -480,9 +488,9 @@ class PanelTest(unittest.TestCase):
         # their absence.
         self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json",
                    "scans/p1_scan_Seg.vtk"])
-        for node in SCENE:
-            self.assertTrue(node.display.visible,
-                            f"{os.path.basename(node.path)} was loaded invisible")
+        self.assertEqual(self.visible(), ["p1_scan.nii.gz",
+                                          "p1_scan_Seg.vtk",
+                                          "p1_scan_lm_Pred.mrk.json"])
 
     def test_a_file_that_says_do_not_draw_is_drawn_anyway(self):
         # `"visibility": false` builds the node and draws nothing. Both

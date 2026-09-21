@@ -183,8 +183,12 @@ class SceneLoader:
 
     def __init__(self):
         self._owned = []
+        # [(artifact, node)], so visibility can be re-decided per kind without
+        # anything being read off disk again.
+        self._shown = []
 
     def clear(self) -> None:
+        self._shown = []
         for node in self._owned:
             try:
                 slicer.mrmlScene.RemoveNode(node)
@@ -213,7 +217,21 @@ class SceneLoader:
         node.SetName(artifact.name)
         self._owned.append(node)
         self._draw(node)
+        self._shown.append((artifact, node))
         return node
+
+    def shown(self) -> list:
+        return list(self._shown)
+
+    @staticmethod
+    def set_visible(node, visible: bool) -> None:
+        display = node.GetDisplayNode()
+        if display is None:
+            return
+        try:
+            display.SetVisibility(bool(visible))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not hide or show %s: %s", node.GetName(), exc)
 
     @staticmethod
     def _draw(node) -> None:
@@ -752,12 +770,30 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             self.scene.set_locked(node, locked)
 
     def onShowChanged(self, *_args) -> None:
-        # `reframe=False`: ticking a chip changes WHAT is on screen, never
-        # where the reader is looking. Relaying out the panel and recentring
-        # the camera under someone who has just scrolled to the tooth they
-        # were checking is the one thing a viewer must not do.
+        """A chip changes what is VISIBLE, and nothing else.
+
+        Not `_show`: that clears the scene and reads every file again, which
+        is where the reset came from. Nothing is loaded, unloaded, relaid out
+        or recentred here -- a reader who has scrolled to the tooth they were
+        checking is still looking at it.
+        """
         if not self._filling and not self._waiting:
-            self._show(reframe=False)
+            self._applyVisibility(reframe=False)
+
+    def _applyVisibility(self, reframe: bool) -> None:
+        """Show what the chips ask for, out of what is already loaded."""
+        wanted = self.wanted_kinds()
+        for artifact, node in self.scene.shown():
+            self.scene.set_visible(node, artifact.kind in wanted)
+
+        anchor, anchor_node, label_node = getattr(
+            self, "_anchorLayers", (None, None, None))
+        on = anchor is not None and anchor.kind in wanted
+        self.scene.display(anchor if on else None,
+                           anchor_node if on else None,
+                           label_node if label_node is not None
+                           and index.LABELMAP in wanted else None,
+                           reframe=reframe)
 
     def wanted_kinds(self) -> set:
         """The kinds the check boxes are letting through."""
@@ -822,10 +858,14 @@ class VISUWidget(ScriptedLoadableModuleWidget):
 
         self._points = []
         self._adjustment = None
-        wanted = self.wanted_kinds()
-        anchor = view.anchor if (view.anchor is not None
-                                 and view.anchor.kind in wanted) else None
-        overlays = [o for o in view.overlays if o.kind in wanted]
+        # Everything the case holds is LOADED; the chips decide what is
+        # SHOWN. Filtering here instead meant a tick tore the volume out of
+        # the scene and read it off disk again -- 2.6 s, a brand new node, and
+        # every view setting attached to the old one gone. Slicer already has
+        # a visibility switch per node; a chip is that switch, put where a
+        # reader's hands are.
+        anchor = view.anchor
+        overlays = list(view.overlays)
 
         anchor_node = self.scene.load(anchor) if anchor is not None else None
         self._anchorNode = anchor_node
@@ -838,11 +878,10 @@ class VISUWidget(ScriptedLoadableModuleWidget):
 
         label_node = None
         points = []
-        if index.TRANSFORM in wanted:
-            # Not an overlay: a transform has no geometry, so no view holds
-            # one. Taken from the case, which is where it sits.
-            for artifact in self.cases[self.position].of_kind(index.TRANSFORM):
-                self.scene.load(artifact)
+        # Not an overlay: a transform has no geometry, so no view holds one.
+        # Taken from the case, which is where it sits.
+        for artifact in self.cases[self.position].of_kind(index.TRANSFORM):
+            self.scene.load(artifact)
         for overlay in overlays:
             node = self.scene.load(overlay, opened_as=SEGMENTATION if
                                    (stack and overlay.kind == index.LABELMAP) else "")
@@ -859,7 +898,8 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # is applied over them, so stepping to the next patient does not
         # quietly re-lock what they unlocked.
         self._applyLock()
-        self.scene.display(anchor, anchor_node, label_node, reframe=reframe)
+        self._anchorLayers = (anchor, anchor_node, label_node)
+        self._applyVisibility(reframe=reframe)
         if reframe and points:
             # The slices open on the volume's centre and the points are not
             # there. One of them has to be, or the chip looks broken.
