@@ -83,8 +83,18 @@ class _Node:
     def GetDisplayNode(self):
         return self.display
 
+    def GetID(self):
+        return self.path
+
 
 slicer.mrmlScene = types.SimpleNamespace(RemoveNode=lambda node: SCENE.remove(node))
+
+# Where the slices were sent, and by whom. A viewer that opens on a slice
+# holding none of the points looks broken.
+JUMPS = []
+slicer.modules = types.SimpleNamespace(markups=types.SimpleNamespace(
+    logic=lambda: types.SimpleNamespace(
+        JumpSlicesToNthPointInMarkup=lambda node_id, n, centred: JUMPS.append(node_id))))
 
 # The views, observable. Loading a node is not showing it, and which layout a
 # case lands in is the difference between a viewer and a file loader.
@@ -155,9 +165,21 @@ OPENED = []
 class _Display:
     def __init__(self):
         self.on_slices = False
+        self.absolute = None
+        self.size = None
+        self.visible = None
 
     def SetVisibility2D(self, visible):
         self.on_slices = bool(visible)
+
+    def SetUseGlyphScale(self, relative):
+        self.absolute = not relative
+
+    def SetGlyphSize(self, size):
+        self.size = size
+
+    def SetVisibility(self, visible):
+        self.visible = bool(visible)
 
 
 def _loader(path, kind):
@@ -267,6 +289,7 @@ class PanelTest(unittest.TestCase):
         VIEWS.update(layout=None, framed=0)
         del VIEWS["rendered"][:]
         del OPENED[:]
+        del JUMPS[:]
         qt_stubs.QSettings.store.clear()
         self.root = tempfile.TemporaryDirectory()
         self.addCleanup(self.root.cleanup)
@@ -380,6 +403,39 @@ class PanelTest(unittest.TestCase):
                          ["p1_scan.nii.gz"])
         self.widget.showGroup.boxes["Transforms"].setChecked(True)
         self.assertIn("p1_scan_Or_transform.tfm",
+                      [os.path.basename(n.path) for n in SCENE])
+
+    def test_the_slices_go_to_a_landmark_when_a_patient_opens(self):
+        # Measured on the hosted CBCT: the volume spans 230 mm, opens on its
+        # centre, and its points sit up to 60 mm away -- so every one of them
+        # is off-slice and the chip looks broken.
+        self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json"])
+        self.assertEqual(len(JUMPS), 1)
+
+    def test_a_landmark_is_sized_in_millimetres_not_in_percent(self):
+        self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json"])
+        points = [n for n in SCENE if n.path.endswith(".mrk.json")][0]
+        self.assertTrue(points.display.absolute, "still a percentage of the view")
+        self.assertEqual(points.display.size, VISU.LANDMARK_SIZE_MM)
+        self.assertTrue(points.display.visible)
+
+    def test_ticking_a_chip_does_not_move_the_reader(self):
+        # The one thing a viewer must not do: relay out the panel and recentre
+        # the camera under someone who has just scrolled to what they were
+        # checking.
+        self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json"])
+        VIEWS.update(layout=None, framed=0)
+        del JUMPS[:]
+
+        self.widget.showGroup.boxes["Landmarks"].setChecked(False)
+        self.widget.showGroup.boxes["Landmarks"].setChecked(True)
+
+        self.assertIsNone(VIEWS["layout"], "the layout was reset")
+        self.assertEqual(VIEWS["framed"], 0, "the camera was recentred")
+        self.assertEqual(JUMPS, [], "the slices moved")
+        self.assertFalse(LAYERS.get("fit"), "the slices were refitted")
+        # and the points are back on screen
+        self.assertIn("p1_scan_lm_Pred.mrk.json",
                       [os.path.basename(n.path) for n in SCENE])
 
     def test_a_mesh_is_a_surface_and_never_the_cbct_chip(self):

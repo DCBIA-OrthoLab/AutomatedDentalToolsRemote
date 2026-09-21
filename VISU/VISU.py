@@ -97,6 +97,11 @@ VOLUME_RENDERING = "CT-AAA"
 # shown.
 SEGMENTATION = "segmentation"
 
+# How big a landmark is drawn, in millimetres of the patient rather than in
+# percent of the view. 3 mm reads on a 230 mm CBCT and does not bury a tooth
+# on a 60 mm arch.
+LANDMARK_SIZE_MM = 3.0
+
 # What the check boxes offer, in the order they are drawn, and the kind each
 # one governs. Words a reader uses, not the loader's vocabulary: nobody calls
 # a mask a labelmap out loud.
@@ -195,7 +200,42 @@ class SceneLoader:
         self._owned.append(node)
         if artifact.kind == index.MARKUPS:
             self._unlock(node)
+            self._make_visible(node)
         return node
+
+    @staticmethod
+    def _make_visible(node) -> None:
+        """Give the points a size a reader can find on a CBCT.
+
+        Slicer sizes a glyph as a PERCENTAGE of the view, default 2. On a
+        230 mm field that is a speck, and on a mesh 60 mm across it is a
+        boulder -- the same number cannot serve both. An absolute millimetre
+        size does, and it is also what a clinician judges a landmark by.
+        """
+        display = node.GetDisplayNode()
+        if display is None:
+            return
+        try:
+            display.SetUseGlyphScale(False)
+            display.SetGlyphSize(LANDMARK_SIZE_MM)
+            display.SetVisibility(True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not size the landmarks: %s", exc)
+
+    @staticmethod
+    def jump_to(node) -> None:
+        """Bring the slices to the first point.
+
+        Measured on the hosted CBCT: the volume spans 230 mm and opens on its
+        centre, while its landmarks sit up to 60 mm away -- so every one of
+        them is off-slice and the reader presses the chip and sees nothing.
+        """
+        try:
+            logic = slicer.modules.markups.logic()
+            if node.GetNumberOfControlPoints():
+                logic.JumpSlicesToNthPointInMarkup(node.GetID(), 0, True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not jump to a landmark: %s", exc)
 
     @staticmethod
     def _unlock(node) -> None:
@@ -229,7 +269,7 @@ class SceneLoader:
             logger.warning("Could not draw a surface on the slices: %s", exc)
 
     @staticmethod
-    def display(anchor, anchor_node, label_node) -> None:
+    def display(anchor, anchor_node, label_node, reframe: bool = True) -> None:
         """Put the case on screen the way it is meant to be read.
 
         Loading a node is not showing it. A volume lands in the slice views
@@ -244,17 +284,20 @@ class SceneLoader:
         """
         try:
             if anchor is not None and anchor.kind == index.MODEL:
-                SceneLoader._layout("SlicerLayoutOneUp3DView")
+                if reframe:
+                    SceneLoader._layout("SlicerLayoutOneUp3DView")
             else:
-                SceneLoader._layout("SlicerLayoutFourUpView")
+                if reframe:
+                    SceneLoader._layout("SlicerLayoutFourUpView")
                 slicer.util.setSliceViewerLayers(
-                    background=anchor_node, label=label_node, fit=True
+                    background=anchor_node, label=label_node, fit=reframe
                 )
                 if anchor_node is not None and anchor.kind == index.VOLUME:
                     # The same preset the CBCT panels use, with the shift
                     # `slicer_io` measured on a scan out of this pipeline.
                     slicer_io.show_volume_rendering(anchor_node, VOLUME_RENDERING)
-            SceneLoader._frame3D()
+            if reframe:
+                SceneLoader._frame3D()
         except Exception as exc:  # noqa: BLE001 - a view is never worth a failure
             logger.warning("Could not set the views up: %s", exc)
 
@@ -588,8 +631,12 @@ class VISUWidget(ScriptedLoadableModuleWidget):
                 box.setEnabled(kind in present)
 
     def onShowChanged(self, *_args) -> None:
+        # `reframe=False`: ticking a chip changes WHAT is on screen, never
+        # where the reader is looking. Relaying out the panel and recentring
+        # the camera under someone who has just scrolled to the tooth they
+        # were checking is the one thing a viewer must not do.
         if not self._filling and not self._waiting:
-            self._show()
+            self._show(reframe=False)
 
     def wanted_kinds(self) -> set:
         """The kinds the check boxes are letting through."""
@@ -645,7 +692,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self._show()
         self._prefetchNeighbour()
 
-    def _show(self) -> None:
+    def _show(self, reframe: bool = True) -> None:
         self.scene.clear()
         if not self.views:
             return
@@ -666,6 +713,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         stack = on_a_scan and len(masks) > 1
 
         label_node = None
+        points = []
         if index.TRANSFORM in wanted:
             # Not an overlay: a transform has no geometry, so no view holds
             # one. Taken from the case, which is where it sits.
@@ -680,7 +728,13 @@ class VISUWidget(ScriptedLoadableModuleWidget):
                 label_node = node
             if overlay.kind == index.MODEL and on_a_scan:
                 self.scene.draw_on_slices(node)
-        self.scene.display(anchor, anchor_node, label_node)
+            if overlay.kind == index.MARKUPS:
+                points.append(node)
+        self.scene.display(anchor, anchor_node, label_node, reframe=reframe)
+        if reframe and points:
+            # The slices open on the volume's centre and the points are not
+            # there. One of them has to be, or the chip looks broken.
+            self.scene.jump_to(points[0])
 
         if overlays:
             self.frameLabel.text = _("Overlays drawn on {scan} - {basis}").format(
