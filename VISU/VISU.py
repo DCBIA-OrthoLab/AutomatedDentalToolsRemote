@@ -79,6 +79,11 @@ SAMPLE_DATA = (
 # shift it measured on a scan out of this pipeline over the top.
 VOLUME_RENDERING = "CT-AAA"
 
+# How a mask is opened when it cannot be the slice label layer. Not one of
+# `index`'s kinds: what the file IS stays a labelmap, this is only how it is
+# shown.
+SEGMENTATION = "segmentation"
+
 # Read ahead by one, in a daemon thread, so pressing the arrow does not also
 # pay for the disk. It warms the page cache and touches no MRML node: loading
 # one is main-thread work whatever we do here, and a 130 MB CBCT that is
@@ -134,10 +139,19 @@ class SceneLoader:
                 logger.warning("Could not remove a node VISU loaded: %s", exc)
         self._owned = []
 
-    def load(self, artifact):
-        """Open one artifact and keep the node, or None if it would not open."""
+    def load(self, artifact, opened_as: str = ""):
+        """Open one artifact and keep the node, or None if it would not open.
+
+        `opened_as` overrides what the file IS with how it should be SHOWN.
+        One mask is a label layer; three masks cannot be, a volume having one
+        label layer and no more -- so several masks on one scan are opened as
+        segmentations, which stack as coloured outlines on the slices and as
+        surfaces in 3D. It costs a closed-surface representation the tool did
+        not produce, and it is the only way to see a mandible and a maxilla at
+        the same time.
+        """
         try:
-            node = slicer_io.load_result(artifact.path, artifact.kind)
+            node = slicer_io.load_result(artifact.path, opened_as or artifact.kind)
         except Exception as exc:  # noqa: BLE001 - one unreadable file is not the case
             logger.warning("Could not open %s: %s", artifact.name, exc)
             return None
@@ -164,6 +178,21 @@ class SceneLoader:
                 node.SetNthControlPointLocked(point, False)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not unlock the landmarks: %s", exc)
+
+    @staticmethod
+    def draw_on_slices(node) -> None:
+        """Show a surface's intersection with the slice planes.
+
+        A model loaded beside a volume is in 3D and NOWHERE on the slices,
+        which is where a reader checks whether a mesh sits on the anatomy it
+        was registered to. Off by default in Slicer, so it is switched on.
+        """
+        try:
+            display = node.GetDisplayNode()
+            if display is not None:
+                display.SetVisibility2D(True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not draw a surface on the slices: %s", exc)
 
     @staticmethod
     def display(anchor, anchor_node, label_node) -> None:
@@ -551,11 +580,23 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         view = self.views[min(position, len(self.views) - 1)]
 
         anchor_node = self.scene.load(view.anchor) if view.anchor is not None else None
+        on_a_scan = view.anchor is not None and view.anchor.kind == index.VOLUME
+        masks = [o for o in view.overlays if o.kind == index.LABELMAP]
+        # One mask can be the volume's label layer. Several cannot, so they
+        # all become segmentations rather than one being shown and the rest
+        # loaded invisibly -- which reads as a viewer that lost them.
+        stack = on_a_scan and len(masks) > 1
+
         label_node = None
         for overlay in view.overlays:
-            node = self.scene.load(overlay)
-            if overlay.kind == index.LABELMAP and label_node is None:
+            node = self.scene.load(overlay, opened_as=SEGMENTATION if
+                                   (stack and overlay.kind == index.LABELMAP) else "")
+            if node is None:
+                continue
+            if overlay.kind == index.LABELMAP and not stack and label_node is None:
                 label_node = node
+            if overlay.kind == index.MODEL and on_a_scan:
+                self.scene.draw_on_slices(node)
         self.scene.display(view.anchor, anchor_node, label_node)
 
         if view.overlays:

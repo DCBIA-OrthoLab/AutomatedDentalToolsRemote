@@ -80,6 +80,9 @@ class _Node:
     def SetNthControlPointLocked(self, point, locked):
         self.points[point] = bool(locked)
 
+    def GetDisplayNode(self):
+        return self.display
+
 
 slicer.mrmlScene = types.SimpleNamespace(RemoveNode=lambda node: SCENE.remove(node))
 
@@ -146,8 +149,21 @@ import VISU  # noqa: E402
 from VISULib import index  # noqa: E402
 
 
-def _loader(path, _kind):
+OPENED = []
+
+
+class _Display:
+    def __init__(self):
+        self.on_slices = False
+
+    def SetVisibility2D(self, visible):
+        self.on_slices = bool(visible)
+
+
+def _loader(path, kind):
     node = _Node(path)
+    node.display = _Display()
+    OPENED.append((os.path.basename(path), kind))
     SCENE.append(node)
     return node
 
@@ -249,6 +265,7 @@ class PanelTest(unittest.TestCase):
         LAYERS.clear()
         VIEWS.update(layout=None, framed=0)
         del VIEWS["rendered"][:]
+        del OPENED[:]
         qt_stubs.QSettings.store.clear()
         self.root = tempfile.TemporaryDirectory()
         self.addCleanup(self.root.cleanup)
@@ -308,6 +325,32 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(VIEWS["layout"], "3d")
         self.assertEqual(VIEWS["rendered"], [], "a mesh has nothing to render")
         self.assertGreaterEqual(VIEWS["framed"], 1)
+
+    def test_several_masks_on_one_scan_are_all_shown(self):
+        # A volume has ONE label layer. Three masks as label layers means two
+        # loaded invisibly, which reads as a viewer that lost them.
+        self.open(["scans/p1_scan.nii.gz",
+                   "scans/p1_Pred_MAND.nii.gz",
+                   "scans/p1_Pred_MAX.nii.gz",
+                   "scans/p1_Pred_CB.nii.gz"])
+        opened = dict(OPENED)
+        self.assertEqual(opened["p1_scan.nii.gz"], "volume")
+        for mask in ("p1_Pred_MAND.nii.gz", "p1_Pred_MAX.nii.gz", "p1_Pred_CB.nii.gz"):
+            self.assertEqual(opened[mask], "segmentation", mask)
+        self.assertIsNone(LAYERS.get("label"), "one mask was made the label layer")
+
+    def test_a_single_mask_stays_the_label_layer(self):
+        self.open(["scans/p1_scan.nii.gz", "scans/p1_Pred_MAND.nii.gz"])
+        self.assertEqual(dict(OPENED)["p1_Pred_MAND.nii.gz"], "labelmap")
+        self.assertIsNotNone(LAYERS.get("label"))
+
+    def test_a_mesh_on_a_scan_is_drawn_on_the_slices_too(self):
+        # Where a reader checks whether a mesh sits on the anatomy it was
+        # registered to. Off by default in Slicer.
+        self.open(["scans/p1_scan.nii.gz", "scans/p1_Seg.vtk"])
+        mesh = [n for n in SCENE if n.path.endswith(".vtk")]
+        self.assertEqual(len(mesh), 1)
+        self.assertTrue(mesh[0].display.on_slices)
 
     def test_a_patient_with_nothing_on_it_says_so(self):
         # `cohort_6` is six scans and no landmarks. A blank line there sends

@@ -58,6 +58,10 @@ TRANSFORM = "transform"
 # An anchor is something an overlay can be drawn ON. A markups file has no
 # geometry of its own and a transform is not viewable at all.
 ANCHOR_KINDS = (VOLUME, LABELMAP, MODEL)
+# What a case can be BUILT on: something with a shape of its own. A labelmap
+# is not here, and that is the difference -- it anchors a view when nothing
+# else does, but it is derived from a scan and belongs to one.
+GEOMETRY_KINDS = (VOLUME, MODEL)
 OVERLAY_KINDS = (MARKUPS, LABELMAP, MODEL)
 
 # Truncated at the FIRST of these that ends on a token boundary. The table is
@@ -499,13 +503,17 @@ def _absorb_orphans(cases: dict) -> dict:
     keys nowhere near `Upper_new_9.vtk`. Prefix on a token boundary does reach
     it, and only within the same directory -- across directories the same
     prefix is two different patients.
+
+    **What counts as needing a host is holding no GEOMETRY**, not holding no
+    anchor. A mask anchors a view of its own and is still somebody's mask:
+    AMASSS names one `<stem>_<prediction_ID>_MAND.nii.gz`, with a free-text id
+    in the middle that no suffix table can strip, so loose in a folder it
+    indexed as a patient called `p1_Pred_MAND` instead of joining `p1`.
     """
-    anchored = sorted(
-        key for key, case in cases.items() if case.of_kind(*ANCHOR_KINDS)
-    )
+    anchored = sorted(key for key, case in cases.items() if case.of_kind(*GEOMETRY_KINDS))
     for key in sorted(cases):
         case = cases[key]
-        if case.of_kind(*ANCHOR_KINDS):
+        if case.of_kind(*GEOMETRY_KINDS):
             continue
         directory = os.path.dirname(key)
         # Longest first: with `P1` and `P1_T1` both anchored, an overlay of

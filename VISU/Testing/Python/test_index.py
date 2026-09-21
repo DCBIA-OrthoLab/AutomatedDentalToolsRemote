@@ -232,6 +232,32 @@ class RealShapesTest(unittest.TestCase):
             cases = index.build([("folder", os.path.join(root, "d"))])
             self.assertEqual([case.key for case in cases], ["Upper_new_9"])
 
+    def test_loose_masks_join_the_scan_they_were_made_from(self):
+        # AMASSS names a mask `<stem>_<prediction_ID>_<CODE>`, and the id is
+        # free text no suffix table can strip. Loose in a folder -- no
+        # `_SegOut/` level to read it off -- each one used to index as its own
+        # patient.
+        with tempfile.TemporaryDirectory() as root:
+            tree(root, [
+                "d/CBCT/p1_scan.nii.gz",
+                "d/Masks/p1_scan_Pred_MAND.nii.gz",
+                "d/Masks/p1_scan_Pred_MAX.nii.gz",
+                "d/Landmarks/p1_scan_lm_Pred.mrk.json",
+            ])
+            cases = index.build([("folder", os.path.join(root, "d"))])
+            self.assertEqual([case.key for case in cases], ["p1"])
+            kinds = sorted(a.kind for a in cases[0].artifacts)
+            self.assertEqual(kinds, [index.LABELMAP, index.LABELMAP,
+                                     index.MARKUPS, index.VOLUME])
+
+    def test_a_mask_with_no_scan_anywhere_is_still_a_case(self):
+        # Absorbed only when there is something to absorb it INTO.
+        with tempfile.TemporaryDirectory() as root:
+            tree(root, ["d/p1_scan_Pred_MAND.nii.gz"])
+            cases = index.build([("folder", os.path.join(root, "d"))])
+            self.assertEqual(len(cases), 1)
+            self.assertEqual(cases[0].artifacts[0].kind, index.LABELMAP)
+
     def test_a_prefix_that_is_another_patient_does_not_absorb_it(self):
         # `P1` and `P10` are two patients. Matching on substring paired them
         # upstream and padded the list with a sentinel to hide it.
