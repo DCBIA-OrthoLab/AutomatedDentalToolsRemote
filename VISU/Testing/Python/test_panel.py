@@ -149,28 +149,30 @@ VISU.BackgroundJob = _SyncJob
 DOWNLOADS = []
 
 
+# What the sample list names here, so the tests read against a fixed set
+# rather than against whatever SAMPLE_DATA happens to hold.
+VISU.SAMPLE_DATA = (("ASO", "CBCT_SemiAuto"), ("ASO", "MG_test_scan.nii.gz"))
+
+ASKED = []
+
+
 class _FakeClient:
-    """Two tools, one hosting a folder and one a single scan."""
+    """One tool, hosting a folder, a single scan, and a fixture nobody wants."""
 
     fail = False
 
-    def list_tools(self):
-        # ALI and ALI_CBCT share a bundle through deployment.toml, as they
-        # really do; Surg_Mov_Pred hosts nothing.
-        return {"ALI": {}, "ALI_CBCT": {}, "AMASSS": {}, "Surg_Mov_Pred": {}}
-
     def list_tool_data(self, tool):
+        ASKED.append(tool)
         if _FakeClient.fail:
             raise RuntimeError("the server is away")
-        if tool in ("ALI", "ALI_CBCT"):
-            return {"testfiles": ["CBCT_SemiAuto"],
-                    "entries": {"testfiles": [{"name": "CBCT_SemiAuto",
-                                               "kind": "folder", "size": 12}]}}
-        if tool == "AMASSS":
-            return {"testfiles": ["MG_test_scan.nii.gz"],
-                    "entries": {"testfiles": [{"name": "MG_test_scan.nii.gz",
-                                               "kind": "file", "size": 9}]}}
-        return {"testfiles": []}
+        return {
+            "testfiles": ["CBCT_SemiAuto", "MG_test_scan.nii.gz", "cohort_6"],
+            "entries": {"testfiles": [
+                {"name": "CBCT_SemiAuto", "kind": "folder", "size": 12},
+                {"name": "MG_test_scan.nii.gz", "kind": "file", "size": 9},
+                {"name": "cohort_6", "kind": "folder", "size": 591000000},
+            ]},
+        }
 
 
 def _download(tool, name, destination, _progress=None):
@@ -390,27 +392,32 @@ class TestFileTest(unittest.TestCase):
         combo = self.widget.sources.combo
         return [combo.itemText(n) for n in range(combo.count)]
 
-    def test_every_tool_s_test_files_are_offered_once_each(self):
-        # This panel is not a tool, so it borrows all of them -- and several
-        # tool names share one bundle, which used to list a file per name.
+    def test_only_the_named_sample_data_is_offered(self):
+        # A viewer wants a scan to look at, not every tool's regression
+        # fixture. `cohort_6` is hosted, 591 MB, and not on the list.
         self.widget.enter()
         offered = self.labels()
         self.assertTrue(any("CBCT_SemiAuto" in text for text in offered), offered)
         self.assertTrue(any("MG_test_scan.nii.gz" in text for text in offered))
-        # A tool hosting nothing adds nothing.
-        self.assertFalse(any("Surg_Mov_Pred" in text for text in offered))
+        self.assertFalse(any("cohort_6" in text for text in offered), offered)
+
+    def test_only_the_tools_that_hold_it_are_asked(self):
+        # Eighteen tool names answered the old listing; the sample names two.
+        del ASKED[:]
+        self.widget.enter()
+        self.assertEqual(ASKED, ["ASO"])
 
     def test_picking_a_hosted_folder_fetches_it_and_opens_it(self):
         self.widget.enter()
         self.widget.onTestFile("CBCT_SemiAuto")
-        self.assertEqual(DOWNLOADS, [("ALI", "CBCT_SemiAuto")])
+        self.assertEqual(DOWNLOADS, [("ASO", "CBCT_SemiAuto")])
         self.assertEqual([case.key for case in self.widget.cases], ["p1", "p2"])
         self.assertEqual(len(SCENE), 1, "the first case was not shown")
 
     def test_a_hosted_single_scan_is_a_cohort_of_one(self):
         self.widget.enter()
         self.widget.onTestFile("MG_test_scan.nii.gz")
-        self.assertEqual(DOWNLOADS, [("AMASSS", "MG_test_scan.nii.gz")])
+        self.assertEqual(DOWNLOADS, [("ASO", "MG_test_scan.nii.gz")])
         self.assertEqual([case.key for case in self.widget.cases], ["MG_test"])
 
     def test_the_previous_download_is_removed_when_the_next_lands(self):

@@ -50,6 +50,25 @@ _KEY_FOLDER = f"{_SETTINGS_GROUP}/Folder"
 # source, which is what puts ALI's landmarks on the scan beside them.
 SOURCE = "folder"
 
+# The hosted datasets worth opening a VIEWER on, named rather than discovered.
+#
+# Asking every tool for its test files answered 61 entries -- 28 once the
+# facades were folded together, since `deployment.toml` points several tool
+# names at one bundle. That list is not too long by accident: it is every
+# tool's REGRESSION FIXTURE, and most of it is a second timepoint, a transform
+# or a spreadsheet that a viewer has nothing to do with. Size does not separate
+# them either: 13 entries sit under 250 MB and 9 under 100.
+#
+# So it is chosen, and the choice is a short one: a CBCT to look at, one of
+# them carrying the landmarks that were placed on it, and one as a DICOM series
+# so the series path is exercised. An entry the server does not have is simply
+# not offered.
+SAMPLE_DATA = (
+    ("ASO", "CBCT_FullyAuto"),      #  99 MB  one CBCT
+    ("ASO", "CBCT_SemiAuto"),       # 247 MB  one CBCT, and landmarks beside it
+    ("ASO", "CBCT_FullyAuto_DCM"),  # 192 MB  the same scan, 365 DICOM slices
+)
+
 # Read ahead by one, in a daemon thread, so pressing the arrow does not also
 # pay for the disk. It warms the page cache and touches no MRML node: loading
 # one is main-thread work whatever we do here, and a 130 MB CBCT that is
@@ -514,16 +533,20 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         """Offer every tool's hosted test files, fetched off the main thread."""
         def work(_progress):
             client = get_client()
+            wanted = {}
+            for tool, name in SAMPLE_DATA:
+                wanted.setdefault(tool, set()).add(name)
             found = []
-            for tool in sorted(client.list_tools() or {}):
+            for tool in sorted(wanted):
                 try:
                     data = client.list_tool_data(tool)
                 except Exception as exc:  # noqa: BLE001 - one tool is not the list
                     logger.info("No hosted data for %s: %s", tool, exc)
                     continue
                 for entry in testfile_entries(data):
-                    found.append((tool, entry.get("name", ""),
-                                  entry.get("kind"), entry.get("size")))
+                    if entry.get("name") in wanted[tool]:
+                        found.append((tool, entry.get("name", ""),
+                                      entry.get("kind"), entry.get("size")))
             return hosted_choices(found)
 
         def done(result):
