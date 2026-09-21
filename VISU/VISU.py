@@ -97,28 +97,13 @@ VOLUME_RENDERING = "CT-AAA"
 # shown.
 SEGMENTATION = "segmentation"
 
-# How big a landmark is drawn, and this OVERRIDES what the file says.
-#
-# A `.mrk.json` carries three fields for it, and ALI writes all three:
-#
-#     "glyphScale": 2.0      percent of the VIEW
-#     "glyphSize": 5.0       millimetres
-#     "useGlyphScale": true  -> the percentage is the one in force
-#
-# Those are Slicer's own defaults carried through rather than a choice about
-# anatomy -- ALI's display block documents `visibility` and `sliceProjection`
-# as deliberate and says nothing about size. And the percentage is what made
-# a point invisible: 2 % of a 230 mm field is a speck, while the same 2 % on a
-# 60 mm arch is a boulder. One number cannot serve both, which is what a
-# percentage of the view is for and exactly why it fails here -- the view is
-# not the patient.
-#
-# So the scale is switched off and an absolute size applied. 1 mm rather than
-# the file's own 5: a point is a POSITION, and a glyph wide enough to cover
-# the structure under it hides the thing the reader came to judge. Changing it
-# at the source, in `sadt_ali_common.markups`, would fix it for every consumer
-# rather than for this panel.
-LANDMARK_SIZE_MM = 1.0
+# VISU draws a landmark exactly as its file asks. A `.mrk.json` carries three
+# fields for it -- `glyphScale` (percent of the view), `glyphSize`
+# (millimetres) and `useGlyphScale`, which picks between them -- and they are
+# the tool's to set. Overriding them here was tried and taken back out: the
+# panel would then show something no other reader of the same file sees, and
+# a size that looks wrong is a thing to fix where it is WRITTEN, in
+# `sadt_ali_common.markups`, so every consumer gets the fix at once.
 
 # What an adjustment is called on disk, beside the scan it moves. Never the
 # scan's own name: this file is the reader's, and the tool's output has to
@@ -223,25 +208,7 @@ class SceneLoader:
         self._owned.append(node)
         if artifact.kind == index.MARKUPS:
             self._unlock(node)
-            self._make_visible(node)
         return node
-
-    @staticmethod
-    def _make_visible(node) -> None:
-        """Give the points a size a reader can find on a CBCT.
-
-        The file has its own answer and it is the wrong one; see
-        LANDMARK_SIZE_MM for which three fields it writes and why they lose.
-        """
-        display = node.GetDisplayNode()
-        if display is None:
-            return
-        try:
-            display.SetUseGlyphScale(False)
-            display.SetGlyphSize(LANDMARK_SIZE_MM)
-            display.SetVisibility(True)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not size the landmarks: %s", exc)
 
     @staticmethod
     def jump_to(node) -> None:

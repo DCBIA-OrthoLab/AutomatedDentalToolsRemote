@@ -437,12 +437,15 @@ class PanelTest(unittest.TestCase):
         self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json"])
         self.assertEqual(len(JUMPS), 1)
 
-    def test_a_landmark_is_sized_in_millimetres_not_in_percent(self):
+    def test_the_file_decides_how_a_landmark_looks(self):
+        # Three fields say it -- glyphScale, glyphSize, useGlyphScale -- and
+        # they are the tool's to set. A panel that overrides them shows
+        # something no other reader of the same file sees.
         self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json"])
         points = [n for n in SCENE if n.path.endswith(".mrk.json")][0]
-        self.assertTrue(points.display.absolute, "still a percentage of the view")
-        self.assertEqual(points.display.size, VISU.LANDMARK_SIZE_MM)
-        self.assertTrue(points.display.visible)
+        self.assertIsNone(points.display.absolute, "the panel resized the points")
+        self.assertIsNone(points.display.size)
+        self.assertIsNone(points.display.visible, "the panel forced visibility")
 
     def test_ticking_a_chip_does_not_move_the_reader(self):
         # The one thing a viewer must not do: relay out the panel and recentre
