@@ -127,6 +127,74 @@ VISU.slicer_io = types.SimpleNamespace(load_result=_loader)
 VISU.prefetch = lambda _paths: None
 
 
+class _SyncJob:
+    """BackgroundJob, run on the calling thread so a test can assert outcomes."""
+
+    def __init__(self, target, on_success=None, on_error=None, **_kwargs):
+        self._target, self._ok, self._bad = target, on_success, on_error
+
+    def start(self):
+        try:
+            result = self._target(lambda *_a, **_k: None)
+        except Exception as exc:  # noqa: BLE001 - the panel's own error path
+            if self._bad:
+                self._bad(exc)
+            return
+        if self._ok:
+            self._ok(result)
+
+
+VISU.BackgroundJob = _SyncJob
+
+DOWNLOADS = []
+
+
+class _FakeClient:
+    """Two tools, one hosting a folder and one a single scan."""
+
+    fail = False
+
+    def list_tools(self):
+        return {"ASO": {}, "AMASSS": {}, "Surg_Mov_Pred": {}}
+
+    def list_tool_data(self, tool):
+        if _FakeClient.fail:
+            raise RuntimeError("the server is away")
+        if tool == "ASO":
+            return {"testfiles": ["CBCT_SemiAuto"],
+                    "entries": {"testfiles": [{"name": "CBCT_SemiAuto",
+                                               "kind": "folder", "size": 12}]}}
+        if tool == "AMASSS":
+            return {"testfiles": ["MG_test_scan.nii.gz"],
+                    "entries": {"testfiles": [{"name": "MG_test_scan.nii.gz",
+                                               "kind": "file", "size": 9}]}}
+        return {"testfiles": []}
+
+
+def _download(tool, name, destination, _progress=None):
+    DOWNLOADS.append((tool, name))
+    with open(destination, "w", encoding="utf-8") as handle:
+        handle.write("x")
+    return destination
+
+
+_FakeClient.download_testfile = staticmethod(_download)
+VISU.get_client = lambda: _FakeClient()
+
+
+def _unzip(_archive, into):
+    # What the server sends for a hosted FOLDER: a cohort, here two scans.
+    os.makedirs(into, exist_ok=True)
+    for name in ("p1_scan.nii.gz", "p2_scan.nii.gz"):
+        with open(os.path.join(into, name), "w", encoding="utf-8") as handle:
+            handle.write("x")
+
+
+VISU.slicer_io.unzip_folder = _unzip
+slicer.util.errorDisplay = lambda text, **_k: ERRORS.append(text)
+ERRORS = []
+
+
 def tree(root, paths):
     for relative in paths:
         full = os.path.join(root, relative)
@@ -261,6 +329,70 @@ class PanelTest(unittest.TestCase):
         second.caseCombo.setCurrentIndex(2)
         self.assertEqual(second.position, 2)
         self.assertEqual(len(SCENE), 1)
+
+
+class TestFileTest(unittest.TestCase):
+    """The hosted dropdown: the same one every tool panel has."""
+
+    def setUp(self):
+        del SCENE[:]
+        del DOWNLOADS[:]
+        del ERRORS[:]
+        _FakeClient.fail = False
+        qt_stubs.QSettings.store.clear()
+        self.widget = VISU.VISUWidget()
+        self.widget.setup()
+        self.addCleanup(self.widget.cleanup)
+
+    def labels(self):
+        combo = self.widget.sources.combo
+        return [combo.itemText(n) for n in range(combo.count)]
+
+    def test_every_tool_s_test_files_are_offered_and_say_whose_they_are(self):
+        # This panel is not a tool, so it borrows all of them -- and two tools
+        # may host a file of the same name.
+        self.widget.enter()
+        offered = self.labels()
+        self.assertTrue(any("ASO / CBCT_SemiAuto" in text for text in offered), offered)
+        self.assertTrue(any("AMASSS / MG_test_scan.nii.gz" in text for text in offered))
+        # A tool hosting nothing adds nothing.
+        self.assertFalse(any("Surg_Mov_Pred" in text for text in offered))
+
+    def test_picking_a_hosted_folder_fetches_it_and_opens_it(self):
+        self.widget.enter()
+        self.widget.onTestFile("ASO / CBCT_SemiAuto")
+        self.assertEqual(DOWNLOADS, [("ASO", "CBCT_SemiAuto")])
+        self.assertEqual([case.key for case in self.widget.cases], ["p1", "p2"])
+        self.assertEqual(len(SCENE), 1, "the first case was not shown")
+
+    def test_a_hosted_single_scan_is_a_cohort_of_one(self):
+        self.widget.enter()
+        self.widget.onTestFile("AMASSS / MG_test_scan.nii.gz")
+        self.assertEqual(DOWNLOADS, [("AMASSS", "MG_test_scan.nii.gz")])
+        self.assertEqual([case.key for case in self.widget.cases], ["MG_test"])
+
+    def test_the_previous_download_is_removed_when_the_next_lands(self):
+        self.widget.enter()
+        self.widget.onTestFile("ASO / CBCT_SemiAuto")
+        first = self.widget._staging
+        self.widget.onTestFile("AMASSS / MG_test_scan.nii.gz")
+        self.assertFalse(os.path.exists(first), "a cohort was left in the temp dir")
+
+    def test_a_server_that_is_away_costs_the_dropdown_and_not_the_panel(self):
+        _FakeClient.fail = True
+        self.widget.enter()
+        self.assertEqual(self.widget._hosted, {})
+        # Every local folder still opens.
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        tree(root.name, ["scans/p1_scan.nii.gz"])
+        self.widget.folderInput.setCurrentPath(os.path.join(root.name, "scans"))
+        self.assertEqual(len(self.widget.cases), 1)
+
+    def test_an_entry_the_panel_does_not_know_downloads_nothing(self):
+        self.widget.enter()
+        self.widget.onTestFile("Nope / nothing.nii.gz")
+        self.assertEqual(DOWNLOADS, [])
 
 
 if __name__ == "__main__":

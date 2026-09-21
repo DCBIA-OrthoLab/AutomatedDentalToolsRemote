@@ -23,6 +23,8 @@ says whether that was read off the folder or assumed.
 
 import logging
 import os
+import shutil
+import tempfile
 import threading
 
 import ctk
@@ -31,7 +33,8 @@ import slicer
 from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadableModuleWidget
 
-from ServerToolsCoreLib import design, formgen, slicer_io
+from ServerToolsCoreLib import design, formgen, get_client, slicer_io, testfile_entries
+from ServerToolsCoreLib.worker import BackgroundJob
 from VISULib import index
 
 logger = logging.getLogger("VISU")
@@ -184,6 +187,15 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # tell a folder the reader just chose -- which is an action, and shows
         # at once -- from one the panel remembered, which must not.
         self._restoring = False
+        # {what the dropdown shows: (tool, the server's own name, kind)}. The
+        # entries are labelled with their tool because this panel is not one:
+        # it borrows every tool's test data, and two tools may host a file of
+        # the same name.
+        self._hosted = {}
+        # Where the last fetched test file was unpacked, removed when the next
+        # one lands. A cohort is hundreds of megabytes and a viewer is opened
+        # many times in a sitting.
+        self._staging = ""
 
     # -- building the panel ------------------------------------------------
 
@@ -215,13 +227,24 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # which a ctkPathLineEdit restricted to Dirs does not, its
         # currentPathChanged being swallowed for a folder.
         self.folderInput = formgen.FileOrFolderInput(modes=("folder",))
-        self.folderInput.container.toolTip = _(
+        self.folderInput.onPathChanged(self.onIndex)
+
+        # The same composite every tool panel puts on a hosted argument: the
+        # picker, plus a dropdown of the test data the server holds. Wrapping
+        # it is all it takes -- picking an entry is an ACTION, the file is
+        # fetched, and the row then holds an ordinary local path.
+        self.sources = formgen.ServerFileInput(self.folderInput, hosted_downloads=True)
+        # No scene dropdown: every other panel offers one so a volume already
+        # open can be SENT to a tool. This panel has nothing to send, and it
+        # is the thing that puts volumes in the scene in the first place.
+        self.sources.setSceneSupported(False)
+        self.sources.setHostedCallback(self.onTestFile)
+        self.sources.container.toolTip = _(
             "A folder of scans, of results, or of both. Everything under it is "
             "indexed: a patient's scan, its masks, its surfaces and its landmarks "
             "are shown together."
         )
-        self.folderInput.onPathChanged(self.onIndex)
-        form.addRow(_("Folder"), self.folderInput.container)
+        form.addRow(_("Folder"), self.sources.container)
 
         self.countLabel = design.hint_label("")
         form.addRow("", self.countLabel)
@@ -433,6 +456,86 @@ class VISUWidget(ScriptedLoadableModuleWidget):
 
     # -- leaving -----------------------------------------------------------
 
+    def enter(self) -> None:
+        # Re-read on every visit rather than once at build: the server may
+        # have been down when the module was first opened, or bundles may have
+        # been fetched since.
+        self._refreshTestFiles()
+
+    def _refreshTestFiles(self) -> None:
+        """Offer every tool's hosted test files, fetched off the main thread."""
+        def work(_progress):
+            client = get_client()
+            offered = {}
+            entries = []
+            for tool in sorted(client.list_tools() or {}):
+                try:
+                    data = client.list_tool_data(tool)
+                except Exception as exc:  # noqa: BLE001 - one tool is not the list
+                    logger.info("No hosted data for %s: %s", tool, exc)
+                    continue
+                for entry in testfile_entries(data):
+                    label = "{} / {}".format(tool, entry.get("name", ""))
+                    offered[label] = (tool, entry.get("name", ""), entry.get("kind"))
+                    entries.append({**entry, "name": label})
+            return entries, offered
+
+        def done(result):
+            entries, offered = result
+            self._hosted = offered
+            self.sources.setChoices(entries)
+
+        def failed(exc):
+            # A server that is away costs the dropdown, not the panel: every
+            # local folder still opens.
+            logger.warning("Could not list the hosted test files: %s", exc)
+
+        BackgroundJob(work, on_success=done, on_error=failed).start()
+
+    def onTestFile(self, label: str) -> None:
+        """Fetch the hosted entry the reader picked, then point the panel at it."""
+        found = self._hosted.get(label)
+        if found is None:
+            logger.warning("No hosted test file called %r", label)
+            return
+        tool, name, kind = found
+
+        def work(progress):
+            return self._fetch(tool, name, kind, progress)
+
+        def done(path):
+            # Writing the local path resets the dropdown to its prompt and
+            # notifies, which indexes and shows. The row then holds a local
+            # folder like any other.
+            formgen.set_local_path(self.sources, path)
+
+        def failed(exc):
+            slicer.util.errorDisplay(
+                _("Could not fetch {name}: {error}").format(name=name, error=exc)
+            )
+
+        BackgroundJob(work, on_success=done, on_error=failed).start()
+
+    def _fetch(self, tool: str, name: str, kind, progress) -> str:
+        """Download one hosted entry and hand back a FOLDER to index.
+
+        A hosted folder arrives as a zip the server built and is unpacked. A
+        hosted single file is left as it is and its staging directory is
+        returned instead -- a lone scan is a cohort of one, and the index
+        walks directories.
+        """
+        if self._staging:
+            shutil.rmtree(self._staging, ignore_errors=True)
+        self._staging = tempfile.mkdtemp(prefix="VISU_")
+        payload = os.path.join(self._staging, os.path.basename(name) or "testfile")
+        get_client().download_testfile(tool, name, payload, progress)
+        if kind != "folder":
+            return self._staging
+        unpacked = os.path.join(self._staging, "unpacked")
+        slicer_io.unzip_folder(payload, unpacked)
+        os.remove(payload)
+        return unpacked
+
     def exit(self) -> None:
         # What this panel loaded is this panel's, and a clinician switching to
         # another module should not find forty nodes of somebody else's cohort
@@ -441,3 +544,6 @@ class VISUWidget(ScriptedLoadableModuleWidget):
 
     def cleanup(self) -> None:
         self.scene.clear()
+        if self._staging:
+            shutil.rmtree(self._staging, ignore_errors=True)
+            self._staging = ""
