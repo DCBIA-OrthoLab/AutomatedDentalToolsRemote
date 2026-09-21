@@ -202,7 +202,8 @@ DOWNLOADS = []
 
 # What the sample list names here, so the tests read against a fixed set
 # rather than against whatever SAMPLE_DATA happens to hold.
-VISU.SAMPLE_DATA = (("ASO", "CBCT_SemiAuto"), ("ASO", "MG_test_scan.nii.gz"))
+VISU.SAMPLE_DATA = (("ASO", "CBCT_SemiAuto", "two subjects with landmarks"),
+                    ("ASO", "MG_test_scan.nii.gz", "one CBCT"))
 
 ASKED = []
 
@@ -367,7 +368,7 @@ class PanelTest(unittest.TestCase):
         # Points on their own are what a reader wants when the scan is in the
         # way -- and the panel must not then claim they are drawn on it.
         self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json"])
-        self.widget.showGroup.boxes["Scan"].setChecked(False)
+        self.widget.showGroup.boxes["CBCT"].setChecked(False)
         self.assertEqual([os.path.basename(n.path) for n in SCENE],
                          ["p1_scan_lm_Pred.mrk.json"])
 
@@ -381,6 +382,17 @@ class PanelTest(unittest.TestCase):
         self.assertIn("p1_scan_Or_transform.tfm",
                       [os.path.basename(n.path) for n in SCENE])
 
+    def test_a_mesh_is_a_surface_and_never_the_cbct_chip(self):
+        # An intraoral scan IS a scan, so a chip called "Scan" that governs
+        # volumes read, on an IOS case, as "the scan will not display" --
+        # while the mesh was on screen under another chip.
+        self.open(["scans/Upper_new_9.vtk", "scans/Upper_new_9_Upper_O_Pred.mrk.json"])
+        boxes = self.widget.showGroup.boxes
+        self.assertFalse(boxes["CBCT"].isEnabled(), "there is no volume here")
+        self.assertTrue(boxes["Surfaces"].isEnabled())
+        self.assertIn("Upper_new_9.vtk",
+                      [os.path.basename(n.path) for n in SCENE])
+
     def test_a_kind_this_patient_has_not_got_is_greyed(self):
         # Greyed rather than removed: a row that changes shape as the reader
         # steps is a row they re-read every time, and a chip present but off
@@ -388,12 +400,12 @@ class PanelTest(unittest.TestCase):
         self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json",
                    "scans/p2_scan.nii.gz"])
         boxes = self.widget.showGroup.boxes
-        self.assertTrue(boxes["Scan"].isEnabled())
+        self.assertTrue(boxes["CBCT"].isEnabled())
         self.assertTrue(boxes["Landmarks"].isEnabled())
         self.assertFalse(boxes["Surfaces"].isEnabled(), "p1 has no mesh")
 
         self.widget.onNext()          # p2: a scan and nothing else
-        self.assertTrue(boxes["Scan"].isEnabled())
+        self.assertTrue(boxes["CBCT"].isEnabled())
         self.assertFalse(boxes["Landmarks"].isEnabled())
 
         self.widget.onPrevious()      # and it comes back
@@ -403,7 +415,7 @@ class PanelTest(unittest.TestCase):
     def test_every_kind_has_a_box_and_they_start_the_way_they_mean_to(self):
         boxes = self.widget.showGroup.value()
         self.assertEqual(sorted(boxes),
-                         ["Landmarks", "Masks", "Scan", "Surfaces", "Transforms"])
+                         ["CBCT", "Landmarks", "Masks", "Surfaces", "Transforms"])
         self.assertFalse(boxes["Transforms"], "a transform draws nothing")
         self.assertTrue(all(on for name, on in boxes.items() if name != "Transforms"))
 
@@ -507,7 +519,7 @@ class HostedChoicesTest(unittest.TestCase):
     """Turning what every tool answers into what a reader should see."""
 
     def test_one_file_offered_by_four_tool_names_is_one_entry(self):
-        found = [(tool, "FullyAuto.zip", "folder", 99)
+        found = [(tool, "FullyAuto.zip", "folder", 99, "")
                  for tool in ("AREG", "AREG_CBCT", "AREG_IOS", "AREG_IOSCBCT")]
         entries, offered = VISU.hosted_choices(found)
         self.assertEqual([entry["name"] for entry in entries], ["FullyAuto.zip"])
@@ -516,15 +528,15 @@ class HostedChoicesTest(unittest.TestCase):
 
     def test_two_different_files_of_one_name_keep_their_tool(self):
         entries, offered = VISU.hosted_choices([
-            ("AMASSS", "scan.nii.gz", "file", 10),
-            ("CLIC", "scan.nii.gz", "file", 20),
+            ("AMASSS", "scan.nii.gz", "file", 10, ""),
+            ("CLIC", "scan.nii.gz", "file", 20, ""),
         ])
         self.assertEqual([entry["name"] for entry in entries],
                          ["AMASSS / scan.nii.gz", "CLIC / scan.nii.gz"])
 
     def test_entries_are_ordered_and_keep_what_a_picker_shows(self):
         entries, _ = VISU.hosted_choices([
-            ("B", "second.vtk", "file", 2), ("A", "first.nii.gz", "folder", 1),
+            ("B", "second.vtk", "file", 2, ""), ("A", "first.nii.gz", "folder", 1, ""),
         ])
         self.assertEqual([entry["name"] for entry in entries],
                          ["first.nii.gz", "second.vtk"])
@@ -554,8 +566,8 @@ class TestFileTest(unittest.TestCase):
         # fixture. `cohort_6` is hosted, 591 MB, and not on the list.
         self.widget.enter()
         offered = self.labels()
-        self.assertTrue(any("CBCT_SemiAuto" in text for text in offered), offered)
-        self.assertTrue(any("MG_test_scan.nii.gz" in text for text in offered))
+        self.assertTrue(any("two subjects" in text for text in offered), offered)
+        self.assertTrue(any("one CBCT" in text for text in offered))
         self.assertFalse(any("cohort_6" in text for text in offered), offered)
 
     def test_only_the_tools_that_hold_it_are_asked(self):
@@ -566,22 +578,22 @@ class TestFileTest(unittest.TestCase):
 
     def test_picking_a_hosted_folder_fetches_it_and_opens_it(self):
         self.widget.enter()
-        self.widget.onTestFile("CBCT_SemiAuto")
+        self.widget.onTestFile("two subjects with landmarks")
         self.assertEqual(DOWNLOADS, [("ASO", "CBCT_SemiAuto")])
         self.assertEqual([case.key for case in self.widget.cases], ["p1", "p2"])
         self.assertEqual(len(SCENE), 1, "the first case was not shown")
 
     def test_a_hosted_single_scan_is_a_cohort_of_one(self):
         self.widget.enter()
-        self.widget.onTestFile("MG_test_scan.nii.gz")
+        self.widget.onTestFile("one CBCT")
         self.assertEqual(DOWNLOADS, [("ASO", "MG_test_scan.nii.gz")])
         self.assertEqual([case.key for case in self.widget.cases], ["MG_test"])
 
     def test_the_previous_download_is_removed_when_the_next_lands(self):
         self.widget.enter()
-        self.widget.onTestFile("CBCT_SemiAuto")
+        self.widget.onTestFile("two subjects with landmarks")
         first = self.widget._staging
-        self.widget.onTestFile("MG_test_scan.nii.gz")
+        self.widget.onTestFile("one CBCT")
         self.assertFalse(os.path.exists(first), "a cohort was left in the temp dir")
 
     def test_a_server_that_is_away_costs_the_dropdown_and_not_the_panel(self):

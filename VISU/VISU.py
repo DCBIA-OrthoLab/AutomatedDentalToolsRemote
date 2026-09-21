@@ -70,14 +70,16 @@ SOURCE = "folder"
 # the other two are short: the server's test data is each tool's regression
 # fixture and was never assembled for looking at. `~/visu-testdata` is where a
 # richer one is kept, outside every repository.
+# Each entry is (tool, the server's own name, what to call it here). The third
+# is not decoration: the server's names are each tool's fixture names --
+# `IOSCBCT_RegTestFiles`, `CBCT_SemiAuto_DCM` -- and they say which REGRESSION
+# TEST the folder belongs to, not what is inside it. Renaming them on the
+# server would break the tools that name them; naming them here costs nothing
+# and is the only place that knows a viewer is asking.
 SAMPLE_DATA = (
-    # 3 subjects, CBCT and IOS, landmarks on every one. The one to reach for.
-    ("AREG", "IOSCBCT_RegTestFiles"),  # 233 MB
-    # 2 subjects of IOS, landmarks on both.
-    ("ASO", "IOS_SemiAuto"),           #  20 MB
-    # 1 subject, landmarks, and its scan is a DICOM SERIES -- the one path
-    # nothing else here exercises.
-    ("ASO", "CBCT_SemiAuto_DCM"),      # 680 MB
+    ("AREG", "IOSCBCT_RegTestFiles", "3 subjects - CBCT and IOS, with landmarks"),
+    ("ASO", "IOS_SemiAuto", "2 subjects - IOS, with landmarks"),
+    ("ASO", "CBCT_SemiAuto_DCM", "1 subject - a DICOM series, with landmarks"),
 )
 
 # What a CBCT is rendered with in 3D, and it is the tools' own choice: AMASSS
@@ -99,9 +101,13 @@ SEGMENTATION = "segmentation"
 # registration did. Off by default for the same reason -- it shows nothing on
 # its own.
 SHOWABLE = (
-    ("Scan", index.VOLUME, True),
-    ("Masks", index.LABELMAP, True),
+    # NOT "Scan". An intraoral scan is a scan, and calling the volume chip
+    # that made a reader on an IOS case read the greyed chip as "the scan
+    # will not display" -- while the mesh was on screen under `Surfaces`,
+    # 122 023 points of it. Two words that cannot both mean one file.
+    ("CBCT", index.VOLUME, True),
     ("Surfaces", index.MODEL, True),
+    ("Masks", index.LABELMAP, True),
     ("Landmarks", index.MARKUPS, True),
     ("Transforms", index.TRANSFORM, False),
 )
@@ -305,22 +311,26 @@ def hosted_choices(found) -> tuple:
     genuinely differ and happen to share a name. Otherwise the name is the
     name, which is what a reader is looking for.
 
-    `found` is `[(tool, name, kind, size), ...]`, and files are the same when
-    all three of name, kind and size match -- the most a listing can compare
-    without fetching. Two different files agreeing on all three would merge;
-    the one that would be lost is reachable under the other's tool.
+    `found` is `[(tool, name, kind, size, called), ...]`, and files are the same
+    when all three of name, kind and size match -- the most a listing can
+    compare without fetching. Two different files agreeing on all three would
+    merge; the one that would be lost is reachable under the other's tool.
+
+    `called` is what to show instead of the server's own name, which says
+    which regression test a folder belongs to rather than what is in it.
     """
     groups = {}
-    for tool, name, kind, size in found:
-        groups.setdefault((name, kind, size), []).append(tool)
+    for tool, name, kind, size, called in found:
+        groups.setdefault((name, kind, size, called), []).append(tool)
     times_named = {}
-    for name, _kind, _size in groups:
+    for name, _kind, _size, _called in groups:
         times_named[name] = times_named.get(name, 0) + 1
 
     entries, offered = [], {}
-    for (name, kind, size), tools in groups.items():
+    for (name, kind, size, called), tools in groups.items():
         tool = sorted(tools)[0]
-        label = name if times_named[name] == 1 else "{} / {}".format(tool, name)
+        label = called or (name if times_named[name] == 1
+                           else "{} / {}".format(tool, name))
         offered[label] = (tool, name, kind)
         entries.append({"name": label, "kind": kind, "size": size})
     return sorted(entries, key=lambda entry: entry["name"]), offered
@@ -701,8 +711,9 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         """Offer every tool's hosted test files, fetched off the main thread."""
         def work(_progress):
             client = get_client()
+            called = {(tool, name): label for tool, name, label in SAMPLE_DATA}
             wanted = {}
-            for tool, name in SAMPLE_DATA:
+            for tool, name, _label in SAMPLE_DATA:
                 wanted.setdefault(tool, set()).add(name)
             found = []
             for tool in sorted(wanted):
@@ -712,9 +723,10 @@ class VISUWidget(ScriptedLoadableModuleWidget):
                     logger.info("No hosted data for %s: %s", tool, exc)
                     continue
                 for entry in testfile_entries(data):
-                    if entry.get("name") in wanted[tool]:
-                        found.append((tool, entry.get("name", ""),
-                                      entry.get("kind"), entry.get("size")))
+                    name = entry.get("name", "")
+                    if name in wanted[tool]:
+                        found.append((tool, name, entry.get("kind"),
+                                      entry.get("size"), called[(tool, name)]))
             return hosted_choices(found)
 
         def done(result):
