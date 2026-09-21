@@ -212,25 +212,33 @@ class SceneLoader:
             return None
         node.SetName(artifact.name)
         self._owned.append(node)
-        if artifact.kind == index.MARKUPS:
-            self._draw_anyway(node)
+        self._draw(node)
         return node
 
     @staticmethod
-    def _draw_anyway(node) -> None:
+    def _draw(node) -> None:
         """Switch the display node ON, whatever the file says.
 
-        The ONE thing this panel overrides, and it is not a preference.
+        **The chips are the truth about what is on screen.** A ticked chip
+        that shows nothing is worse than no chip at all: the reader believes
+        they are looking at the landmarks and they are looking at their
+        absence. So anything this panel loads because its chip is ticked is
+        made visible, and the only way to take it off screen is to untick.
+
+        This is the ONE thing overridden, and it is not a preference.
         `"visibility": false` in a markups file does not mean small or grey --
         it means Slicer builds the node, lists it in the Markups module and
         draws NOTHING. Both original ALI CLIs wrote it; ALI fixed it, and
-        every fixture written before that still carries it, including all
-        four landmark files of the first sample this panel offers.
+        every fixture written before that still carries it. Ten such files
+        were found in this deployment's own `DATA/`, four of them in the
+        first sample this panel offers.
 
-        A viewer whose whole job is to draw cannot honour "do not draw". Size,
-        colour and slice projection stay the file's, because those are choices
-        a reader can disagree with. This one is a file saying the reader
-        should see nothing, which is never what they opened it for.
+        Size, colour and slice projection stay the file's, because those are
+        choices a reader can disagree with. "The reader should see nothing"
+        is not one of them.
+
+        A transform has no display node until something asks for one, so it
+        is skipped rather than special-cased.
         """
         display = node.GetDisplayNode()
         if display is None:
@@ -238,7 +246,7 @@ class SceneLoader:
         try:
             display.SetVisibility(True)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not show the landmarks: %s", exc)
+            logger.warning("Could not show %s: %s", node.GetName(), exc)
 
     @staticmethod
     def jump_to(node) -> None:

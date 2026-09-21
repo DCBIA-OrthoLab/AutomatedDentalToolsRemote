@@ -474,6 +474,16 @@ class PanelTest(unittest.TestCase):
         self.assertIsNone(points.display.absolute, "the panel resized the points")
         self.assertIsNone(points.display.size)
 
+    def test_a_ticked_chip_means_visible_whatever_the_kind(self):
+        # A ticked chip that shows nothing is worse than no chip: the reader
+        # believes they are looking at the landmarks and they are looking at
+        # their absence.
+        self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json",
+                   "scans/p1_scan_Seg.vtk"])
+        for node in SCENE:
+            self.assertTrue(node.display.visible,
+                            f"{os.path.basename(node.path)} was loaded invisible")
+
     def test_a_file_that_says_do_not_draw_is_drawn_anyway(self):
         # `"visibility": false` builds the node and draws nothing. Both
         # original ALI CLIs wrote it and every fixture from before the fix
