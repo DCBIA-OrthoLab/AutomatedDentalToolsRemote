@@ -381,6 +381,25 @@ class PanelTest(unittest.TestCase):
         self.assertIn("p1_scan_Or_transform.tfm",
                       [os.path.basename(n.path) for n in SCENE])
 
+    def test_a_kind_this_patient_has_not_got_is_greyed(self):
+        # Greyed rather than removed: a row that changes shape as the reader
+        # steps is a row they re-read every time, and a chip present but off
+        # says this patient has no landmarks -- which is worth knowing.
+        self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json",
+                   "scans/p2_scan.nii.gz"])
+        boxes = self.widget.showGroup.boxes
+        self.assertTrue(boxes["Scan"].isEnabled())
+        self.assertTrue(boxes["Landmarks"].isEnabled())
+        self.assertFalse(boxes["Surfaces"].isEnabled(), "p1 has no mesh")
+
+        self.widget.onNext()          # p2: a scan and nothing else
+        self.assertTrue(boxes["Scan"].isEnabled())
+        self.assertFalse(boxes["Landmarks"].isEnabled())
+
+        self.widget.onPrevious()      # and it comes back
+        self.assertTrue(boxes["Landmarks"].isEnabled())
+        self.assertTrue(boxes["Landmarks"].isChecked(), "the tick was lost")
+
     def test_every_kind_has_a_box_and_they_start_the_way_they_mean_to(self):
         boxes = self.widget.showGroup.value()
         self.assertEqual(sorted(boxes),

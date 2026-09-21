@@ -42,6 +42,11 @@ class QObject:
     def setEnabled(self, enabled):
         self._enabled = bool(enabled)
 
+    def isEnabled(self):
+        """Enabled until something disables it, as Qt is. Read back so a panel
+        that greys a control can be tested on whether it greyed the right one."""
+        return getattr(self, "_enabled", True)
+
     def setProperty(self, name, value):
         self._properties[name] = value
 

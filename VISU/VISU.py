@@ -435,10 +435,11 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self.frameLabel = design.warning_label("")
         outer.addWidget(self.frameLabel)
 
-        # The same block every tool panel puts a multichoice in, `inline`
-        # because the words are short and there are five of them.
+        # `chips`, so the word IS the control: five short labels, and what is
+        # on reads as filled against outlined at a glance rather than as five
+        # small ticks to squint at.
         self.showGroup = formgen.MultiChoiceGroup(
-            {label: on for label, _kind, on in SHOWABLE}, layout="inline",
+            {label: on for label, _kind, on in SHOWABLE}, layout="chips",
         )
         formgen.connect_changed(self.showGroup, self.onShowChanged)
         outer.addWidget(design.section_title(_("Show")))
@@ -556,6 +557,21 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             self.position = position
             self._refresh()
 
+    def _offerWhatIsThere(self, case) -> None:
+        """Grey the chips for what this patient does not have.
+
+        Greyed rather than removed: a row that changes shape under the reader
+        as they step is a row they have to re-read every time, and a chip that
+        is there but off tells them this patient has no landmarks -- which is
+        worth knowing. Their ticked state is left alone, so it comes back on
+        the next patient that does have one.
+        """
+        present = {artifact.kind for artifact in case.artifacts}
+        for label, kind, _on in SHOWABLE:
+            box = self.showGroup.boxes.get(label)
+            if box is not None:
+                box.setEnabled(kind in present)
+
     def onShowChanged(self, *_args) -> None:
         if not self._filling and not self._waiting:
             self._show()
@@ -593,6 +609,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         if self.caseCombo.currentIndex != self.position:
             self.caseCombo.setCurrentIndex(self.position)
 
+        self._offerWhatIsThere(self.cases[self.position])
         self.views = self.cases[self.position].views(acquisition=SOURCE)
         self.viewCombo.clear()
         for view in self.views:
