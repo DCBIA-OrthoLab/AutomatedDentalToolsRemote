@@ -122,10 +122,34 @@ _DECLARING_LEVEL = re.compile(r"^(?P<base>.+)_.+_SegOut$")
 # are one case -- and remembered on the artifact, because whether two files
 # sit in the same real directory is what decides whether the points may be
 # drawn on that scan without a caveat.
-ROLE_LEVELS = frozenset((
-    "cbct", "ios", "scans", "scan", "volumes", "surfaces", "meshes",
-    "landmarks", "markups", "masks", "segmentations", "seg", "transforms",
+ROLE_TOKENS = frozenset((
+    "cbct", "ios", "scan", "scans", "volume", "volumes", "surface", "surfaces",
+    "mesh", "meshes", "landmark", "landmarks", "markup", "markups",
+    "mask", "masks", "segmentation", "segmentations", "seg", "segs",
+    "transform", "transforms", "output", "outputs", "result", "results",
+    # A bare `T1/` or `T2/` level too. It looks like a timepoint and it is
+    # one, but the timepoint is already in the stems under it -- the hosted
+    # AREG fixture files `P_0001_T2.nii.gz` under `T2/` -- so the level adds
+    # nothing and splits the case away from its landmarks. Where two
+    # timepoints DID share a stem they become one case holding both, which a
+    # viewer shows as two views of one subject rather than as two subjects.
+    "t0", "t1", "t2",
 ))
+
+
+def is_role_level(part: str) -> bool:
+    """Is this directory named after a KIND of file rather than after a subject?
+
+    Every token has to be one, which is what keeps a patient out. The hosted
+    AREG fixture is why it is not a list of exact names: it files one case
+    under `CBCT Landmarks/`, `IOS Landmarks/` and `T2/`, and matching
+    `Landmarks` alone left the same patient indexed three times.
+
+    A level is only a role when EVERY token is one, so `patient_T1/` stays a
+    patient while `T1/` does not.
+    """
+    parts = tokens(part)
+    return bool(parts) and all(token.lower() in ROLE_TOKENS for token in parts)
 
 
 def split_extension(filename: str) -> tuple:
@@ -231,8 +255,8 @@ def _is_report(filename: str) -> bool:
 def _normalise_directory(relative: str) -> tuple:
     """`(directory, declared patient or "")` for a walked path.
 
-    Three kinds of level are removed. A ROLE level (`CBCT/`, `Landmarks/`) is
-    how a reader files a cohort, not who is in it. The other two a tool
+    Three kinds of level are removed. A ROLE level (`CBCT/`, `Landmarks/`,
+    `IOS Landmarks/`) is how a reader files a cohort, not who is in it. The other two a tool
     invented, and they are removed for opposite reasons. Crown_Seg's carries nothing -- dropping it is what stops
     a mesh it segmented from indexing two directories away from one it passed
     through. AMASSS's carries EVERYTHING: the scan's stem is in the folder name
@@ -242,7 +266,7 @@ def _normalise_directory(relative: str) -> tuple:
     parts = [part for part in relative.split(os.sep) if part not in ("", ".")]
     kept, declared = [], ""
     for part in parts:
-        if part.lower() in ROLE_LEVELS:
+        if is_role_level(part):
             continue
         if any(pattern.match(part) for pattern in _EXTRA_LEVELS):
             continue

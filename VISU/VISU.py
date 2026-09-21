@@ -59,14 +59,19 @@ SOURCE = "folder"
 # or a spreadsheet that a viewer has nothing to do with. Size does not separate
 # them either: 13 entries sit under 250 MB and 9 under 100.
 #
-# So it is chosen, and the choice is a short one: a CBCT to look at, one of
-# them carrying the landmarks that were placed on it, and one as a DICOM series
-# so the series path is exercised. An entry the server does not have is simply
-# not offered.
+# So it is chosen, and the choice is short. Each one holds at least three
+# subjects -- a viewer with one patient in it demonstrates nothing, the arrows
+# being the point -- and between them they cover both modalities. Counted with
+# this module's own index against the bundles on disk, not read off a README.
+# An entry the server does not have is simply not offered.
 SAMPLE_DATA = (
-    ("ASO", "CBCT_FullyAuto"),      #  99 MB  one CBCT
-    ("ASO", "CBCT_SemiAuto"),       # 247 MB  one CBCT, and landmarks beside it
-    ("ASO", "CBCT_FullyAuto_DCM"),  # 192 MB  the same scan, 365 DICOM slices
+    # 3 subjects, CBCT and IOS, every one of them carrying the landmarks that
+    # were placed on it. The one to reach for first.
+    ("AREG", "IOSCBCT_RegTestFiles"),   # 233 MB
+    # 6 subjects of CBCT, for stepping through a cohort.
+    ("AMASSS", "cohort_6"),             # 592 MB
+    # 3 subjects, CBCT and IOS, no landmarks -- the geometry on its own.
+    ("AutoMatrix", "AutoMatrixRelease3"),  # 264 MB
 )
 
 # Read ahead by one, in a daemon thread, so pressing the arrow does not also

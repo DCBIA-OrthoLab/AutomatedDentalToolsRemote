@@ -203,6 +203,29 @@ class RealShapesTest(unittest.TestCase):
             self.assertEqual(views[0].anchor.name, "p1_scan.nii.gz")
             self.assertEqual(views[0].basis, index.BASIS_ACQUISITION)
 
+    def test_a_role_folder_of_several_words_is_still_one(self):
+        # The hosted AREG fixture files one subject under `CBCT Landmarks/`,
+        # `IOS Landmarks/` and `T2/`. Matching exact names left it indexed
+        # three times.
+        with tempfile.TemporaryDirectory() as root:
+            tree(root, [
+                "d/T2/P_0001_T2.nii.gz",
+                "d/CBCT Landmarks/P_0001_T2_lm_Pred_U.mrk.json",
+                "d/IOS Landmarks/P_0001_T2_lm_Pred_L.mrk.json",
+            ])
+            cases = index.build([("folder", os.path.join(root, "d"))])
+            self.assertEqual([case.key for case in cases], ["P_0001_T2"])
+            self.assertEqual(len(cases[0].artifacts), 3)
+
+    def test_a_folder_named_after_a_subject_is_never_a_role(self):
+        # Every token has to be a role word, or `patient_T1/` would vanish.
+        self.assertTrue(index.is_role_level("Landmarks"))
+        self.assertTrue(index.is_role_level("CBCT Landmarks"))
+        self.assertTrue(index.is_role_level("T2"))
+        self.assertFalse(index.is_role_level("patient_T1"))
+        self.assertFalse(index.is_role_level("P_0001_T2"))
+        self.assertFalse(index.is_role_level("cohort_6"))
+
     def test_ios_is_a_role_folder_too(self):
         with tempfile.TemporaryDirectory() as root:
             tree(root, ["d/IOS/Upper_new_9.vtk", "d/Landmarks/Upper_new_9_Upper_O.mrk.json"])
