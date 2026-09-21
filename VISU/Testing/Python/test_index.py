@@ -177,6 +177,38 @@ class RealShapesTest(unittest.TestCase):
             self.assertEqual([case.key for case in cases], ["Upper_new_9"])
             self.assertEqual(len(cases[0].artifacts), 2)
 
+    def test_a_cohort_filed_by_role_is_one_case_per_patient(self):
+        # `<root>/CBCT/` beside `<root>/Landmarks/` is how a reader files a
+        # cohort. It is one patient, not two.
+        with tempfile.TemporaryDirectory() as root:
+            tree(root, [
+                "data/CBCT/p1_scan.nii.gz",
+                "data/CBCT/p2_scan.nii.gz",
+                "data/Landmarks/p1_scan_lm_Pred.mrk.json",
+                "data/Landmarks/p2_scan_lm_Pred.mrk.json",
+            ])
+            cases = index.build([("folder", os.path.join(root, "data"))])
+            self.assertEqual([case.key for case in cases], ["p1", "p2"])
+            self.assertEqual(len(cases[0].artifacts), 2)
+
+    def test_role_folders_do_not_make_two_files_look_co_located(self):
+        # Stripping `CBCT/` and `Landmarks/` from the KEY must not also claim
+        # the points were written beside the scan. They were not, and whether
+        # they share its frame is unknown.
+        with tempfile.TemporaryDirectory() as root:
+            tree(root, ["d/CBCT/p1_scan.nii.gz", "d/Landmarks/p1_scan_lm_Pred.mrk.json"])
+            case = index.build([("folder", os.path.join(root, "d"))])[0]
+            views = [v for v in case.views(acquisition="folder") if v.overlays]
+            self.assertEqual(len(views), 1)
+            self.assertEqual(views[0].anchor.name, "p1_scan.nii.gz")
+            self.assertEqual(views[0].basis, index.BASIS_ACQUISITION)
+
+    def test_ios_is_a_role_folder_too(self):
+        with tempfile.TemporaryDirectory() as root:
+            tree(root, ["d/IOS/Upper_new_9.vtk", "d/Landmarks/Upper_new_9_Upper_O.mrk.json"])
+            cases = index.build([("folder", os.path.join(root, "d"))])
+            self.assertEqual([case.key for case in cases], ["Upper_new_9"])
+
     def test_a_prefix_that_is_another_patient_does_not_absorb_it(self):
         # `P1` and `P10` are two patients. Matching on substring paired them
         # upstream and padded the list with a sentinel to hide it.

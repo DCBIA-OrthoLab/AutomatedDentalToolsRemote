@@ -116,6 +116,17 @@ _EXTRA_LEVELS = (re.compile(r"^crownseg_input(_.+)?$"),)
 # folder gives it up to a greedy match.
 _DECLARING_LEVEL = re.compile(r"^(?P<base>.+)_.+_SegOut$")
 
+# A folder that says what KIND of file is in it rather than whose it is:
+# `<root>/CBCT/` beside `<root>/Landmarks/` is one cohort filed by role, not
+# two cohorts. Stripped from the case key so a patient's scan and its points
+# are one case -- and remembered on the artifact, because whether two files
+# sit in the same real directory is what decides whether the points may be
+# drawn on that scan without a caveat.
+ROLE_LEVELS = frozenset((
+    "cbct", "ios", "scans", "scan", "volumes", "surfaces", "meshes",
+    "landmarks", "markups", "masks", "segmentations", "seg", "transforms",
+))
+
 
 def split_extension(filename: str) -> tuple:
     """`("P1_scan", ".nii.gz")`, compound extensions kept whole."""
@@ -220,8 +231,9 @@ def _is_report(filename: str) -> bool:
 def _normalise_directory(relative: str) -> tuple:
     """`(directory, declared patient or "")` for a walked path.
 
-    Two levels a tool invented are removed here, and they are removed for
-    opposite reasons. Crown_Seg's carries nothing -- dropping it is what stops
+    Three kinds of level are removed. A ROLE level (`CBCT/`, `Landmarks/`) is
+    how a reader files a cohort, not who is in it. The other two a tool
+    invented, and they are removed for opposite reasons. Crown_Seg's carries nothing -- dropping it is what stops
     a mesh it segmented from indexing two directories away from one it passed
     through. AMASSS's carries EVERYTHING: the scan's stem is in the folder name
     and nowhere else recoverable, its files being `<stem>_<prediction_ID>_<CODE>`
@@ -230,6 +242,8 @@ def _normalise_directory(relative: str) -> tuple:
     parts = [part for part in relative.split(os.sep) if part not in ("", ".")]
     kept, declared = [], ""
     for part in parts:
+        if part.lower() in ROLE_LEVELS:
+            continue
         if any(pattern.match(part) for pattern in _EXTRA_LEVELS):
             continue
         match = _DECLARING_LEVEL.match(part)
@@ -256,13 +270,20 @@ def is_token_prefix(prefix: str, stem: str) -> bool:
 class Artifact:
     """One file on disk, and what is known about it without opening it."""
 
-    __slots__ = ("path", "kind", "source", "directory", "name", "patient")
+    __slots__ = ("path", "kind", "source", "directory", "origin", "name", "patient")
 
-    def __init__(self, path: str, kind: str, source: str, directory: str, patient: str):
+    def __init__(self, path: str, kind: str, source: str, directory: str,
+                 patient: str, origin: str = ""):
         self.path = path
         self.kind = kind
         self.source = source
+        # Where the case is filed: role levels stripped, so a scan and its
+        # landmarks meet.
         self.directory = directory
+        # Where the file really is. Two artifacts share it only when they were
+        # written side by side, which is the evidence `View` needs and the one
+        # thing `directory` can no longer answer.
+        self.origin = origin if origin else directory
         self.name = os.path.basename(path)
         self.patient = patient
 
@@ -279,6 +300,8 @@ class View:
     views, never one anchor with everybody's points on it.
     """
 
+    # `basis` is reassigned when a view gains overlays it did not start with,
+    # so the two travel together and a caller cannot read one without the other.
     __slots__ = ("anchor", "overlays", "basis")
 
     def __init__(self, anchor, overlays, basis: str):
@@ -341,7 +364,7 @@ class Case:
             beside = [
                 artifact for artifact in overlays
                 if artifact is not anchor
-                and (artifact.source, artifact.directory) == (anchor.source, anchor.directory)
+                and (artifact.source, artifact.origin) == (anchor.source, anchor.origin)
             ]
             placed.update(id(artifact) for artifact in beside)
             views.append(View(anchor, beside, BASIS_COLOCATED))
@@ -359,7 +382,17 @@ class Case:
         ) or (views[0] if views else None)
         if fallback is None:
             return views + [View(None, homeless, BASIS_NONE)]
-        views.append(View(fallback.anchor, homeless, BASIS_ACQUISITION))
+        if not fallback.overlays:
+            # The same picture, so the same view. Appending a second one on
+            # the same anchor put the points behind a drop-down the reader had
+            # no reason to open -- and the empty view came first.
+            fallback.overlays.extend(homeless)
+            fallback.basis = BASIS_ACQUISITION
+        else:
+            # That anchor already carries overlays written beside it, and
+            # these were not. Two claims about the frame cannot share a line,
+            # so they do not share a view.
+            views.append(View(fallback.anchor, homeless, BASIS_ACQUISITION))
         return views
 
 
@@ -379,7 +412,9 @@ def build(sources, drop_timepoint: bool = False) -> list:
             subdirectories[:] = sorted(
                 name for name in subdirectories if not name.startswith(_HIDDEN_PREFIX)
             )
-            relative, declared = _normalise_directory(os.path.relpath(directory, root))
+            raw = os.path.relpath(directory, root)
+            raw = "" if raw == "." else raw
+            relative, declared = _normalise_directory(raw)
 
             if any(name.lower().endswith(_DICOM_EXTENSION) for name in filenames):
                 # One volume, named after the folder, filed with its PARENT --
@@ -393,7 +428,8 @@ def build(sources, drop_timepoint: bool = False) -> list:
                 key = os.path.join(parent, patient) if parent else patient
                 case = cases.setdefault(key, Case(key))
                 case.artifacts.append(
-                    Artifact(directory, VOLUME, label, parent, patient)
+                    Artifact(directory, VOLUME, label, parent, patient,
+                             origin=os.path.dirname(raw))
                 )
                 continue
 
@@ -411,7 +447,9 @@ def build(sources, drop_timepoint: bool = False) -> list:
                 )
                 key = os.path.join(relative, patient) if relative else patient
                 case = cases.setdefault(key, Case(key))
-                case.artifacts.append(Artifact(full, kind, label, relative, patient))
+                case.artifacts.append(
+                    Artifact(full, kind, label, relative, patient, origin=raw)
+                )
 
     return [cases[key] for key in sorted(_absorb_orphans(cases))]
 

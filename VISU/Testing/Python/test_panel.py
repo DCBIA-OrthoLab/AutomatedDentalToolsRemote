@@ -224,14 +224,43 @@ class PanelTest(unittest.TestCase):
                          [os.path.join("acquired", "p1"),
                           os.path.join("oriented", "p1")])
 
-    def test_the_folder_is_remembered_and_reopened(self):
-        self.open(["scans/p1_scan.nii.gz"])
+    def test_opening_the_module_indexes_but_loads_nothing(self):
+        """A module that opens must not put somebody's cohort in their scene."""
+        self.open([f"scans/p{n}_scan.nii.gz" for n in range(1, 4)])
+        del SCENE[:]
+
         second = VISU.VISUWidget()
         second.setup()
         self.assertEqual(second.folderInput.currentPath,
                          os.path.join(self.root.name, "scans"))
-        # Restoring notifies, so the panel opens on its cases rather than empty.
-        self.assertEqual(len(second.cases), 1)
+        self.assertEqual(len(second.cases), 3, "the folder was not indexed")
+        self.assertEqual(SCENE, [], "opening the module loaded a case")
+        self.assertIn("arrow", second.countLabel.text)
+
+        # The first press shows case one rather than stepping past it.
+        second.onNext()
+        self.assertEqual(second.position, 0)
+        self.assertEqual(len(SCENE), 1)
+        self.assertNotIn("arrow", second.countLabel.text)
+        second.onNext()
+        self.assertEqual(second.position, 1)
+
+    def test_choosing_a_folder_shows_its_first_case_at_once(self):
+        # Choosing IS the action. Only a folder the panel remembered by itself
+        # waits for a press.
+        self.open(["scans/p1_scan.nii.gz"])
+        self.assertEqual(len(SCENE), 1)
+        self.assertNotIn("arrow", self.widget.countLabel.text)
+
+    def test_picking_a_case_on_a_freshly_opened_panel_shows_it(self):
+        self.open([f"scans/p{n}_scan.nii.gz" for n in range(1, 4)])
+        del SCENE[:]
+        second = VISU.VISUWidget()
+        second.setup()
+        self.assertEqual(SCENE, [])
+        second.caseCombo.setCurrentIndex(2)
+        self.assertEqual(second.position, 2)
+        self.assertEqual(len(SCENE), 1)
 
 
 if __name__ == "__main__":

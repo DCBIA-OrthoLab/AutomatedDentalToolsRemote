@@ -175,6 +175,15 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # `blockSignals`, because what has to be suppressed is this panel's
         # reaction and not the widget's signal.
         self._filling = False
+        # True between opening the module and the reader's first action.
+        # Opening a module must not put somebody's cohort in their scene, so a
+        # remembered folder is INDEXED and not shown; the first press of an
+        # arrow shows what is already selected rather than moving off it.
+        self._waiting = False
+        # Set only while `_restore` is driving the input, so `onIndex` can
+        # tell a folder the reader just chose -- which is an action, and shows
+        # at once -- from one the panel remembered, which must not.
+        self._restoring = False
 
     # -- building the panel ------------------------------------------------
 
@@ -275,9 +284,17 @@ class VISUWidget(ScriptedLoadableModuleWidget):
     # -- settings ----------------------------------------------------------
 
     def _restore(self) -> None:
-        # Setting the path notifies, which indexes: the panel opens on the
-        # folder it was last pointed at rather than on an empty form.
-        self.folderInput.setCurrentPath(qt.QSettings().value(_KEY_FOLDER, "") or "")
+        remembered = qt.QSettings().value(_KEY_FOLDER, "") or ""
+        if not remembered:
+            return
+        # Setting the path notifies, which indexes. `_waiting` is what keeps
+        # that from also LOADING: the panel opens knowing what the folder
+        # holds and with the scene untouched.
+        self._restoring = True
+        try:
+            self.folderInput.setCurrentPath(remembered)
+        finally:
+            self._restoring = False
 
     def _remember(self) -> None:
         qt.QSettings().setValue(_KEY_FOLDER, self.folderInput.currentPath)
@@ -286,6 +303,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
 
     def onIndex(self) -> None:
         self._remember()
+        self._waiting = self._restoring
         folder = self.folderInput.currentPath
         self.cases = index.build([(SOURCE, folder)] if folder else [])
         self.position = 0
@@ -297,7 +315,12 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self._filling = False
 
         if not self.cases:
+            self._waiting = False
             self.countLabel.text = _("Nothing to show in that folder.")
+        elif self._waiting:
+            self.countLabel.text = _(
+                "{count} case(s). Press an arrow to show the first."
+            ).format(count=len(self.cases))
         else:
             self.countLabel.text = _("{count} case(s).").format(count=len(self.cases))
         self._refresh()
@@ -311,6 +334,13 @@ class VISUWidget(ScriptedLoadableModuleWidget):
     def _step(self, by: int) -> None:
         if not self.cases:
             return
+        if self._waiting:
+            # The first press shows what is selected. Moving instead would
+            # skip case one of a cohort nobody has seen yet.
+            self._waiting = False
+            self.countLabel.text = _("{count} case(s).").format(count=len(self.cases))
+            self._refresh()
+            return
         # Clamped rather than wrapped: a reader stepping through a cohort wants
         # to be told they are at the end, not silently returned to the start.
         self.position = max(0, min(len(self.cases) - 1, self.position + by))
@@ -319,12 +349,15 @@ class VISUWidget(ScriptedLoadableModuleWidget):
     def onPick(self, position: int) -> None:
         if self._filling:
             return
-        if 0 <= position < len(self.cases) and position != self.position:
+        if not (0 <= position < len(self.cases)):
+            return
+        if position != self.position or self._waiting:
+            self._waiting = False
             self.position = position
             self._refresh()
 
     def onView(self, _position: int) -> None:
-        if not self._filling:
+        if not self._filling and not self._waiting:
             self._show()
 
     def _refresh(self) -> None:
@@ -349,7 +382,19 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self.viewCombo.clear()
         for view in self.views:
             self.viewCombo.addItem(view.label)
+        # Open on a view that has something ON it. A case can offer the scan
+        # as sent and the scan a tool oriented, and only one of them carries
+        # the points a reader came to look at.
+        carrying = next(
+            (n for n, view in enumerate(self.views) if view.overlays), 0
+        )
+        self.viewCombo.setCurrentIndex(carrying)
         self._filling = False
+        if self._waiting:
+            # Controls filled, nothing opened. Reading ahead waits too: it is
+            # a courtesy for a reader who is stepping, not for one who has not
+            # arrived.
+            return
         self._show()
         self._prefetchNeighbour()
 
