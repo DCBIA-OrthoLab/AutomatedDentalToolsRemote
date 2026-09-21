@@ -128,6 +128,12 @@ class QLayout(QObject):
     def addWidget(self, widget, stretch=0):
         self.widgets.append(widget)
 
+    def addLayout(self, layout, stretch=0):
+        """A nested layout is an item of its own, and its widgets are still in
+        the tree. Recorded in `widgets` so a panel's contents can be walked
+        whether a row was built as one layout or two."""
+        self.widgets.append(layout)
+
     def addStretch(self, stretch=1):
         """Recorded, not discarded. WHERE the stretch sits is the difference
         between links that start at the left edge of the options they act on and
