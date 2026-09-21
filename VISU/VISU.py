@@ -36,7 +36,7 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadab
 
 from ServerToolsCoreLib import design, formgen, get_client, slicer_io, testfile_entries
 from ServerToolsCoreLib.worker import BackgroundJob
-from VISULib import edits, index
+from VISULib import edits, index, review
 
 logger = logging.getLogger("VISU")
 
@@ -527,6 +527,10 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # True while the panel is writing the scene from its own chips, so
         # the observer that reads the scene back does not chase it.
         self._syncing = False
+        # The case keys this reader has marked as needing work, and the
+        # folder they belong to. Read back off the folder on every open.
+        self._flagged = set()
+        self._folder = ""
 
     # -- building the panel ------------------------------------------------
 
@@ -541,6 +545,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self.panel = qt.QVBoxLayout(self.uiWidget)
         self._buildInput()
         self._buildCase()
+        self._buildReview()
         self._buildModify()
         self.panel.addStretch(1)
         self._buildNavigation()
@@ -627,6 +632,34 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self.contentsLabel.setWordWrap(True)
         outer.addWidget(self.contentsLabel)
 
+    def _buildReview(self) -> None:
+        """What the reader is producing besides corrected files: a list.
+
+        Six cases look fine, two do not, and what happens next -- re-running
+        those two, handing them on, coming back tomorrow -- depends on the
+        list outliving the session. It is written beside the data, so whoever
+        opens the folder next sees what was already judged.
+        """
+        box = ctk.ctkCollapsibleButton()
+        box.text = _("Review")
+        box.collapsed = True
+        self.panel.addWidget(box)
+        column = qt.QVBoxLayout(box)
+
+        self.reviewLabel = design.hint_label("")
+        self.reviewLabel.setWordWrap(True)
+        column.addWidget(self.reviewLabel)
+
+        row = qt.QHBoxLayout()
+        row.setSpacing(design.SPACING_SM)
+        self.nextFlaggedButton = design.secondary_button(_("Go to next flagged"))
+        self.nextFlaggedButton.connect("clicked()", self.onNextFlagged)
+        row.addWidget(self.nextFlaggedButton, 1)
+        self.clearFlagsButton = design.secondary_button(_("Clear all flags"))
+        self.clearFlagsButton.connect("clicked()", self.onClearFlags)
+        row.addWidget(self.clearFlagsButton, 1)
+        column.addLayout(row)
+
     def _buildModify(self) -> None:
         """What may be changed, and nothing else.
 
@@ -698,6 +731,15 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # reader does not have to know which file that lands in.
         actions = qt.QHBoxLayout()
         actions.setSpacing(design.SPACING_SM)
+        self.flagButton = design.toggle_button(_("Flag"))
+        self.flagButton.toolTip = _(
+            "Mark this patient as needing work. The list is written beside "
+            "the data, so it is still there tomorrow and for whoever opens "
+            "the folder next."
+        )
+        self.flagButton.connect("clicked()", self.onFlagToggled)
+        actions.addWidget(self.flagButton, 1)
+
         self.saveButton = design.primary_button(_("Save"))
         self.saveButton.toolTip = _(
             "Write what changed: the points that moved, and the scan's "
@@ -733,6 +775,9 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         folder = self.folderInput.currentPath
         self.cases = index.build([(SOURCE, folder)] if folder else [])
         self.position = 0
+        self._folder = folder
+        self._flagged = review.load(folder) if folder else set()
+        self._describeReview()
 
         self._filling = True
         self.caseCombo.clear()
@@ -796,6 +841,76 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             box = self.showGroup.boxes.get(label)
             if box is not None:
                 box.setEnabled(kind in present)
+
+    def onFlagToggled(self) -> None:
+        if not self.cases:
+            self.flagButton.setChecked(False)
+            return
+        key = self.cases[self.position].key
+        if self.flagButton.isChecked():
+            self._flagged.add(key)
+        else:
+            self._flagged.discard(key)
+        if self._folder and not review.save(self._folder, self._flagged):
+            # Said once, where the list is, rather than in a dialog over a
+            # scan. A hosted sample is unpacked into a temporary folder the
+            # next download deletes; a share can be read-only.
+            self.reviewLabel.text = _(
+                "Kept for this session only - this folder will not take the list."
+            )
+            return
+        self._describeReview()
+        self._describePosition()
+
+    def onNextFlagged(self) -> None:
+        """Step to the next marked patient, wrapping once."""
+        if not self._flagged or not self.cases:
+            return
+        keys = [case.key for case in self.cases]
+        order = keys[self.position + 1:] + keys[:self.position + 1]
+        following = next((key for key in order if key in self._flagged), None)
+        if following is None:
+            return
+        self._waiting = False
+        self.position = keys.index(following)
+        self._refresh()
+
+    def onClearFlags(self) -> None:
+        self._flagged = set()
+        if self._folder:
+            review.save(self._folder, self._flagged)
+        self._readFlag()
+        self._describeReview()
+        self._describePosition()
+
+    def _describePosition(self) -> None:
+        """Which of how many, and whether this one is marked.
+
+        The mark belongs here and not only in the Review box: a reader
+        stepping through a cohort looks at this line and nowhere else.
+        """
+        if not self.cases:
+            self.positionLabel.text = ""
+            return
+        case = self.cases[self.position]
+        self.positionLabel.text = _("{at} of {total} - {patient}{mark}").format(
+            at=self.position + 1, total=len(self.cases), patient=case.label,
+            mark=_("   FLAGGED") if case.key in self._flagged else "",
+        )
+
+    def _readFlag(self) -> None:
+        """Put the button where this patient's mark is, without re-saving."""
+        marked = bool(self.cases) and self.cases[self.position].key in self._flagged
+        if self.flagButton.isChecked() != marked:
+            self.flagButton.setChecked(marked)
+
+    def _describeReview(self) -> None:
+        self.reviewLabel.text = (
+            review.as_text(self._flagged) if self._flagged
+            else _("Nothing flagged in this folder.")
+        )
+        self.nextFlaggedButton.enabled = bool(self._flagged)
+        self.clearFlagsButton.enabled = bool(self._flagged)
 
     def unlocked(self) -> set:
         """What the reader has said may move."""
@@ -941,10 +1056,13 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         has = bool(self.cases)
         self.previousButton.enabled = has and self.position > 0
         self.nextButton.enabled = has and self.position < len(self.cases) - 1
+        self._readFlag()
+        marked = bool(self.cases) and self.cases[self.position].key in self._flagged
         self.positionLabel.text = (
-            _("{at} of {total} - {patient}").format(
+            _("{at} of {total} - {patient}{mark}").format(
                 at=self.position + 1, total=len(self.cases),
                 patient=self.cases[self.position].label,
+                mark=_("   FLAGGED") if marked else "",
             ) if has else ""
         )
         if not has:

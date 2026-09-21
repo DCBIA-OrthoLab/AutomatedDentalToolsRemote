@@ -11,6 +11,7 @@ set(MODULE_PYTHON_SCRIPTS
   VISULib/__init__.py
   VISULib/edits.py
   VISULib/index.py
+  VISULib/review.py
   )
 
 # No icon: it uses Slicer's default one.

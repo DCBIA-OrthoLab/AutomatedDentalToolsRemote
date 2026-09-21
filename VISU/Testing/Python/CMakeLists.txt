@@ -8,6 +8,12 @@
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 add_test(
+  NAME VISU_test_review
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_review
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+
+add_test(
   NAME VISU_test_index
   COMMAND ${Python3_EXECUTABLE} -m unittest test_index
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}

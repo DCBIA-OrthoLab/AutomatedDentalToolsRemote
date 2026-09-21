@@ -684,6 +684,70 @@ class PanelTest(unittest.TestCase):
         self.assertIsNone(self.widget._adjustment)
         self.assertIn("Reloaded", self.widget.modifyLabel.text)
 
+    def test_flagging_a_patient_writes_the_list_beside_the_data(self):
+        # The one thing a reviewer produces that is not a corrected file.
+        self.open([f"scans/p{n}_scan.nii.gz" for n in range(1, 4)])
+        self.widget.flagButton.setChecked(True)
+        self.widget.onFlagToggled()
+        self.assertIn("p1", self.widget.reviewLabel.text)
+        self.assertEqual(
+            VISU.review.load(os.path.join(self.root.name, "scans")), {"p1"})
+
+    def test_the_mark_follows_the_patient_and_shows_in_the_position_line(self):
+        self.open([f"scans/p{n}_scan.nii.gz" for n in range(1, 4)])
+        self.widget.flagButton.setChecked(True)
+        self.widget.onFlagToggled()
+        self.assertIn("FLAGGED", self.widget.positionLabel.text)
+
+        self.widget.onNext()
+        self.assertFalse(self.widget.flagButton.isChecked(), "the mark followed")
+        self.assertNotIn("FLAGGED", self.widget.positionLabel.text)
+
+        self.widget.onPrevious()
+        self.assertTrue(self.widget.flagButton.isChecked())
+
+    def test_the_marks_are_read_back_when_the_folder_is_opened_again(self):
+        self.open([f"scans/p{n}_scan.nii.gz" for n in range(1, 4)])
+        self.widget.flagButton.setChecked(True)
+        self.widget.onFlagToggled()
+
+        second = VISU.VISUWidget()
+        second.setup()
+        second.folderInput.setCurrentPath(os.path.join(self.root.name, "scans"))
+        self.assertEqual(second._flagged, {"p1"})
+        self.assertIn("p1", second.reviewLabel.text)
+
+    def test_go_to_next_flagged_skips_what_is_fine(self):
+        self.open([f"scans/p{n}_scan.nii.gz" for n in range(1, 5)])
+        for position in (0, 2):
+            self.widget.position = position
+            self.widget._refresh()
+            self.widget.flagButton.setChecked(True)
+            self.widget.onFlagToggled()
+
+        self.widget.position = 0
+        self.widget._refresh()
+        self.widget.onNextFlagged()
+        self.assertEqual(self.widget.position, 2)
+        self.widget.onNextFlagged()
+        self.assertEqual(self.widget.position, 0, "it did not wrap")
+
+    def test_clearing_puts_the_button_down_too(self):
+        self.open(["scans/p1_scan.nii.gz"])
+        self.widget.flagButton.setChecked(True)
+        self.widget.onFlagToggled()
+        self.widget.onClearFlags()
+        self.assertFalse(self.widget.flagButton.isChecked())
+        self.assertEqual(self.widget._flagged, set())
+        self.assertIn("Nothing flagged", self.widget.reviewLabel.text)
+
+    def test_a_folder_that_will_not_take_the_list_says_so(self):
+        self.open(["scans/p1_scan.nii.gz"])
+        self.widget._folder = os.path.join(self.root.name, "not-there")
+        self.widget.flagButton.setChecked(True)
+        self.widget.onFlagToggled()
+        self.assertIn("this session only", self.widget.reviewLabel.text)
+
     def test_leaving_the_module_leaves_the_scene_alone(self):
         # Models, Volume Rendering and Segment Editor are where a reader goes
         # to work on what VISU just showed them. Emptying the scene on the way
