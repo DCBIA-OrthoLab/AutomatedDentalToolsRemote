@@ -155,12 +155,14 @@ class _FakeClient:
     fail = False
 
     def list_tools(self):
-        return {"ASO": {}, "AMASSS": {}, "Surg_Mov_Pred": {}}
+        # ALI and ALI_CBCT share a bundle through deployment.toml, as they
+        # really do; Surg_Mov_Pred hosts nothing.
+        return {"ALI": {}, "ALI_CBCT": {}, "AMASSS": {}, "Surg_Mov_Pred": {}}
 
     def list_tool_data(self, tool):
         if _FakeClient.fail:
             raise RuntimeError("the server is away")
-        if tool == "ASO":
+        if tool in ("ALI", "ALI_CBCT"):
             return {"testfiles": ["CBCT_SemiAuto"],
                     "entries": {"testfiles": [{"name": "CBCT_SemiAuto",
                                                "kind": "folder", "size": 12}]}}
@@ -342,6 +344,35 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(len(SCENE), 1)
 
 
+class HostedChoicesTest(unittest.TestCase):
+    """Turning what every tool answers into what a reader should see."""
+
+    def test_one_file_offered_by_four_tool_names_is_one_entry(self):
+        found = [(tool, "FullyAuto.zip", "folder", 99)
+                 for tool in ("AREG", "AREG_CBCT", "AREG_IOS", "AREG_IOSCBCT")]
+        entries, offered = VISU.hosted_choices(found)
+        self.assertEqual([entry["name"] for entry in entries], ["FullyAuto.zip"])
+        # Downloadable from the first name alphabetically; they are the same file.
+        self.assertEqual(offered["FullyAuto.zip"], ("AREG", "FullyAuto.zip", "folder"))
+
+    def test_two_different_files_of_one_name_keep_their_tool(self):
+        entries, offered = VISU.hosted_choices([
+            ("AMASSS", "scan.nii.gz", "file", 10),
+            ("CLIC", "scan.nii.gz", "file", 20),
+        ])
+        self.assertEqual([entry["name"] for entry in entries],
+                         ["AMASSS / scan.nii.gz", "CLIC / scan.nii.gz"])
+
+    def test_entries_are_ordered_and_keep_what_a_picker_shows(self):
+        entries, _ = VISU.hosted_choices([
+            ("B", "second.vtk", "file", 2), ("A", "first.nii.gz", "folder", 1),
+        ])
+        self.assertEqual([entry["name"] for entry in entries],
+                         ["first.nii.gz", "second.vtk"])
+        self.assertEqual(entries[0]["kind"], "folder")
+        self.assertEqual(entries[0]["size"], 1)
+
+
 class TestFileTest(unittest.TestCase):
     """The hosted dropdown: the same one every tool panel has."""
 
@@ -359,34 +390,34 @@ class TestFileTest(unittest.TestCase):
         combo = self.widget.sources.combo
         return [combo.itemText(n) for n in range(combo.count)]
 
-    def test_every_tool_s_test_files_are_offered_and_say_whose_they_are(self):
-        # This panel is not a tool, so it borrows all of them -- and two tools
-        # may host a file of the same name.
+    def test_every_tool_s_test_files_are_offered_once_each(self):
+        # This panel is not a tool, so it borrows all of them -- and several
+        # tool names share one bundle, which used to list a file per name.
         self.widget.enter()
         offered = self.labels()
-        self.assertTrue(any("ASO / CBCT_SemiAuto" in text for text in offered), offered)
-        self.assertTrue(any("AMASSS / MG_test_scan.nii.gz" in text for text in offered))
+        self.assertTrue(any("CBCT_SemiAuto" in text for text in offered), offered)
+        self.assertTrue(any("MG_test_scan.nii.gz" in text for text in offered))
         # A tool hosting nothing adds nothing.
         self.assertFalse(any("Surg_Mov_Pred" in text for text in offered))
 
     def test_picking_a_hosted_folder_fetches_it_and_opens_it(self):
         self.widget.enter()
-        self.widget.onTestFile("ASO / CBCT_SemiAuto")
-        self.assertEqual(DOWNLOADS, [("ASO", "CBCT_SemiAuto")])
+        self.widget.onTestFile("CBCT_SemiAuto")
+        self.assertEqual(DOWNLOADS, [("ALI", "CBCT_SemiAuto")])
         self.assertEqual([case.key for case in self.widget.cases], ["p1", "p2"])
         self.assertEqual(len(SCENE), 1, "the first case was not shown")
 
     def test_a_hosted_single_scan_is_a_cohort_of_one(self):
         self.widget.enter()
-        self.widget.onTestFile("AMASSS / MG_test_scan.nii.gz")
+        self.widget.onTestFile("MG_test_scan.nii.gz")
         self.assertEqual(DOWNLOADS, [("AMASSS", "MG_test_scan.nii.gz")])
         self.assertEqual([case.key for case in self.widget.cases], ["MG_test"])
 
     def test_the_previous_download_is_removed_when_the_next_lands(self):
         self.widget.enter()
-        self.widget.onTestFile("ASO / CBCT_SemiAuto")
+        self.widget.onTestFile("CBCT_SemiAuto")
         first = self.widget._staging
-        self.widget.onTestFile("AMASSS / MG_test_scan.nii.gz")
+        self.widget.onTestFile("MG_test_scan.nii.gz")
         self.assertFalse(os.path.exists(first), "a cohort was left in the temp dir")
 
     def test_a_server_that_is_away_costs_the_dropdown_and_not_the_panel(self):

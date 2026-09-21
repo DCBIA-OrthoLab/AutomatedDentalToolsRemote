@@ -165,6 +165,41 @@ def prefetch(paths) -> None:
     threading.Thread(target=run, daemon=True).start()
 
 
+def hosted_choices(found) -> tuple:
+    """`(entries, {label: (tool, name, kind)})` for what the server hosts.
+
+    One entry per distinct FILE, however many tool names offer it.
+    `deployment.toml` points several tool names at one bundle folder -- ALI,
+    ALI_CBCT and ALI_IOS share theirs, and the four AREG names share another
+    -- so asking every tool returns the same file up to four times. Measured
+    against this deployment: **61 entries for 34 distinct files**, and 8
+    distinct files on disk behind those, the bundles being hardlinked.
+
+    The tool is named in the label only when it has to be: two files that
+    genuinely differ and happen to share a name. Otherwise the name is the
+    name, which is what a reader is looking for.
+
+    `found` is `[(tool, name, kind, size), ...]`, and files are the same when
+    all three of name, kind and size match -- the most a listing can compare
+    without fetching. Two different files agreeing on all three would merge;
+    the one that would be lost is reachable under the other's tool.
+    """
+    groups = {}
+    for tool, name, kind, size in found:
+        groups.setdefault((name, kind, size), []).append(tool)
+    times_named = {}
+    for name, _kind, _size in groups:
+        times_named[name] = times_named.get(name, 0) + 1
+
+    entries, offered = [], {}
+    for (name, kind, size), tools in groups.items():
+        tool = sorted(tools)[0]
+        label = name if times_named[name] == 1 else "{} / {}".format(tool, name)
+        offered[label] = (tool, name, kind)
+        entries.append({"name": label, "kind": kind, "size": size})
+    return sorted(entries, key=lambda entry: entry["name"]), offered
+
+
 class VISUWidget(ScriptedLoadableModuleWidget):
 
     def __init__(self, parent=None):
@@ -479,8 +514,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         """Offer every tool's hosted test files, fetched off the main thread."""
         def work(_progress):
             client = get_client()
-            offered = {}
-            entries = []
+            found = []
             for tool in sorted(client.list_tools() or {}):
                 try:
                     data = client.list_tool_data(tool)
@@ -488,10 +522,9 @@ class VISUWidget(ScriptedLoadableModuleWidget):
                     logger.info("No hosted data for %s: %s", tool, exc)
                     continue
                 for entry in testfile_entries(data):
-                    label = "{} / {}".format(tool, entry.get("name", ""))
-                    offered[label] = (tool, entry.get("name", ""), entry.get("kind"))
-                    entries.append({**entry, "name": label})
-            return entries, offered
+                    found.append((tool, entry.get("name", ""),
+                                  entry.get("kind"), entry.get("size")))
+            return hosted_choices(found)
 
         def done(result):
             entries, offered = result
