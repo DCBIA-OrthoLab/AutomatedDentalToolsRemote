@@ -31,20 +31,21 @@ import slicer
 from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadableModuleWidget
 
-from ServerToolsCoreLib import design, slicer_io
+from ServerToolsCoreLib import design, formgen, slicer_io
 from VISULib import index
 
 logger = logging.getLogger("VISU")
 
 _SETTINGS_GROUP = "VISU"
-_KEY_SCANS = f"{_SETTINGS_GROUP}/ScansFolder"
-_KEY_RESULTS = f"{_SETTINGS_GROUP}/ResultsFolder"
+_KEY_FOLDER = f"{_SETTINGS_GROUP}/Folder"
 
-# The label the acquisition folder carries through the index. An overlay with
-# no anchor in its own directory falls back to a scan from THIS source, which
-# is what puts ALI's landmarks on the scan they were predicted from.
-ACQUISITION = "Scans"
-RESULTS = "Results"
+# One folder in, and the index carries one source label for everything under
+# it. Two fields were a worse question: a reader has one folder in front of
+# them, and whether it holds the acquisition, a run's output or both is
+# something the folder answers rather than something to be declared. An
+# overlay with no anchor in its own directory falls back to a scan from this
+# source, which is what puts ALI's landmarks on the scan beside them.
+SOURCE = "folder"
 
 # Read ahead by one, in a daemon thread, so pressing the arrow does not also
 # pay for the disk. It warms the page cache and touches no MRML node: loading
@@ -179,38 +180,39 @@ class VISUWidget(ScriptedLoadableModuleWidget):
 
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
-        self._buildFolders()
+        # A root of our own, and `design.apply` is the reason for it: the
+        # stylesheet goes down a whole widget tree, and `self.parent` also
+        # holds Slicer's own Reload & Test box. Styling that would repaint a
+        # part of the application this module does not own.
+        self.uiWidget = qt.QWidget()
+        self.layout.addWidget(self.uiWidget)
+        self.panel = qt.QVBoxLayout(self.uiWidget)
+        self._buildInput()
         self._buildCase()
-        self.layout.addStretch(1)
-        if self.parent is not None:
-            design.apply(self.parent)
+        self.panel.addStretch(1)
+        self._buildNavigation()
+        design.apply(self.uiWidget)
         self._restore()
         self._refresh()
 
-    def _buildFolders(self) -> None:
+    def _buildInput(self) -> None:
         box = ctk.ctkCollapsibleButton()
-        box.text = _("Folders")
-        self.layout.addWidget(box)
+        box.text = _("Folder")
+        self.panel.addWidget(box)
         form = qt.QFormLayout(box)
 
-        self.scansEdit = ctk.ctkPathLineEdit()
-        self.scansEdit.filters = ctk.ctkPathLineEdit.Dirs
-        self.scansEdit.toolTip = _(
-            "The folder the scans came from. Landmarks whose tool wrote no scan of "
-            "its own are drawn on these."
+        # The same input row every tool panel uses, in folder-only mode: it
+        # browses, it captions what was chosen, and it reports every change --
+        # which a ctkPathLineEdit restricted to Dirs does not, its
+        # currentPathChanged being swallowed for a folder.
+        self.folderInput = formgen.FileOrFolderInput(modes=("folder",))
+        self.folderInput.container.toolTip = _(
+            "A folder of scans, of results, or of both. Everything under it is "
+            "indexed: a patient's scan, its masks, its surfaces and its landmarks "
+            "are shown together."
         )
-        form.addRow(_("Scans"), self.scansEdit)
-
-        self.resultsEdit = ctk.ctkPathLineEdit()
-        self.resultsEdit.filters = ctk.ctkPathLineEdit.Dirs
-        self.resultsEdit.toolTip = _(
-            "What a run wrote. Optional: a folder holding both works just as well."
-        )
-        form.addRow(_("Results"), self.resultsEdit)
-
-        self.indexButton = design.primary_button(_("Open"))
-        self.indexButton.connect("clicked()", self.onIndex)
-        form.addRow("", self.indexButton)
+        self.folderInput.onPathChanged(self.onIndex)
+        form.addRow(_("Folder"), self.folderInput.container)
 
         self.countLabel = design.hint_label("")
         form.addRow("", self.countLabel)
@@ -218,27 +220,13 @@ class VISUWidget(ScriptedLoadableModuleWidget):
     def _buildCase(self) -> None:
         box = ctk.ctkCollapsibleButton()
         box.text = _("Case")
-        self.layout.addWidget(box)
+        self.panel.addWidget(box)
         outer = qt.QVBoxLayout(box)
-
-        row = qt.QHBoxLayout()
-        self.previousButton = design.compact_button("◄")
-        self.previousButton.setShortcut(qt.QKeySequence(qt.Qt.Key_Left))
-        self.previousButton.toolTip = _("Previous case (Left arrow)")
-        self.previousButton.connect("clicked()", self.onPrevious)
-        row.addWidget(self.previousButton)
 
         self.caseCombo = qt.QComboBox()
         self.caseCombo.toolTip = _("Jump to a case")
         self.caseCombo.currentIndexChanged.connect(self.onPick)
-        row.addWidget(self.caseCombo, 1)
-
-        self.nextButton = design.compact_button("►")
-        self.nextButton.setShortcut(qt.QKeySequence(qt.Qt.Key_Right))
-        self.nextButton.toolTip = _("Next case (Right arrow)")
-        self.nextButton.connect("clicked()", self.onNext)
-        row.addWidget(self.nextButton)
-        outer.addLayout(row)
+        outer.addWidget(self.caseCombo)
 
         self.viewCombo = qt.QComboBox()
         self.viewCombo.toolTip = _(
@@ -258,27 +246,48 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self.contentsLabel.setWordWrap(True)
         outer.addWidget(self.contentsLabel)
 
+    def _buildNavigation(self) -> None:
+        """The two steppers, at the very bottom and with nothing between them.
+
+        Below the stretch on purpose: this is the control a reader uses while
+        looking at the SCAN, so it wants a fixed place at the edge of the
+        panel rather than a position that moves with how much a case has to
+        say about itself. Nothing between them either -- a target you reach
+        for without looking must not have a drop-down beside it.
+        """
+        row = qt.QHBoxLayout()
+        row.setSpacing(design.SPACING_SM)
+
+        self.previousButton = design.nav_button("◀")
+        self.previousButton.setShortcut(qt.QKeySequence(qt.Qt.Key_Left))
+        self.previousButton.toolTip = _("Previous case (Left arrow)")
+        self.previousButton.connect("clicked()", self.onPrevious)
+        row.addWidget(self.previousButton, 1)
+
+        self.nextButton = design.nav_button("▶")
+        self.nextButton.setShortcut(qt.QKeySequence(qt.Qt.Key_Right))
+        self.nextButton.toolTip = _("Next case (Right arrow)")
+        self.nextButton.connect("clicked()", self.onNext)
+        row.addWidget(self.nextButton, 1)
+
+        self.panel.addLayout(row)
+
     # -- settings ----------------------------------------------------------
 
     def _restore(self) -> None:
-        settings = qt.QSettings()
-        self.scansEdit.currentPath = settings.value(_KEY_SCANS, "") or ""
-        self.resultsEdit.currentPath = settings.value(_KEY_RESULTS, "") or ""
+        # Setting the path notifies, which indexes: the panel opens on the
+        # folder it was last pointed at rather than on an empty form.
+        self.folderInput.setCurrentPath(qt.QSettings().value(_KEY_FOLDER, "") or "")
 
     def _remember(self) -> None:
-        settings = qt.QSettings()
-        settings.setValue(_KEY_SCANS, self.scansEdit.currentPath)
-        settings.setValue(_KEY_RESULTS, self.resultsEdit.currentPath)
+        qt.QSettings().setValue(_KEY_FOLDER, self.folderInput.currentPath)
 
     # -- actions -----------------------------------------------------------
 
     def onIndex(self) -> None:
         self._remember()
-        sources = [
-            (ACQUISITION, self.scansEdit.currentPath),
-            (RESULTS, self.resultsEdit.currentPath),
-        ]
-        self.cases = index.build([(label, path) for label, path in sources if path])
+        folder = self.folderInput.currentPath
+        self.cases = index.build([(SOURCE, folder)] if folder else [])
         self.position = 0
 
         self._filling = True
@@ -288,7 +297,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self._filling = False
 
         if not self.cases:
-            self.countLabel.text = _("Nothing to show in those folders.")
+            self.countLabel.text = _("Nothing to show in that folder.")
         else:
             self.countLabel.text = _("{count} case(s).").format(count=len(self.cases))
         self._refresh()
@@ -336,7 +345,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         if self.caseCombo.currentIndex != self.position:
             self.caseCombo.setCurrentIndex(self.position)
 
-        self.views = self.cases[self.position].views(acquisition=ACQUISITION)
+        self.views = self.cases[self.position].views(acquisition=SOURCE)
         self.viewCombo.clear()
         for view in self.views:
             self.viewCombo.addItem(view.label)
@@ -366,7 +375,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         else:
             self.frameLabel.text = ""
         self.contentsLabel.text = "\n".join(
-            f"{artifact.kind}: {artifact.name}  [{artifact.source}]"
+            f"{artifact.kind}: {artifact.name}"
             for artifact in [view.anchor] + view.overlays
             if artifact is not None
         )

@@ -146,12 +146,11 @@ class PanelTest(unittest.TestCase):
         self.widget = VISU.VISUWidget()
         self.widget.setup()
 
-    def open(self, paths, results=()):
+    def open(self, paths, folder="scans"):
+        # One folder in. Setting the path is what indexes -- the input reports
+        # every change and the panel listens, so there is no Open button.
         tree(self.root.name, paths)
-        self.widget.scansEdit.currentPath = os.path.join(self.root.name, "scans")
-        if results:
-            self.widget.resultsEdit.currentPath = os.path.join(self.root.name, "out")
-        self.widget.onIndex()
+        self.widget.folderInput.setCurrentPath(os.path.join(self.root.name, folder))
 
     def test_the_arrows_walk_the_cohort_and_stop_at_both_ends(self):
         self.open([f"scans/p{n}_scan.nii.gz" for n in range(1, 4)])
@@ -190,10 +189,11 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(markups[0].points, [False, False])
 
     def test_the_panel_says_which_scan_the_points_are_drawn_on(self):
-        self.open(
-            ["scans/p1_scan.nii.gz", "out/p1_Or.nii.gz", "out/p1_lm_Or.mrk.json"],
-            results=True,
-        )
+        # What ASO actually writes: the oriented scan, its landmarks and its
+        # transform, side by side in one directory.
+        self.open(["scans/p1_scan.nii.gz",
+                   "scans/p1_Or.nii.gz",
+                   "scans/p1_lm_Or.mrk.json"])
         labels = [self.widget.viewCombo.itemText(n)
                   for n in range(self.widget.viewCombo.count)]
         self.assertIn("p1_Or.nii.gz", labels)
@@ -206,18 +206,32 @@ class PanelTest(unittest.TestCase):
 
     def test_a_folder_with_nothing_in_it_says_so_rather_than_breaking(self):
         os.makedirs(os.path.join(self.root.name, "scans"))
-        self.widget.scansEdit.currentPath = os.path.join(self.root.name, "scans")
-        self.widget.onIndex()
+        self.widget.folderInput.setCurrentPath(os.path.join(self.root.name, "scans"))
         self.assertEqual(self.widget.cases, [])
         self.assertIn("Nothing", self.widget.countLabel.text)
         self.assertFalse(self.widget.nextButton.enabled)
 
-    def test_the_folders_are_remembered(self):
+    def test_two_stages_in_two_subfolders_are_two_cases(self):
+        """The cost of asking for one folder, stated rather than hidden.
+
+        With two fields, `scans/p1` and `out/p1` were one patient because each
+        root was its own origin. With one, the tree IS the grouping -- which
+        is right for a run's output, where a tool mirrors the input tree, and
+        splits a parent folder holding an acquisition beside a result.
+        """
+        self.open(["scans/acquired/p1_scan.nii.gz", "scans/oriented/p1_Or.nii.gz"])
+        self.assertEqual([case.key for case in self.widget.cases],
+                         [os.path.join("acquired", "p1"),
+                          os.path.join("oriented", "p1")])
+
+    def test_the_folder_is_remembered_and_reopened(self):
         self.open(["scans/p1_scan.nii.gz"])
         second = VISU.VISUWidget()
         second.setup()
-        self.assertEqual(second.scansEdit.currentPath,
+        self.assertEqual(second.folderInput.currentPath,
                          os.path.join(self.root.name, "scans"))
+        # Restoring notifies, so the panel opens on its cases rather than empty.
+        self.assertEqual(len(second.cases), 1)
 
 
 if __name__ == "__main__":
