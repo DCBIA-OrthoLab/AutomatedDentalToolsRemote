@@ -627,6 +627,49 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(after[1]["position"], [4.0, 5.0, 6.0])
         self.assertEqual(after[0]["description"], "predicted")
 
+    def _with_landmarks(self):
+        landmarks = os.path.join(self.root.name, "scans", "p1_scan_lm_Pred.mrk.json")
+        os.makedirs(os.path.dirname(landmarks), exist_ok=True)
+        with open(landmarks, "w", encoding="utf-8") as handle:
+            json.dump({"markups": [{"coordinateSystem": "LPS", "controlPoints": [
+                {"label": "Ba", "position": [1.0, 2.0, 3.0]},
+                {"label": "S", "position": [4.0, 5.0, 6.0]},
+            ]}]}, handle)
+        return landmarks
+
+    def test_moving_to_the_next_patient_saves_the_one_being_left(self):
+        # The legacy calls this from Previous, Next and Continue alike: a
+        # reviewer moves on by moving on, not by remembering a button.
+        landmarks = self._with_landmarks()
+        self.open(["scans/p1_scan.nii.gz", "scans/p2_scan.nii.gz"])
+        self.widget.unlockGroup.boxes["Landmarks"].setChecked(True)
+        node = [n for n in SCENE if n.path.endswith(".mrk.json")][0]
+        node.positions[0] = [-1.0, -2.0, 9.0]
+
+        self.widget.onNext()
+
+        with open(landmarks, encoding="utf-8") as handle:
+            after = json.load(handle)["markups"][0]["controlPoints"]
+        self.assertEqual(after[0]["position"], [1.0, 2.0, 9.0])
+
+    def test_moving_on_with_nothing_unlocked_writes_nothing(self):
+        landmarks = self._with_landmarks()
+        before = os.stat(landmarks).st_mtime_ns
+        self.open(["scans/p1_scan.nii.gz", "scans/p2_scan.nii.gz"])
+        self.widget.onNext()
+        self.assertEqual(os.stat(landmarks).st_mtime_ns, before)
+
+    def test_an_unreadable_landmark_file_does_not_stop_the_navigation(self):
+        # Saving now happens on the way OUT of a patient, so a truncated or
+        # hand-edited file would take the panel down mid-step.
+        self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json",
+                   "scans/p2_scan.nii.gz"])
+        self.widget.unlockGroup.boxes["Landmarks"].setChecked(True)
+        node = [n for n in SCENE if n.path.endswith(".mrk.json")][0]
+        node.positions[0] = [-1.0, -2.0, 9.0]
+        self.widget.onNext()          # the fixture is one byte of "x"
+        self.assertEqual(self.widget.position, 1)
+
     def test_saving_with_nothing_unlocked_writes_nothing(self):
         # What Save touches is decided by what could have been changed.
         self.open(["scans/p1_scan.nii.gz"])

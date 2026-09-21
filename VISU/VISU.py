@@ -802,6 +802,23 @@ class VISUWidget(ScriptedLoadableModuleWidget):
     def onNext(self) -> None:
         self._step(1)
 
+    def _leaving(self) -> None:
+        """Write what the reader changed on the patient they are leaving.
+
+        The legacy calls this from Previous, Next and Continue alike, and it
+        is the right shape: a reviewer moves on by moving on, not by
+        remembering a button. Save stays because a reader wants to be TOLD
+        it landed, not because anything depends on it being pressed.
+
+        Costs nothing on an ordinary pass: nothing is unlocked, so nothing is
+        looked at, so nothing is written.
+        """
+        if not self.unlocked() or not self._points:
+            return
+        said = self._saveLandmarks()
+        if said:
+            self.modifyLabel.text = said
+
     def _step(self, by: int) -> None:
         if not self.cases:
             return
@@ -814,7 +831,10 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             return
         # Clamped rather than wrapped: a reader stepping through a cohort wants
         # to be told they are at the end, not silently returned to the start.
-        self.position = max(0, min(len(self.cases) - 1, self.position + by))
+        moving = max(0, min(len(self.cases) - 1, self.position + by))
+        if moving != self.position:
+            self._leaving()
+        self.position = moving
         self._refresh()
 
     def onPick(self, position: int) -> None:
@@ -823,6 +843,8 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         if not (0 <= position < len(self.cases)):
             return
         if position != self.position or self._waiting:
+            if position != self.position:
+                self._leaving()
             self._waiting = False
             self.position = position
             self._refresh()
@@ -871,6 +893,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         following = next((key for key in order if key in self._flagged), None)
         if following is None:
             return
+        self._leaving()
         self._waiting = False
         self.position = keys.index(following)
         self._refresh()
@@ -1212,7 +1235,11 @@ class VISUWidget(ScriptedLoadableModuleWidget):
                 continue
             try:
                 count = edits.save_markups(artifact.path, positions)
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
+                # ValueError as well as OSError: a landmark file can be
+                # truncated or hand-edited, and saving now happens on the way
+                # OUT of a patient -- so an unreadable one would take the
+                # panel down mid-navigation rather than at a button press.
                 slicer.util.errorDisplay(
                     _("Could not write {name}: {error}").format(
                         name=artifact.name, error=exc))
