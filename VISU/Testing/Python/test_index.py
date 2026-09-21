@@ -217,6 +217,16 @@ class RealShapesTest(unittest.TestCase):
         self.assertFalse(index.is_token_prefix("P1", "P1"))
 
 
+class LabelTest(unittest.TestCase):
+    def test_a_case_reads_as_the_patient_with_the_folder_behind_it(self):
+        case = index.Case(os.path.join("CBCT_SemiAuto", "IC_0005"))
+        self.assertEqual(case.patient, "IC_0005")
+        self.assertEqual(case.label, "IC_0005  (CBCT_SemiAuto)")
+
+    def test_a_case_at_the_root_is_just_its_name(self):
+        self.assertEqual(index.Case("IC_0005").label, "IC_0005")
+
+
 class ViewTest(unittest.TestCase):
     """Which scan an overlay is drawn on. The one thing that must not lie."""
 

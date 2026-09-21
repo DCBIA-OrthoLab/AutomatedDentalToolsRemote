@@ -233,6 +233,17 @@ class PanelTest(unittest.TestCase):
         self.widget.onPrevious()
         self.assertEqual(self.widget.position, 1)
 
+    def test_the_panel_says_which_patient_of_how_many(self):
+        self.open([f"scans/p{n}_scan.nii.gz" for n in range(1, 4)])
+        self.assertEqual(self.widget.positionLabel.text, "1 of 3 - p1")
+        self.widget.onNext()
+        self.assertEqual(self.widget.positionLabel.text, "2 of 3 - p2")
+        self.assertEqual(
+            [self.widget.caseCombo.itemText(n)
+             for n in range(self.widget.caseCombo.count)],
+            ["p1", "p2", "p3"],
+        )
+
     def test_moving_on_removes_the_case_before_it(self):
         self.open([f"scans/p{n}_scan.nii.gz" for n in range(1, 4)])
         self.assertEqual(len(SCENE), 1)

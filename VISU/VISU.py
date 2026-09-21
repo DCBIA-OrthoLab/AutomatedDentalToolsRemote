@@ -251,12 +251,12 @@ class VISUWidget(ScriptedLoadableModuleWidget):
 
     def _buildCase(self) -> None:
         box = ctk.ctkCollapsibleButton()
-        box.text = _("Case")
+        box.text = _("Patient")
         self.panel.addWidget(box)
         outer = qt.QVBoxLayout(box)
 
         self.caseCombo = qt.QComboBox()
-        self.caseCombo.toolTip = _("Jump to a case")
+        self.caseCombo.toolTip = _("Jump to a patient")
         self.caseCombo.currentIndexChanged.connect(self.onPick)
         outer.addWidget(self.caseCombo)
 
@@ -287,6 +287,13 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         say about itself. Nothing between them either -- a target you reach
         for without looking must not have a drop-down beside it.
         """
+        # Which of how many, beside the control that changes it. The panel
+        # said it in the Folder box, three sections away from the arrows -- so
+        # the one number a reader wants while stepping was the one furthest
+        # from where they were looking.
+        self.positionLabel = design.section_title("")
+        self.panel.addWidget(self.positionLabel)
+
         row = qt.QHBoxLayout()
         row.setSpacing(design.SPACING_SM)
 
@@ -334,7 +341,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self._filling = True
         self.caseCombo.clear()
         for case in self.cases:
-            self.caseCombo.addItem(case.key)
+            self.caseCombo.addItem(case.label)
         self._filling = False
 
         if not self.cases:
@@ -342,10 +349,10 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             self.countLabel.text = _("Nothing to show in that folder.")
         elif self._waiting:
             self.countLabel.text = _(
-                "{count} case(s). Press an arrow to show the first."
+                "{count} patient(s). Press an arrow to show the first."
             ).format(count=len(self.cases))
         else:
-            self.countLabel.text = _("{count} case(s).").format(count=len(self.cases))
+            self.countLabel.text = _("{count} patient(s).").format(count=len(self.cases))
         self._refresh()
 
     def onPrevious(self) -> None:
@@ -361,7 +368,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             # The first press shows what is selected. Moving instead would
             # skip case one of a cohort nobody has seen yet.
             self._waiting = False
-            self.countLabel.text = _("{count} case(s).").format(count=len(self.cases))
+            self.countLabel.text = _("{count} patient(s).").format(count=len(self.cases))
             self._refresh()
             return
         # Clamped rather than wrapped: a reader stepping through a cohort wants
@@ -387,6 +394,12 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         has = bool(self.cases)
         self.previousButton.enabled = has and self.position > 0
         self.nextButton.enabled = has and self.position < len(self.cases) - 1
+        self.positionLabel.text = (
+            _("{at} of {total} - {patient}").format(
+                at=self.position + 1, total=len(self.cases),
+                patient=self.cases[self.position].label,
+            ) if has else ""
+        )
         if not has:
             self.views = []
             self._filling = True

@@ -340,6 +340,19 @@ class Case:
     def patient(self) -> str:
         return os.path.basename(self.key)
 
+    @property
+    def label(self) -> str:
+        """How the case reads to a person.
+
+        `key` is an identity and is built to be unique -- it carries the
+        subfolder, because two patients of the same name in two folders are
+        two patients. That makes it a path, and a path read as a name is
+        noise: what a reader wants first is WHO, with where it was found as
+        context behind it.
+        """
+        folder = os.path.dirname(self.key)
+        return f"{self.patient}  ({folder})" if folder else self.patient
+
     def of_kind(self, *kinds) -> list:
         return [artifact for artifact in self.artifacts if artifact.kind in kinds]
 
