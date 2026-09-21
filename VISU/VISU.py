@@ -35,7 +35,7 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadab
 
 from ServerToolsCoreLib import design, formgen, get_client, slicer_io, testfile_entries
 from ServerToolsCoreLib.worker import BackgroundJob
-from VISULib import index
+from VISULib import edits, index
 
 logger = logging.getLogger("VISU")
 
@@ -98,9 +98,15 @@ VOLUME_RENDERING = "CT-AAA"
 SEGMENTATION = "segmentation"
 
 # How big a landmark is drawn, in millimetres of the patient rather than in
-# percent of the view. 3 mm reads on a 230 mm CBCT and does not bury a tooth
-# on a 60 mm arch.
-LANDMARK_SIZE_MM = 3.0
+# percent of the view. Small on purpose: a point is a POSITION, and a glyph
+# wide enough to cover the structure under it hides the very thing a reader
+# opened the panel to judge. 1 mm is about three voxels of a 0.3 mm CBCT.
+LANDMARK_SIZE_MM = 1.0
+
+# What an adjustment is called on disk, beside the scan it moves. Never the
+# scan's own name: this file is the reader's, and the tool's output has to
+# stay recognisable as the tool's.
+ADJUSTMENT_SUFFIX = "_VISU_adjust.tfm"
 
 # What the check boxes offer, in the order they are drawn, and the kind each
 # one governs. Words a reader uses, not the loader's vocabulary: nobody calls
@@ -415,6 +421,12 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # one lands. A cohort is hundreds of megabytes and a viewer is opened
         # many times in a sitting.
         self._staging = ""
+        self._anchorNode = None
+        # [(artifact, node)] for the markups on screen: a save has to know
+        # which file a node came from, and a node does not carry its path.
+        self._points = []
+        # The transform "Adjust position" put the anchor under, if any.
+        self._adjustment = None
 
     # -- building the panel ------------------------------------------------
 
@@ -429,6 +441,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self.panel = qt.QVBoxLayout(self.uiWidget)
         self._buildInput()
         self._buildCase()
+        self._buildModify()
         self.panel.addStretch(1)
         self._buildNavigation()
         design.apply(self.uiWidget)
@@ -506,6 +519,49 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self.contentsLabel = design.hint_label("")
         self.contentsLabel.setWordWrap(True)
         outer.addWidget(self.contentsLabel)
+
+    def _buildModify(self) -> None:
+        """Changing what a tool produced, and writing it back.
+
+        Its own section, and collapsed: reading is what this panel is for and
+        editing is the exception, so the controls that can overwrite a file
+        are not the ones a reader meets first.
+        """
+        box = ctk.ctkCollapsibleButton()
+        box.text = _("Modify")
+        box.collapsed = True
+        self.panel.addWidget(box)
+        column = qt.QVBoxLayout(box)
+
+        column.addWidget(design.hint_label(_(
+            "Drag a point in a slice or in 3D, then save. Only the points that "
+            "actually moved are written, and everything else in the file is left "
+            "exactly as the tool wrote it."
+        )))
+        self.saveLandmarksButton = design.primary_button(_("Save landmarks"))
+        self.saveLandmarksButton.connect("clicked()", self.onSaveLandmarks)
+        column.addWidget(self.saveLandmarksButton)
+
+        column.addWidget(design.hint_label(_(
+            "Adjust position puts the scan under a transform you can drag. "
+            "Saving writes that displacement beside it as a .tfm; the scan "
+            "itself is never rewritten."
+        )))
+        self.adjustButton = design.toggle_button(_("Adjust position"))
+        self.adjustButton.connect("clicked()", self.onAdjust)
+        column.addWidget(self.adjustButton)
+
+        self.savePositionButton = design.secondary_button(_("Save position"))
+        self.savePositionButton.connect("clicked()", self.onSavePosition)
+        column.addWidget(self.savePositionButton)
+
+        self.revertButton = design.secondary_button(_("Revert to what is on disk"))
+        self.revertButton.connect("clicked()", self.onRevert)
+        column.addWidget(self.revertButton)
+
+        self.modifyLabel = design.hint_label("")
+        self.modifyLabel.setWordWrap(True)
+        column.addWidget(self.modifyLabel)
 
     def _buildNavigation(self) -> None:
         """The two steppers, at the very bottom and with nothing between them.
@@ -699,12 +755,15 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         position = max(0, self.viewCombo.currentIndex)
         view = self.views[min(position, len(self.views) - 1)]
 
+        self._points = []
+        self._adjustment = None
         wanted = self.wanted_kinds()
         anchor = view.anchor if (view.anchor is not None
                                  and view.anchor.kind in wanted) else None
         overlays = [o for o in view.overlays if o.kind in wanted]
 
         anchor_node = self.scene.load(anchor) if anchor is not None else None
+        self._anchorNode = anchor_node
         on_a_scan = anchor is not None and anchor.kind == index.VOLUME
         masks = [o for o in overlays if o.kind == index.LABELMAP]
         # One mask can be the volume's label layer. Several cannot, so they
@@ -730,6 +789,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
                 self.scene.draw_on_slices(node)
             if overlay.kind == index.MARKUPS:
                 points.append(node)
+                self._points.append((overlay, node))
         self.scene.display(anchor, anchor_node, label_node, reframe=reframe)
         if reframe and points:
             # The slices open on the volume's centre and the points are not
@@ -757,6 +817,121 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         if following >= len(self.cases):
             return
         prefetch([artifact.path for artifact in self.cases[following].artifacts])
+
+    # -- modifying -----------------------------------------------------------
+
+    def onSaveLandmarks(self) -> None:
+        """Write every point that moved back into the file it came from."""
+        moved, files = 0, 0
+        for artifact, node in self._points:
+            positions = {}
+            try:
+                for point in range(node.GetNumberOfControlPoints()):
+                    place = [0.0, 0.0, 0.0]
+                    node.GetNthControlPointPosition(point, place)
+                    positions[node.GetNthControlPointLabel(point)] = place
+            except Exception as exc:  # noqa: BLE001 - one file is not the save
+                logger.warning("Could not read %s back: %s", artifact.name, exc)
+                continue
+            try:
+                count = edits.save_markups(artifact.path, positions)
+            except OSError as exc:
+                slicer.util.errorDisplay(
+                    _("Could not write {name}: {error}").format(
+                        name=artifact.name, error=exc))
+                continue
+            moved += count
+            files += 1 if count else 0
+
+        if not self._points:
+            self.modifyLabel.text = _("No landmarks on screen to save.")
+        elif moved:
+            self.modifyLabel.text = _(
+                "{moved} point(s) written, in {files} file(s)."
+            ).format(moved=moved, files=files)
+        else:
+            # Said, rather than left silent. "Saved" over an unchanged file is
+            # a claim the reader cannot check.
+            self.modifyLabel.text = _("Nothing moved, so nothing was written.")
+
+    def onAdjust(self) -> None:
+        """Put the anchor under a transform the reader can drag, or take it out."""
+        if self._anchorNode is None:
+            self.modifyLabel.text = _("Nothing on screen to move.")
+            self.adjustButton.setChecked(False)
+            return
+        if not self.adjustButton.isChecked():
+            self._detachAdjustment()
+            self.modifyLabel.text = _("Position left as it was.")
+            return
+        try:
+            self._adjustment = slicer.mrmlScene.AddNewNodeByClass(
+                "vtkMRMLLinearTransformNode", "VISU adjustment")
+            self._anchorNode.SetAndObserveTransformNodeID(self._adjustment.GetID())
+            self._adjustment.CreateDefaultDisplayNodes()
+            display = self._adjustment.GetDisplayNode()
+            if display is not None:
+                display.SetEditorVisibility(True)
+            self.modifyLabel.text = _("Drag the handles, then Save position.")
+        except Exception as exc:  # noqa: BLE001
+            # Half a transform is worse than none: the scan would be under a
+            # node with no handles, which moves nothing and cannot be undone
+            # by unticking. Taken back off before reporting.
+            logger.warning("Could not offer an adjustment: %s", exc)
+            self._detachAdjustment()
+            self.modifyLabel.text = _("This scan cannot be moved here.")
+            self.adjustButton.setChecked(False)
+
+    def onSavePosition(self) -> None:
+        """Write the displacement beside the scan, as its own transform.
+
+        Its own file rather than folded into whatever transform the tool
+        wrote: composing two matrices is a claim about which order they apply
+        in, and getting that backwards is silent. A `.tfm` beside the scan is
+        something a reader can load, look at and delete.
+        """
+        if self._adjustment is None:
+            self.modifyLabel.text = _("Nothing has been moved.")
+            return
+        anchor = self._currentAnchor()
+        if anchor is None:
+            return
+        stem, _extension = index.split_extension(anchor.name)
+        destination = os.path.join(os.path.dirname(anchor.path),
+                                   f"{stem}{ADJUSTMENT_SUFFIX}")
+        try:
+            slicer.util.saveNode(self._adjustment, destination)
+        except Exception as exc:  # noqa: BLE001
+            slicer.util.errorDisplay(
+                _("Could not write the transform: {error}").format(error=exc))
+            return
+        self.modifyLabel.text = _("Written: {name}").format(
+            name=os.path.basename(destination))
+
+    def onRevert(self) -> None:
+        """Throw away every unsaved change by reloading from disk."""
+        self._detachAdjustment()
+        self.adjustButton.setChecked(False)
+        self._show(reframe=False)
+        self.modifyLabel.text = _("Reloaded from disk.")
+
+    def _currentAnchor(self):
+        if not self.views:
+            return None
+        view = self.views[min(max(0, self.viewCombo.currentIndex),
+                              len(self.views) - 1)]
+        return view.anchor
+
+    def _detachAdjustment(self) -> None:
+        if self._adjustment is None:
+            return
+        try:
+            if self._anchorNode is not None:
+                self._anchorNode.SetAndObserveTransformNodeID(None)
+            slicer.mrmlScene.RemoveNode(self._adjustment)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not take the adjustment off: %s", exc)
+        self._adjustment = None
 
     # -- leaving -----------------------------------------------------------
 

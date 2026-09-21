@@ -9,6 +9,7 @@ set(MODULE_NAME VISU)
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
   VISULib/__init__.py
+  VISULib/edits.py
   VISULib/index.py
   )
 

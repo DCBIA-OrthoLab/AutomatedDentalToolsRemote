@@ -7,6 +7,7 @@ navigation and -- the reason this file exists -- that the scene holds exactly
 what the selected view says it holds, and nothing from the case before it.
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -67,6 +68,9 @@ class _Node:
         self.name = ""
         self.locked = True
         self.points = [True, True]
+        self.under = None
+        # What the file below holds, already in Slicer's RAS.
+        self.positions = [[-1.0, -2.0, 3.0], [-4.0, -5.0, 6.0]]
 
     def SetName(self, name):
         self.name = name
@@ -86,8 +90,22 @@ class _Node:
     def GetID(self):
         return self.path
 
+    # -- what a save reads back -------------------------------------------
+    def GetNthControlPointPosition(self, index, place):
+        place[:] = list(self.positions[index])
 
-slicer.mrmlScene = types.SimpleNamespace(RemoveNode=lambda node: SCENE.remove(node))
+    def GetNthControlPointLabel(self, index):
+        return ["Ba", "S"][index]
+
+    def SetAndObserveTransformNodeID(self, node_id):
+        self.under = node_id
+
+    def CreateDefaultDisplayNodes(self):
+        self.display = _Display()
+
+
+slicer.mrmlScene = types.SimpleNamespace(
+    RemoveNode=lambda node: SCENE.remove(node) if node in SCENE else None)
 
 # Where the slices were sent, and by whom. A viewer that opens on a slice
 # holding none of the points looks broken.
@@ -123,6 +141,9 @@ class _LayoutManager:
         return types.SimpleNamespace(threeDView=lambda: _ThreeDView())
 
 
+SAVED = []
+slicer.mrmlScene.AddNewNodeByClass = lambda cls, name: _Node("transform:" + name)
+
 slicer.vtkMRMLLayoutNode = types.SimpleNamespace(
     SlicerLayoutFourUpView="four-up", SlicerLayoutOneUp3DView="3d",
 )
@@ -130,6 +151,7 @@ LAYERS = {}
 slicer.util = types.SimpleNamespace(
     setSliceViewerLayers=lambda **kwargs: LAYERS.update(kwargs),
     showStatusMessage=lambda *_a, **_k: None,
+    saveNode=lambda node, path: SAVED.append(path),
 )
 
 
@@ -180,6 +202,9 @@ class _Display:
 
     def SetVisibility(self, visible):
         self.visible = bool(visible)
+
+    def SetEditorVisibility(self, visible):
+        self.handles = bool(visible)
 
 
 def _loader(path, kind):
@@ -480,6 +505,80 @@ class PanelTest(unittest.TestCase):
         # the reader looking for a bug that is not one.
         self.open(["scans/p1_scan.nii.gz"])
         self.assertIn("No landmarks", self.widget.frameLabel.text)
+
+    def test_saving_writes_only_the_point_that_moved(self):
+        landmarks = os.path.join(self.root.name, "scans", "p1_scan_lm_Pred.mrk.json")
+        os.makedirs(os.path.dirname(landmarks), exist_ok=True)
+        with open(landmarks, "w", encoding="utf-8") as handle:
+            json.dump({"markups": [{"coordinateSystem": "LPS", "controlPoints": [
+                {"label": "Ba", "position": [1.0, 2.0, 3.0], "description": "predicted"},
+                {"label": "S", "position": [4.0, 5.0, 6.0]},
+            ]}]}, handle)
+        self.open(["scans/p1_scan.nii.gz"])
+
+        node = [n for n in SCENE if n.path.endswith(".mrk.json")][0]
+        node.positions[0] = [-1.0, -2.0, 8.0]          # Ba dragged 5 mm in z
+        self.widget.onSaveLandmarks()
+
+        self.assertIn("1 point", self.widget.modifyLabel.text)
+        with open(landmarks, encoding="utf-8") as handle:
+            after = json.load(handle)["markups"][0]["controlPoints"]
+        self.assertEqual(after[0]["position"], [1.0, 2.0, 8.0])
+        self.assertEqual(after[1]["position"], [4.0, 5.0, 6.0])
+        self.assertEqual(after[0]["description"], "predicted")
+
+    def test_saving_an_untouched_case_says_so_rather_than_claiming_a_write(self):
+        landmarks = os.path.join(self.root.name, "scans", "p1_scan_lm_Pred.mrk.json")
+        os.makedirs(os.path.dirname(landmarks), exist_ok=True)
+        with open(landmarks, "w", encoding="utf-8") as handle:
+            json.dump({"markups": [{"coordinateSystem": "LPS", "controlPoints": [
+                {"label": "Ba", "position": [1.0, 2.0, 3.0]},
+                {"label": "S", "position": [4.0, 5.0, 6.0]},
+            ]}]}, handle)
+        self.open(["scans/p1_scan.nii.gz"])
+        self.widget.onSaveLandmarks()
+        self.assertIn("Nothing moved", self.widget.modifyLabel.text)
+
+    def test_adjusting_puts_the_scan_under_a_transform_and_saves_it_beside(self):
+        del SAVED[:]
+        self.open(["scans/p1_scan.nii.gz"])
+        self.widget.adjustButton.setChecked(True)
+        self.widget.onAdjust()
+        self.assertIsNotNone(self.widget._adjustment)
+        self.assertIsNotNone(self.widget._anchorNode.under, "the scan was not moved")
+        self.assertTrue(self.widget._adjustment.display.handles, "no handles to drag")
+        self.assertIn("Drag the handles", self.widget.modifyLabel.text)
+
+        self.widget.onSavePosition()
+        self.assertEqual([os.path.basename(p) for p in SAVED],
+                         ["p1_scan_VISU_adjust.tfm"])
+
+    def test_an_adjustment_that_cannot_be_offered_is_taken_back_off(self):
+        # Half a transform is worse than none: the scan sits under a node with
+        # no handles, which moves nothing and unticking cannot undo.
+        self.open(["scans/p1_scan.nii.gz"])
+        broken = self.widget._anchorNode
+        broken.CreateDefaultDisplayNodes = None      # the call will raise
+        self.widget._anchorNode = broken
+        original = slicer.mrmlScene.AddNewNodeByClass
+        slicer.mrmlScene.AddNewNodeByClass = lambda cls, name: types.SimpleNamespace(
+            GetID=lambda: "x", CreateDefaultDisplayNodes=lambda: 1 / 0)
+        try:
+            self.widget.adjustButton.setChecked(True)
+            self.widget.onAdjust()
+        finally:
+            slicer.mrmlScene.AddNewNodeByClass = original
+        self.assertIsNone(self.widget._adjustment)
+        self.assertIsNone(self.widget._anchorNode.under)
+        self.assertFalse(self.widget.adjustButton.isChecked())
+
+    def test_reverting_takes_the_adjustment_off(self):
+        self.open(["scans/p1_scan.nii.gz"])
+        self.widget.adjustButton.setChecked(True)
+        self.widget.onAdjust()
+        self.widget.onRevert()
+        self.assertIsNone(self.widget._adjustment)
+        self.assertIn("Reloaded", self.widget.modifyLabel.text)
 
     def test_leaving_the_module_empties_what_it_loaded(self):
         self.open(["scans/p1_scan.nii.gz"])
