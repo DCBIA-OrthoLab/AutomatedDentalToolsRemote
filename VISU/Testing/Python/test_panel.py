@@ -634,11 +634,26 @@ class PanelTest(unittest.TestCase):
         self.assertIsNone(self.widget._adjustment)
         self.assertIn("Reloaded", self.widget.modifyLabel.text)
 
-    def test_leaving_the_module_empties_what_it_loaded(self):
-        self.open(["scans/p1_scan.nii.gz"])
-        self.assertEqual(len(SCENE), 1)
+    def test_leaving_the_module_leaves_the_scene_alone(self):
+        # Models, Volume Rendering and Segment Editor are where a reader goes
+        # to work on what VISU just showed them. Emptying the scene on the way
+        # out wiped it at the moment it became useful.
+        self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json"])
+        self.assertEqual(len(SCENE), 2)
         self.widget.exit()
+        self.assertEqual(len(SCENE), 2, "switching module emptied the scene")
+
+    def test_the_module_going_away_does_empty_it(self):
+        self.open(["scans/p1_scan.nii.gz"])
+        self.widget.cleanup()
         self.assertEqual(SCENE, [])
+
+    def test_stepping_still_never_accumulates(self):
+        # The bound that replaces clearing on exit.
+        self.open([f"scans/p{n}_scan.nii.gz" for n in range(1, 4)])
+        for _ in range(2):
+            self.widget.onNext()
+        self.assertEqual(len(SCENE), 1)
 
     def test_landmarks_start_locked_and_unlock_point_by_point(self):
         # Locked at rest: a point nudged by a stray drag while scrolling is a

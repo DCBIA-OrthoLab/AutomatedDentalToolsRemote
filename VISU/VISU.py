@@ -1089,10 +1089,19 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         return unpacked
 
     def exit(self) -> None:
-        # What this panel loaded is this panel's, and a clinician switching to
-        # another module should not find forty nodes of somebody else's cohort
-        # waiting in their scene.
-        self.scene.clear()
+        """Leaving the panel leaves the scene alone, deliberately.
+
+        It used to empty it, on the reasoning that what this panel loaded is
+        this panel's. That is wrong for a VIEWER: Models, Volume Rendering
+        and Segment Editor are where a reader goes to work on exactly what
+        VISU just put on screen, and switching to one of them wiped it. The
+        panel was clearing the scene at the precise moment its work became
+        useful.
+
+        What still bounds the scene is unchanged: every case load clears what
+        the previous one owned, so stepping never accumulates, and `cleanup`
+        empties it when the module itself goes away.
+        """
 
     def cleanup(self) -> None:
         self.scene.clear()
