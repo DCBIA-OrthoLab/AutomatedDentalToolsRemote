@@ -30,6 +30,7 @@ import threading
 import ctk
 import qt
 import slicer
+import vtk
 from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadableModuleWidget
 
@@ -97,12 +98,6 @@ VOLUME_RENDERING = "CT-AAA"
 # shown.
 SEGMENTATION = "segmentation"
 
-# What the lock button reads in each of its two states. The word is the state
-# it is IN, not the action -- a button that says "Unlock" while the points are
-# already unlocked is the classic way to get this wrong.
-LOCKED_TEXT = "Locked"
-UNLOCKED_TEXT = "Unlocked - points can be dragged"
-
 # VISU draws a landmark exactly as its file asks. A `.mrk.json` carries three
 # fields for it -- `glyphScale` (percent of the view), `glyphSize`
 # (millimetres) and `useGlyphScale`, which picks between them -- and they are
@@ -136,6 +131,18 @@ SHOWABLE = (
     ("Transforms", index.TRANSFORM, False),
 )
 _KIND_OF_OPTION = {label: kind for label, kind, _on in SHOWABLE}
+
+# The scan's own placement, which is not a file kind: unlocking it is what
+# puts the anchor under a transform with handles.
+POSITION = "position"
+
+# What the Modify section offers, and everything starts LOCKED. A landmark
+# set is read far more often than it is corrected, and a point nudged by a
+# stray drag while scrolling is a correction nobody made and nobody sees.
+EDITABLE = (
+    ("Landmarks", index.MARKUPS),
+    ("Position", POSITION),
+)
 
 # Read ahead by one, in a daemon thread, so pressing the arrow does not also
 # pay for the disk. It warms the page cache and touches no MRML node: loading
@@ -186,9 +193,36 @@ class SceneLoader:
         # [(artifact, node)], so visibility can be re-decided per kind without
         # anything being read off disk again.
         self._shown = []
+        # [(node, observer tag)]. Dropped before the nodes are, or a callback
+        # fires on a node that is no longer in the scene.
+        self._watched = []
+
+    def watch(self, node, callback) -> None:
+        """Tell `callback` whenever this node or its display changes.
+
+        This is the half of the sync that goes the other way. The eye in the
+        Markups module and the chips here are two switches on ONE thing, and
+        a reader who clicks the eye and then looks at a ticked chip has been
+        lied to by whichever of the two did not move.
+        """
+        for target in (node, node.GetDisplayNode()):
+            if target is None:
+                continue
+            try:
+                tag = target.AddObserver(vtk.vtkCommand.ModifiedEvent, callback)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not watch %s: %s", node.GetName(), exc)
+                continue
+            self._watched.append((target, tag))
 
     def clear(self) -> None:
         self._shown = []
+        for target, tag in self._watched:
+            try:
+                target.RemoveObserver(tag)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not stop watching a node: %s", exc)
+        self._watched = []
         for node in self._owned:
             try:
                 slicer.mrmlScene.RemoveNode(node)
@@ -490,6 +524,9 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self._points = []
         # The transform "Adjust position" put the anchor under, if any.
         self._adjustment = None
+        # True while the panel is writing the scene from its own chips, so
+        # the observer that reads the scene back does not chase it.
+        self._syncing = False
 
     # -- building the panel ------------------------------------------------
 
@@ -566,7 +603,14 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # The anti-lie line. Never folded into the combo above: what a reader
         # has to notice is not which view is selected but what the points are
         # being drawn against, and whether that was found or assumed.
-        self.frameLabel = design.warning_label("")
+        #
+        # A HINT and not a warning, though it was a warning first. That
+        # factory paints in the danger colour and exists for "part of this
+        # panel could not be built"; on an ordinary case it read as an error
+        # with no error in it. Saying "assumed" is the whole signal, and it
+        # says it without crying wolf.
+        self.frameLabel = design.hint_label("")
+        self.frameLabel.setWordWrap(True)
         outer.addWidget(self.frameLabel)
 
         # `chips`, so the word IS the control: five short labels, and what is
@@ -584,11 +628,11 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         outer.addWidget(self.contentsLabel)
 
     def _buildModify(self) -> None:
-        """Changing what a tool produced, and writing it back.
+        """What may be changed, and nothing else.
 
-        Its own section, and collapsed: reading is what this panel is for and
-        editing is the exception, so the controls that can overwrite a file
-        are not the ones a reader meets first.
+        Everything starts locked. The chips here are the same control Slicer
+        puts in the Markups module, and they move together: locking a node
+        there unticks it here.
         """
         box = ctk.ctkCollapsibleButton()
         box.text = _("Modify")
@@ -597,17 +641,15 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         column = qt.QVBoxLayout(box)
 
         column.addWidget(design.hint_label(_(
-            "Adjust position puts the scan under a transform you can drag. "
-            "Saving writes that displacement beside it as a .tfm; the scan "
-            "itself is never rewritten."
+            "Untick nothing and nothing can move. Unlock Landmarks to drag a "
+            "point; unlock Position to drag the scan itself. Save writes what "
+            "actually changed."
         )))
-        self.adjustButton = design.toggle_button(_("Adjust position"))
-        self.adjustButton.connect("clicked()", self.onAdjust)
-        column.addWidget(self.adjustButton)
-
-        self.savePositionButton = design.secondary_button(_("Save position"))
-        self.savePositionButton.connect("clicked()", self.onSavePosition)
-        column.addWidget(self.savePositionButton)
+        self.unlockGroup = formgen.MultiChoiceGroup(
+            {label: False for label, _what in EDITABLE}, layout="chips",
+        )
+        formgen.connect_changed(self.unlockGroup, self.onUnlockChanged)
+        column.addWidget(self.unlockGroup.container)
 
         self.revertButton = design.secondary_button(_("Revert to what is on disk"))
         self.revertButton.connect("clicked()", self.onRevert)
@@ -651,20 +693,17 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self.panel.addLayout(row)
 
         # Under the arrows because this is where the reader's hands are while
-        # they step: the lock says whether a drag can happen at all, and Save
-        # is what a correction is worth nothing without.
+        # they step, and because a correction is worth nothing unsaved. ONE
+        # button: what it writes is whatever was unlocked and moved, and the
+        # reader does not have to know which file that lands in.
         actions = qt.QHBoxLayout()
         actions.setSpacing(design.SPACING_SM)
-        self.lockButton = design.toggle_button(_(LOCKED_TEXT))
-        self.lockButton.toolTip = _(
-            "Landmarks are locked so a stray drag cannot move one. Unlock to "
-            "correct a point, then Save."
+        self.saveButton = design.primary_button(_("Save"))
+        self.saveButton.toolTip = _(
+            "Write what changed: the points that moved, and the scan's "
+            "position if it was unlocked and dragged."
         )
-        self.lockButton.connect("clicked()", self.onLockToggled)
-        actions.addWidget(self.lockButton, 1)
-
-        self.saveButton = design.primary_button(_("Save landmarks"))
-        self.saveButton.connect("clicked()", self.onSaveLandmarks)
+        self.saveButton.connect("clicked()", self.onSave)
         actions.addWidget(self.saveButton, 1)
         self.panel.addLayout(actions)
 
@@ -758,16 +797,110 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             if box is not None:
                 box.setEnabled(kind in present)
 
-    def onLockToggled(self) -> None:
-        """Lock or unlock what is on screen, and say which it now is."""
-        self.lockButton.setText(_(UNLOCKED_TEXT if self.lockButton.isChecked()
-                                  else LOCKED_TEXT))
+    def unlocked(self) -> set:
+        """What the reader has said may move."""
+        return {label for label, on in self.unlockGroup.value().items() if on}
+
+    def onUnlockChanged(self, *_args) -> None:
+        if self._filling or self._waiting:
+            return
         self._applyLock()
+        wanted = self.unlocked()
+        if "Position" in wanted:
+            self._attachAdjustment()
+        else:
+            self._detachAdjustment()
 
     def _applyLock(self) -> None:
-        locked = not self.lockButton.isChecked()
-        for _artifact, node in self._points:
-            self.scene.set_locked(node, locked)
+        """Push the lock chips onto the nodes.
+
+        Guarded: setting a node's lock fires the observer that reads the
+        nodes back into the chips, and the two would chase each other.
+        """
+        locked = "Landmarks" not in self.unlocked()
+        self._syncing = True
+        try:
+            for _artifact, node in self._points:
+                self.scene.set_locked(node, locked)
+        finally:
+            self._syncing = False
+
+    def onSceneChanged(self, *_args) -> None:
+        """Read the scene back into the chips.
+
+        The eye in the Markups module and the Show chips are two switches on
+        one thing; so are the padlock there and the Modify chips. Whichever
+        the reader touches, the other has to follow, or the panel is telling
+        them something that is not on screen.
+        """
+        if self._syncing or self._filling or self._waiting:
+            return
+        self._syncing = True
+        try:
+            self._readVisibility()
+            self._readLocks()
+        finally:
+            self._syncing = False
+
+    def _readVisibility(self) -> None:
+        seen, visible = set(), set()
+        for artifact, node in self.scene.shown():
+            seen.add(artifact.kind)
+            display = node.GetDisplayNode()
+            if display is not None and display.GetVisibility():
+                visible.add(artifact.kind)
+        for label, kind, _on in SHOWABLE:
+            box = self.showGroup.boxes.get(label)
+            if box is None or kind not in seen:
+                continue
+            if box.isChecked() != (kind in visible):
+                box.setChecked(kind in visible)
+
+    def _readLocks(self) -> None:
+        if not self._points:
+            return
+        # Unlocked here means EVERY point of every set can move; one locked
+        # node is enough to say the reader is not editing.
+        free = all(not node.GetLocked() for _artifact, node in self._points)
+        box = self.unlockGroup.boxes.get("Landmarks")
+        if box is not None and box.isChecked() != free:
+            box.setChecked(free)
+
+    def _untick(self, option: str) -> None:
+        """Put an unlock chip back down without re-entering its handler."""
+        box = self.unlockGroup.boxes.get(option)
+        if box is None:
+            return
+        self._filling = True
+        try:
+            box.setChecked(False)
+        finally:
+            self._filling = False
+
+    def _attachAdjustment(self) -> None:
+        """Put the anchor under a transform the reader can drag."""
+        if self._adjustment is not None:
+            return
+        if self._anchorNode is None:
+            self._untick("Position")
+            self.modifyLabel.text = _("Nothing on screen to move.")
+            return
+        try:
+            self._adjustment = slicer.mrmlScene.AddNewNodeByClass(
+                "vtkMRMLLinearTransformNode", "VISU adjustment")
+            self._anchorNode.SetAndObserveTransformNodeID(self._adjustment.GetID())
+            self._adjustment.CreateDefaultDisplayNodes()
+            display = self._adjustment.GetDisplayNode()
+            if display is not None:
+                display.SetEditorVisibility(True)
+            self.modifyLabel.text = _("Drag the handles, then Save.")
+        except Exception as exc:  # noqa: BLE001
+            # Half a transform is worse than none: the scan sits under a node
+            # with no handles, which moves nothing and unticking cannot undo.
+            logger.warning("Could not offer an adjustment: %s", exc)
+            self._detachAdjustment()
+            self._untick("Position")
+            self.modifyLabel.text = _("This scan cannot be moved here.")
 
     def onShowChanged(self, *_args) -> None:
         """A chip changes what is VISIBLE, and nothing else.
@@ -894,6 +1027,8 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             if overlay.kind == index.MARKUPS:
                 points.append(node)
                 self._points.append((overlay, node))
+        for _artifact, node in self.scene.shown():
+            self.scene.watch(node, self.onSceneChanged)
         # Freshly loaded nodes carry the file's own flags; the reader's choice
         # is applied over them, so stepping to the next patient does not
         # quietly re-lock what they unlocked.
@@ -906,7 +1041,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             self.scene.jump_to(points[0])
 
         if overlays:
-            self.frameLabel.text = _("Overlays drawn on {scan} - {basis}").format(
+            self.frameLabel.text = _("Drawn on {scan} ({basis})").format(
                 scan=view.label, basis=view.basis
             )
         else:
@@ -929,7 +1064,22 @@ class VISUWidget(ScriptedLoadableModuleWidget):
 
     # -- modifying -----------------------------------------------------------
 
-    def onSaveLandmarks(self) -> None:
+    def onSave(self) -> None:
+        """Write whatever changed: the points that moved, and the position.
+
+        One button, because the reader corrected a case and not a file. What
+        it touches is decided by what was unlocked -- nothing is written for
+        a kind that could not have been changed.
+        """
+        said = []
+        if "Landmarks" in self.unlocked():
+            said.append(self._saveLandmarks())
+        if self._adjustment is not None:
+            said.append(self._savePosition())
+        self.modifyLabel.text = ("  ".join(s for s in said if s)
+                                 or _("Nothing is unlocked, so nothing was written."))
+
+    def _saveLandmarks(self) -> str:
         """Write every point that moved back into the file it came from."""
         moved, files = 0, 0
         for artifact, node in self._points:
@@ -953,45 +1103,15 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             files += 1 if count else 0
 
         if not self._points:
-            self.modifyLabel.text = _("No landmarks on screen to save.")
-        elif moved:
-            self.modifyLabel.text = _(
-                "{moved} point(s) written, in {files} file(s)."
-            ).format(moved=moved, files=files)
-        else:
-            # Said, rather than left silent. "Saved" over an unchanged file is
-            # a claim the reader cannot check.
-            self.modifyLabel.text = _("Nothing moved, so nothing was written.")
+            return _("No landmarks on screen to save.")
+        if moved:
+            return _("{moved} point(s) written, in {files} file(s).").format(
+                moved=moved, files=files)
+        # Said, rather than left silent. "Saved" over an unchanged file is a
+        # claim the reader cannot check.
+        return _("Nothing moved, so nothing was written.")
 
-    def onAdjust(self) -> None:
-        """Put the anchor under a transform the reader can drag, or take it out."""
-        if self._anchorNode is None:
-            self.modifyLabel.text = _("Nothing on screen to move.")
-            self.adjustButton.setChecked(False)
-            return
-        if not self.adjustButton.isChecked():
-            self._detachAdjustment()
-            self.modifyLabel.text = _("Position left as it was.")
-            return
-        try:
-            self._adjustment = slicer.mrmlScene.AddNewNodeByClass(
-                "vtkMRMLLinearTransformNode", "VISU adjustment")
-            self._anchorNode.SetAndObserveTransformNodeID(self._adjustment.GetID())
-            self._adjustment.CreateDefaultDisplayNodes()
-            display = self._adjustment.GetDisplayNode()
-            if display is not None:
-                display.SetEditorVisibility(True)
-            self.modifyLabel.text = _("Drag the handles, then Save position.")
-        except Exception as exc:  # noqa: BLE001
-            # Half a transform is worse than none: the scan would be under a
-            # node with no handles, which moves nothing and cannot be undone
-            # by unticking. Taken back off before reporting.
-            logger.warning("Could not offer an adjustment: %s", exc)
-            self._detachAdjustment()
-            self.modifyLabel.text = _("This scan cannot be moved here.")
-            self.adjustButton.setChecked(False)
-
-    def onSavePosition(self) -> None:
+    def _savePosition(self) -> str:
         """Write the displacement beside the scan, as its own transform.
 
         Its own file rather than folded into whatever transform the tool
@@ -999,12 +1119,9 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         in, and getting that backwards is silent. A `.tfm` beside the scan is
         something a reader can load, look at and delete.
         """
-        if self._adjustment is None:
-            self.modifyLabel.text = _("Nothing has been moved.")
-            return
         anchor = self._currentAnchor()
         if anchor is None:
-            return
+            return ""
         stem, _extension = index.split_extension(anchor.name)
         destination = os.path.join(os.path.dirname(anchor.path),
                                    f"{stem}{ADJUSTMENT_SUFFIX}")
@@ -1013,14 +1130,16 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         except Exception as exc:  # noqa: BLE001
             slicer.util.errorDisplay(
                 _("Could not write the transform: {error}").format(error=exc))
-            return
-        self.modifyLabel.text = _("Written: {name}").format(
-            name=os.path.basename(destination))
+            return ""
+        return _("Written: {name}").format(name=os.path.basename(destination))
 
     def onRevert(self) -> None:
         """Throw away every unsaved change by reloading from disk."""
         self._detachAdjustment()
-        self.adjustButton.setChecked(False)
+        self._filling = True
+        for box in self.unlockGroup.boxes.values():
+            box.setChecked(False)
+        self._filling = False
         self._show(reframe=False)
         self.modifyLabel.text = _("Reloaded from disk.")
 

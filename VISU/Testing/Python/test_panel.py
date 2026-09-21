@@ -23,6 +23,11 @@ sys.path.insert(0, os.path.join(_HERE, "..", "..", "..", "ServerToolsCore"))
 
 import qt_stubs  # noqa: E402
 
+# `vtk` is Slicer's, and the panel needs exactly one name from it: the event
+# it observes a node with.
+sys.modules.setdefault("vtk", types.SimpleNamespace(
+    vtkCommand=types.SimpleNamespace(ModifiedEvent="ModifiedEvent")))
+
 
 def _extend_stubs():
     class QSettings:
@@ -69,6 +74,7 @@ class _Node:
         self.locked = True
         self.points = [True, True]
         self.under = None
+        self.observers = []
         # What the file below holds, already in Slicer's RAS.
         self.positions = [[-1.0, -2.0, 3.0], [-4.0, -5.0, 6.0]]
 
@@ -102,6 +108,16 @@ class _Node:
 
     def CreateDefaultDisplayNodes(self):
         self.display = _Display()
+
+    def AddObserver(self, event, callback):
+        self.observers.append(callback)
+        return len(self.observers)
+
+    def RemoveObserver(self, tag):
+        pass
+
+    def GetLocked(self):
+        return self.locked
 
 
 slicer.mrmlScene = types.SimpleNamespace(
@@ -211,6 +227,7 @@ OPENED = []
 
 class _Display:
     def __init__(self):
+        self.observers = []
         self.on_slices = False
         self.absolute = None
         self.size = None
@@ -227,6 +244,18 @@ class _Display:
 
     def SetVisibility(self, visible):
         self.visible = bool(visible)
+        for callback in list(self.observers):
+            callback(self, "ModifiedEvent")
+
+    def GetVisibility(self):
+        return bool(self.visible)
+
+    def AddObserver(self, event, callback):
+        self.observers.append(callback)
+        return len(self.observers)
+
+    def RemoveObserver(self, tag):
+        pass
 
     def SetEditorVisibility(self, visible):
         self.handles = bool(visible)
@@ -562,6 +591,14 @@ class PanelTest(unittest.TestCase):
         self.assertFalse(boxes["Transforms"], "a transform draws nothing")
         self.assertTrue(all(on for name, on in boxes.items() if name != "Transforms"))
 
+    def test_the_frame_line_is_information_and_not_an_alarm(self):
+        # It was built with the danger-coloured factory, which exists for
+        # "part of this panel could not be built". On an ordinary case it
+        # read as an error with no error in it.
+        self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json"])
+        self.assertNotIn("DANGER", self.widget.frameLabel._stylesheet.upper())
+        self.assertIn("Drawn on p1_scan.nii.gz", self.widget.frameLabel.text)
+
     def test_a_patient_with_nothing_on_it_says_so(self):
         # `cohort_6` is six scans and no landmarks. A blank line there sends
         # the reader looking for a bug that is not one.
@@ -578,9 +615,10 @@ class PanelTest(unittest.TestCase):
             ]}]}, handle)
         self.open(["scans/p1_scan.nii.gz"])
 
+        self.widget.unlockGroup.boxes["Landmarks"].setChecked(True)
         node = [n for n in SCENE if n.path.endswith(".mrk.json")][0]
         node.positions[0] = [-1.0, -2.0, 8.0]          # Ba dragged 5 mm in z
-        self.widget.onSaveLandmarks()
+        self.widget.onSave()
 
         self.assertIn("1 point", self.widget.modifyLabel.text)
         with open(landmarks, encoding="utf-8") as handle:
@@ -588,6 +626,12 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(after[0]["position"], [1.0, 2.0, 8.0])
         self.assertEqual(after[1]["position"], [4.0, 5.0, 6.0])
         self.assertEqual(after[0]["description"], "predicted")
+
+    def test_saving_with_nothing_unlocked_writes_nothing(self):
+        # What Save touches is decided by what could have been changed.
+        self.open(["scans/p1_scan.nii.gz"])
+        self.widget.onSave()
+        self.assertIn("Nothing is unlocked", self.widget.modifyLabel.text)
 
     def test_saving_an_untouched_case_says_so_rather_than_claiming_a_write(self):
         landmarks = os.path.join(self.root.name, "scans", "p1_scan_lm_Pred.mrk.json")
@@ -598,20 +642,20 @@ class PanelTest(unittest.TestCase):
                 {"label": "S", "position": [4.0, 5.0, 6.0]},
             ]}]}, handle)
         self.open(["scans/p1_scan.nii.gz"])
-        self.widget.onSaveLandmarks()
+        self.widget.unlockGroup.boxes["Landmarks"].setChecked(True)
+        self.widget.onSave()
         self.assertIn("Nothing moved", self.widget.modifyLabel.text)
 
     def test_adjusting_puts_the_scan_under_a_transform_and_saves_it_beside(self):
         del SAVED[:]
         self.open(["scans/p1_scan.nii.gz"])
-        self.widget.adjustButton.setChecked(True)
-        self.widget.onAdjust()
+        self.widget.unlockGroup.boxes["Position"].setChecked(True)
         self.assertIsNotNone(self.widget._adjustment)
         self.assertIsNotNone(self.widget._anchorNode.under, "the scan was not moved")
         self.assertTrue(self.widget._adjustment.display.handles, "no handles to drag")
         self.assertIn("Drag the handles", self.widget.modifyLabel.text)
 
-        self.widget.onSavePosition()
+        self.widget.onSave()
         self.assertEqual([os.path.basename(p) for p in SAVED],
                          ["p1_scan_VISU_adjust.tfm"])
 
@@ -626,18 +670,16 @@ class PanelTest(unittest.TestCase):
         slicer.mrmlScene.AddNewNodeByClass = lambda cls, name: types.SimpleNamespace(
             GetID=lambda: "x", CreateDefaultDisplayNodes=lambda: 1 / 0)
         try:
-            self.widget.adjustButton.setChecked(True)
-            self.widget.onAdjust()
+            self.widget.unlockGroup.boxes["Position"].setChecked(True)
         finally:
             slicer.mrmlScene.AddNewNodeByClass = original
         self.assertIsNone(self.widget._adjustment)
         self.assertIsNone(self.widget._anchorNode.under)
-        self.assertFalse(self.widget.adjustButton.isChecked())
+        self.assertFalse(self.widget.unlockGroup.boxes["Position"].isChecked())
 
     def test_reverting_takes_the_adjustment_off(self):
         self.open(["scans/p1_scan.nii.gz"])
-        self.widget.adjustButton.setChecked(True)
-        self.widget.onAdjust()
+        self.widget.unlockGroup.boxes["Position"].setChecked(True)
         self.widget.onRevert()
         self.assertIsNone(self.widget._adjustment)
         self.assertIn("Reloaded", self.widget.modifyLabel.text)
@@ -673,28 +715,44 @@ class PanelTest(unittest.TestCase):
         self.assertTrue(points.locked)
         self.assertEqual(points.points, [True, True])
 
-        self.widget.lockButton.setChecked(True)
-        self.widget.onLockToggled()
+        self.widget.unlockGroup.boxes["Landmarks"].setChecked(True)
         self.assertFalse(points.locked)
         self.assertEqual(points.points, [False, False])
-        self.assertIn("Unlocked", self.widget.lockButton.text)
+        self.assertTrue(self.widget.unlockGroup.boxes["Landmarks"].isChecked())
 
     def test_the_lock_survives_stepping_to_the_next_patient(self):
         # Freshly loaded nodes carry the file's own flags; unlocking once
         # must not be undone by the next arrow.
         self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json",
                    "scans/p2_scan.nii.gz", "scans/p2_scan_lm_Pred.mrk.json"])
-        self.widget.lockButton.setChecked(True)
-        self.widget.onLockToggled()
+        self.widget.unlockGroup.boxes["Landmarks"].setChecked(True)
         self.widget.onNext()
         points = [node for node in SCENE if node.path.endswith(".mrk.json")][0]
         self.assertFalse(points.locked, "the next patient came back locked")
 
-    def test_the_button_says_the_state_it_is_in(self):
-        # A button reading "Unlock" while the points are already unlocked is
-        # the classic way to get this wrong.
-        self.assertIn("Locked", self.widget.lockButton.text)
-        self.assertNotIn("Unlocked", self.widget.lockButton.text)
+    def test_everything_starts_locked(self):
+        self.assertEqual(self.widget.unlockGroup.value(),
+                         {"Landmarks": False, "Position": False})
+
+    def test_hiding_a_node_in_slicer_unticks_its_chip(self):
+        # The eye in the Markups module and the Show chips are two switches
+        # on one thing. A reader who clicks the eye and sees a ticked chip
+        # has been lied to by whichever did not move.
+        self.open(["scans/p1_scan.nii.gz", "scans/p1_scan_lm_Pred.mrk.json"])
+        self.assertTrue(self.widget.showGroup.boxes["Landmarks"].isChecked())
+
+        points = [n for n in SCENE if n.path.endswith(".mrk.json")][0]
+        points.display.SetVisibility(False)          # the eye, in Slicer
+        self.assertFalse(self.widget.showGroup.boxes["Landmarks"].isChecked())
+
+        points.display.SetVisibility(True)
+        self.assertTrue(self.widget.showGroup.boxes["Landmarks"].isChecked())
+
+    def test_hiding_the_scan_in_slicer_unticks_the_cbct_chip(self):
+        self.open(["scans/p1_scan.nii.gz"])
+        volume = [n for n in SCENE if n.path.endswith(".nii.gz")][0]
+        volume.display.SetVisibility(False)
+        self.assertFalse(self.widget.showGroup.boxes["CBCT"].isChecked())
 
     def test_the_panel_says_which_scan_the_points_are_drawn_on(self):
         # What ASO actually writes: the oriented scan, its landmarks and its
