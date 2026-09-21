@@ -74,6 +74,11 @@ SAMPLE_DATA = (
     ("AutoMatrix", "AutoMatrixRelease3"),  # 264 MB
 )
 
+# What a CBCT is rendered with in 3D, and it is the tools' own choice: AMASSS
+# and ASO both name CT-AAA for the scans they return. `slicer_io` applies the
+# shift it measured on a scan out of this pipeline over the top.
+VOLUME_RENDERING = "CT-AAA"
+
 # Read ahead by one, in a daemon thread, so pressing the arrow does not also
 # pay for the disk. It warms the page cache and touches no MRML node: loading
 # one is main-thread work whatever we do here, and a 130 MB CBCT that is
@@ -161,13 +166,58 @@ class SceneLoader:
             logger.warning("Could not unlock the landmarks: %s", exc)
 
     @staticmethod
-    def display(anchor_node, label_node) -> None:
+    def display(anchor, anchor_node, label_node) -> None:
+        """Put the case on screen the way it is meant to be read.
+
+        Loading a node is not showing it. A volume lands in the slice views
+        and leaves the 3D view EMPTY -- which a clinician reads as "it did not
+        work", and which is why every tool panel that returns a scan turns
+        volume rendering on. A mesh is the opposite: it is only ever in 3D,
+        and the three slice panes around it are dead space.
+
+        So the layout follows the anchor rather than being left where the last
+        module put it, and that is the whole difference between a viewer and a
+        file loader.
+        """
         try:
-            slicer.util.setSliceViewerLayers(
-                background=anchor_node, label=label_node, fit=True
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not fit the slice views: %s", exc)
+            if anchor is not None and anchor.kind == index.MODEL:
+                SceneLoader._layout("SlicerLayoutOneUp3DView")
+            else:
+                SceneLoader._layout("SlicerLayoutFourUpView")
+                slicer.util.setSliceViewerLayers(
+                    background=anchor_node, label=label_node, fit=True
+                )
+                if anchor_node is not None and anchor.kind == index.VOLUME:
+                    # The same preset the CBCT panels use, with the shift
+                    # `slicer_io` measured on a scan out of this pipeline.
+                    slicer_io.show_volume_rendering(anchor_node, VOLUME_RENDERING)
+            SceneLoader._frame3D()
+        except Exception as exc:  # noqa: BLE001 - a view is never worth a failure
+            logger.warning("Could not set the views up: %s", exc)
+
+    @staticmethod
+    def _layout(name: str) -> None:
+        manager = slicer.app.layoutManager()
+        node = getattr(slicer, "vtkMRMLLayoutNode", None)
+        if manager is None or node is None or not hasattr(node, name):
+            return
+        manager.setLayout(getattr(node, name))
+
+    @staticmethod
+    def _frame3D() -> None:
+        """Point the 3D view at what was just loaded.
+
+        Without it the camera stays where the previous case left it, so
+        stepping onto a mesh recorded in another part of the world shows an
+        empty view that looks exactly like a failed load.
+        """
+        manager = slicer.app.layoutManager()
+        if manager is None:
+            return
+        for number in range(manager.threeDViewCount):
+            view = manager.threeDWidget(number).threeDView()
+            view.resetFocalPoint()
+            view.resetCamera()
 
 
 def prefetch(paths) -> None:
@@ -506,14 +556,18 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             node = self.scene.load(overlay)
             if overlay.kind == index.LABELMAP and label_node is None:
                 label_node = node
-        self.scene.display(anchor_node, label_node)
+        self.scene.display(view.anchor, anchor_node, label_node)
 
         if view.overlays:
             self.frameLabel.text = _("Overlays drawn on {scan} - {basis}").format(
                 scan=view.label, basis=view.basis
             )
         else:
-            self.frameLabel.text = ""
+            # Said outright. A blank line here reads as a panel that failed to
+            # draw something, and the reader goes looking for the bug: the
+            # hosted `cohort_6` is six scans and no landmarks at all, which is
+            # what it is rather than what went wrong.
+            self.frameLabel.text = _("No landmarks or masks for this patient here.")
         self.contentsLabel.text = "\n".join(
             f"{artifact.kind}: {artifact.name}"
             for artifact in [view.anchor] + view.overlays

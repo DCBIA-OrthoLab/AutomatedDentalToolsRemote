@@ -53,7 +53,8 @@ qt.QSettings = qt_stubs.QSettings
 qt.QKeySequence = qt_stubs.QKeySequence
 
 slicer = sys.modules["slicer"]
-slicer.app = types.SimpleNamespace(palette=lambda: qt.QPalette())
+slicer.app = types.SimpleNamespace(palette=lambda: qt.QPalette(),
+                                   layoutManager=lambda: _LayoutManager())
 
 # The scene, observable. A node is whatever `load_result` returned; the panel
 # is only allowed to remove the ones it put there.
@@ -81,6 +82,37 @@ class _Node:
 
 
 slicer.mrmlScene = types.SimpleNamespace(RemoveNode=lambda node: SCENE.remove(node))
+
+# The views, observable. Loading a node is not showing it, and which layout a
+# case lands in is the difference between a viewer and a file loader.
+VIEWS = {"layout": None, "framed": 0, "rendered": []}
+
+
+class _ThreeDView:
+    @staticmethod
+    def resetFocalPoint():
+        VIEWS["framed"] += 1
+
+    @staticmethod
+    def resetCamera():
+        pass
+
+
+class _LayoutManager:
+    threeDViewCount = 1
+
+    @staticmethod
+    def setLayout(layout):
+        VIEWS["layout"] = layout
+
+    @staticmethod
+    def threeDWidget(_number):
+        return types.SimpleNamespace(threeDView=lambda: _ThreeDView())
+
+
+slicer.vtkMRMLLayoutNode = types.SimpleNamespace(
+    SlicerLayoutFourUpView="four-up", SlicerLayoutOneUp3DView="3d",
+)
 LAYERS = {}
 slicer.util = types.SimpleNamespace(
     setSliceViewerLayers=lambda **kwargs: LAYERS.update(kwargs),
@@ -120,7 +152,10 @@ def _loader(path, _kind):
     return node
 
 
-VISU.slicer_io = types.SimpleNamespace(load_result=_loader)
+VISU.slicer_io = types.SimpleNamespace(
+    load_result=_loader,
+    show_volume_rendering=lambda node, preset: VIEWS["rendered"].append((node.path, preset)),
+)
 # Reading ahead touches the disk in a thread and asserts nothing; the files
 # here are one byte each and the thread would race the temp directory's
 # removal.
@@ -212,6 +247,8 @@ class PanelTest(unittest.TestCase):
     def setUp(self):
         del SCENE[:]
         LAYERS.clear()
+        VIEWS.update(layout=None, framed=0)
+        del VIEWS["rendered"][:]
         qt_stubs.QSettings.store.clear()
         self.root = tempfile.TemporaryDirectory()
         self.addCleanup(self.root.cleanup)
@@ -255,6 +292,28 @@ class PanelTest(unittest.TestCase):
         self.widget.onNext()
         self.assertEqual(len(SCENE), 1)
         self.assertNotIn(first, SCENE, "the previous case stayed in the scene")
+
+    def test_a_scan_fills_the_slices_and_the_3d_view(self):
+        # A volume loads into the slice views and leaves 3D EMPTY, which reads
+        # as a failed load. Every tool panel returning a scan turns rendering
+        # on; so does this one.
+        self.open(["scans/p1_scan.nii.gz"])
+        self.assertEqual(VIEWS["layout"], "four-up")
+        self.assertEqual(VIEWS["rendered"], [(LAYERS["background"].path, "CT-AAA")])
+        self.assertGreaterEqual(VIEWS["framed"], 1)
+
+    def test_a_mesh_gets_the_3d_view_to_itself(self):
+        # Three slice panes around a surface are dead space.
+        self.open(["scans/arch.vtk"])
+        self.assertEqual(VIEWS["layout"], "3d")
+        self.assertEqual(VIEWS["rendered"], [], "a mesh has nothing to render")
+        self.assertGreaterEqual(VIEWS["framed"], 1)
+
+    def test_a_patient_with_nothing_on_it_says_so(self):
+        # `cohort_6` is six scans and no landmarks. A blank line there sends
+        # the reader looking for a bug that is not one.
+        self.open(["scans/p1_scan.nii.gz"])
+        self.assertIn("No landmarks", self.widget.frameLabel.text)
 
     def test_leaving_the_module_empties_what_it_loaded(self):
         self.open(["scans/p1_scan.nii.gz"])
