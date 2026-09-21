@@ -339,6 +339,37 @@ def compact_button(text: str) -> qt.QPushButton:
     return _compact_button(text, "primary")
 
 
+# How tall a navigation button is, and how big the glyph on it is. Large on
+# purpose: stepping through a cohort is the one action a reader repeats
+# hundreds of times in a sitting, and it is done while looking at the SCAN
+# rather than at the panel. A button found by peripheral vision has to be
+# bigger than a button read.
+NAV_BUTTON_HEIGHT = 44
+NAV_GLYPH_POINT_SIZE = 18
+
+
+def nav_button(text: str) -> qt.QPushButton:
+    """A large stepper for moving through a list: VISU's previous/next.
+
+    NOT `primary_button`: a panel's primary is the one action that commits
+    something, and these commit nothing -- they move the view. The secondary
+    gradient keeps them quiet while the height keeps them findable.
+    """
+    t = tokens()
+    stops = _button_stops()["secondary"]
+    button = qt.QPushButton(text)
+    button.setMinimumHeight(NAV_BUTTON_HEIGHT)
+    button.setStyleSheet(
+        f"QPushButton {{ background-color: {_gradient(*stops['base'])}; color: white;"
+        f" border: none; border-radius: 6px; font-weight: 700;"
+        f" font-size: {NAV_GLYPH_POINT_SIZE}pt; padding: 0px; margin: 0px; }}"
+        f"QPushButton:hover:!pressed {{ background-color: {_gradient(*stops['hover'])}; }}"
+        f"QPushButton:pressed {{ background-color: {_gradient(*stops['pressed'])}; }}"
+        f"QPushButton:disabled {{ background-color: {t['DISABLED_BG']}; color: {t['DISABLED_TEXT']}; }}"
+    )
+    return button
+
+
 def compact_danger_button(text: str) -> qt.QPushButton:
     """A small interrupting action attached to ONE line of a list: the Cancel
     that belongs to a single run, next to that run's own progress line.
