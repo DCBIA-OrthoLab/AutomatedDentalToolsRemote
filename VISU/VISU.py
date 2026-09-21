@@ -59,17 +59,18 @@ SOURCE = "folder"
 # or a spreadsheet that a viewer has nothing to do with. Size does not separate
 # them either: 13 entries sit under 250 MB and 9 under 100.
 #
-# So it is chosen, and the rule the choice follows is: EVERY subject in it
-# carries landmarks. A scan on its own shows nothing this panel does that
-# opening the file would not -- the point is the several things that belong to
-# one scan, seen together -- and a sample where half the patients come up bare
-# teaches the reader that the panel lost them.
+# The rule a sample has to pass: AT LEAST THREE subjects, each one carrying
+# both a scan and the landmarks placed on it. Three because the arrows are the
+# point and two of anything demonstrates nothing; matched because the panel
+# exists to show what belongs to one scan together, and a subject that comes
+# up bare teaches the reader that the panel lost something.
 #
-# Counted with this module's own index against the bundles on disk. Four
-# hosted folders pass that rule and only one of them holds three subjects, so
-# the other two are short: the server's test data is each tool's regression
-# fixture and was never assembled for looking at. `~/visu-testdata` is where a
-# richer one is kept, outside every repository.
+# Counted with this module's own index against the bundles on disk. **Exactly
+# one hosted folder passes.** Four carry landmarks at all and the other three
+# hold one or two subjects -- the server's test data is each tool's regression
+# fixture, assembled to prove a tool still runs rather than to be looked at.
+# A folder of one's own is where a richer set lives; `VISULib.index` walks any
+# directory, so pointing the field at it needs nothing from here.
 # Each entry is (tool, the server's own name, what to call it here). The third
 # is not decoration: the server's names are each tool's fixture names --
 # `IOSCBCT_RegTestFiles`, `CBCT_SemiAuto_DCM` -- and they say which REGRESSION
@@ -78,8 +79,12 @@ SOURCE = "folder"
 # and is the only place that knows a viewer is asking.
 SAMPLE_DATA = (
     ("AREG", "IOSCBCT_RegTestFiles", "3 subjects - CBCT and IOS, with landmarks"),
-    ("ASO", "IOS_SemiAuto", "2 subjects - IOS, with landmarks"),
-    ("ASO", "CBCT_SemiAuto_DCM", "1 subject - a DICOM series, with landmarks"),
+    # Staged by hand under `DATA/`, which is gitignored: three CBCT and three
+    # IOS with the landmarks ALI placed on them, filed `CBCT/` beside
+    # `Landmarks/`. A deployment that has not staged them offers them not at
+    # all, which is what makes naming them here safe.
+    ("ASO", "VISU_CBCT_3", "3 subjects - CBCT, with landmarks"),
+    ("ASO", "VISU_IOS_3", "3 subjects - IOS, with landmarks"),
 )
 
 # What a CBCT is rendered with in 3D, and it is the tools' own choice: AMASSS
