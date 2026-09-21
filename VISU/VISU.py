@@ -97,10 +97,27 @@ VOLUME_RENDERING = "CT-AAA"
 # shown.
 SEGMENTATION = "segmentation"
 
-# How big a landmark is drawn, in millimetres of the patient rather than in
-# percent of the view. Small on purpose: a point is a POSITION, and a glyph
-# wide enough to cover the structure under it hides the very thing a reader
-# opened the panel to judge. 1 mm is about three voxels of a 0.3 mm CBCT.
+# How big a landmark is drawn, and this OVERRIDES what the file says.
+#
+# A `.mrk.json` carries three fields for it, and ALI writes all three:
+#
+#     "glyphScale": 2.0      percent of the VIEW
+#     "glyphSize": 5.0       millimetres
+#     "useGlyphScale": true  -> the percentage is the one in force
+#
+# Those are Slicer's own defaults carried through rather than a choice about
+# anatomy -- ALI's display block documents `visibility` and `sliceProjection`
+# as deliberate and says nothing about size. And the percentage is what made
+# a point invisible: 2 % of a 230 mm field is a speck, while the same 2 % on a
+# 60 mm arch is a boulder. One number cannot serve both, which is what a
+# percentage of the view is for and exactly why it fails here -- the view is
+# not the patient.
+#
+# So the scale is switched off and an absolute size applied. 1 mm rather than
+# the file's own 5: a point is a POSITION, and a glyph wide enough to cover
+# the structure under it hides the thing the reader came to judge. Changing it
+# at the source, in `sadt_ali_common.markups`, would fix it for every consumer
+# rather than for this panel.
 LANDMARK_SIZE_MM = 1.0
 
 # What an adjustment is called on disk, beside the scan it moves. Never the
@@ -213,10 +230,8 @@ class SceneLoader:
     def _make_visible(node) -> None:
         """Give the points a size a reader can find on a CBCT.
 
-        Slicer sizes a glyph as a PERCENTAGE of the view, default 2. On a
-        230 mm field that is a speck, and on a mesh 60 mm across it is a
-        boulder -- the same number cannot serve both. An absolute millimetre
-        size does, and it is also what a clinician judges a landmark by.
+        The file has its own answer and it is the wrong one; see
+        LANDMARK_SIZE_MM for which three fields it writes and why they lose.
         """
         display = node.GetDisplayNode()
         if display is None:
