@@ -1,0 +1,644 @@
+"""A run that stops for somebody to look at it, and is then carried on.
+
+The server can be asked to interrupt a chain after one of its steps: the POST
+answers a quality-control record instead of a result, the run stays `paused`,
+and `POST /runs/{id}/resume` carries it on with whatever a reader corrected.
+What this file pins is the panel's half of that loop, and the two places it
+could quietly go wrong:
+
+* a stopped run is NOT a finished one. It keeps its place in the queue, it is
+  still cancellable, and nothing downstream of a result may fire for it --
+  `handleResult` least of all, since a module's override would open a half-run
+  chain's intermediates as if they were the answer;
+* and a run that did not stop must go through untouched. That is every run of
+  every tool today, so a regression there is not a feature that failed, it is
+  the whole extension.
+
+Usage:
+    python3 -m unittest test_quality_control
+"""
+
+import ast
+import contextlib
+import os
+import shutil
+import sys
+import tempfile
+import threading
+import unittest
+import zipfile
+from unittest import mock
+
+_HERE = os.path.abspath(os.path.dirname(__file__))
+_CORE = os.path.abspath(os.path.join(_HERE, "..", ".."))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, _CORE)
+
+import test_hosted_test_files as fixtures  # noqa: F401,E402 - importing installs the stubs
+
+# `_onJobSuccess` wraps `handleResult` in it. Same stop-gap as test_runs.py,
+# and for the same reason: the shared stub has no need of it.
+_slicer_util = sys.modules["slicer.util"]
+if not hasattr(_slicer_util, "tryWithErrorDisplay"):
+    @contextlib.contextmanager
+    def _try_with_error_display(_message, **_kwargs):
+        yield
+
+    _slicer_util.tryWithErrorDisplay = _try_with_error_display
+
+from ServerToolsCoreLib import base_widget, transfer  # noqa: E402
+from ServerToolsCoreLib.base_widget import ServerToolWidgetBase  # noqa: E402
+from ServerToolsCoreLib.client import (  # noqa: E402
+    RunCheckpoint,
+    ToolResult,
+    ToolServerClient,
+)
+
+qt = sys.modules["qt"]
+
+
+def _response(status_code=200, json_data=None, content=b"", headers=None):
+    """The same shape test_client.py uses; kept local so the two files can be
+    read apart."""
+    response = mock.Mock()
+    response.status_code = status_code
+    response.ok = 200 <= status_code < 300
+    response.headers = headers or {"Content-Type": "application/json"}
+    response.content = content
+    response.iter_content = lambda chunk_size: iter([content] if content else [])
+    if json_data is not None:
+        response.json.return_value = json_data
+    else:
+        response.json.side_effect = ValueError("no json body")
+    return response
+
+
+def _zip_bytes(members):
+    buffer = tempfile.SpooledTemporaryFile()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    buffer.seek(0)
+    return buffer.read()
+
+
+# ----------------------------------------------------------------------
+# The client: recognising the record, and sending the corrections back
+# ----------------------------------------------------------------------
+
+class ClientTest(unittest.TestCase):
+    """One tool that can be stopped: `stop_after` is a multichoice exactly as
+    the server injects it, every step off by default."""
+
+    TOOL = {
+        "name": "AREG",
+        "output_kind": "files",
+        "arguments": {
+            "t1": {"type": "path", "required": False},
+            "stop_after": {"type": "multichoice", "required": False,
+                           "choices": {"ALI_CBCT": False, "ASO": False}},
+        },
+    }
+
+    QC = {
+        "quality_control": True,
+        "stopped_after": "ALI_CBCT",
+        "produced": ["01_ALI_CBCT"],
+        "result_ref": {"result_id": "res123", "filename": "AREG_stopped.zip",
+                       "size": 4096, "media_type": "application/zip"},
+    }
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, ignore_errors=True)
+        self.client = ToolServerClient("http://server", "token", detached_runs=True)
+
+    def _fake_download(self, _session, _url, destination, *_a, **_kw):
+        with open(destination, "wb") as handle:
+            handle.write(_zip_bytes({"landmarks.mrk.json": "{}"}))
+        return destination
+
+    @mock.patch("requests.Session.delete")
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_a_stopped_run_answers_a_checkpoint_and_not_a_result(
+            self, mock_get, mock_post, mock_delete):
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = _response(json_data=self.QC)
+
+        with mock.patch.object(transfer, "download_ranged",
+                               side_effect=self._fake_download):
+            result = self.client.run(
+                "AREG", args={"stop_after": {"ALI_CBCT": True, "ASO": False}},
+                output_dir=self.work, run_id="run-1")
+
+        self.assertEqual(result.kind, "checkpoint")
+        self.assertIsNotNone(result.checkpoint)
+        self.assertEqual(result.checkpoint.run_id, "run-1")
+        self.assertEqual(result.checkpoint.stopped_after, "ALI_CBCT")
+        self.assertEqual(result.checkpoint.produced, ("01_ALI_CBCT",))
+        self.assertEqual(result.checkpoint.path,
+                         os.path.join(self.work, "AREG_stopped.zip"))
+        # Fetched and released like any other reference: what happens next is
+        # a person reading scans, which is not a wait to hold server-side
+        # storage through.
+        self.assertEqual(mock_delete.call_args.args[0], "http://server/results/res123")
+
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_a_checkpoint_that_collected_nothing_is_still_a_checkpoint(
+            self, mock_get, mock_post):
+        """A stop declared inside a tool's own work collects no supervised
+        call, so the server sends `result_ref: null`. The run is paused all the
+        same and something has to carry it on."""
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = _response(json_data=dict(
+            self.QC, produced=[], result_ref=None))
+
+        result = self.client.run("AREG", args={"stop_after": {"ALI_CBCT": True}},
+                                 output_dir=self.work, run_id="run-1")
+
+        self.assertEqual(result.kind, "checkpoint")
+        self.assertIsNone(result.checkpoint.path)
+        self.assertEqual(result.checkpoint.produced, ())
+
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_a_run_that_asks_to_stop_is_not_detached(self, mock_get, mock_post):
+        """The whole feature turns on this. The server builds the record in the
+        RESPONSE BODY; its detached path answers 202, writes a non-terminal
+        `paused` event and drops the payload -- so a detached run of this kind
+        waits on a terminal event that never comes."""
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = _response(json_data=self.QC, headers={
+            "Content-Type": "application/json"})
+
+        with mock.patch.object(transfer, "download_ranged",
+                               side_effect=self._fake_download):
+            self.client.run("AREG", args={"stop_after": {"ALI_CBCT": True}},
+                            output_dir=self.work, run_id="run-1")
+
+        self.assertIsNone(
+            mock_post.call_args.kwargs["headers"].get("X-Run-Delivery"),
+            "a run that will stop must keep the blocking contract")
+
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_a_run_that_asks_for_no_stop_is_detached_as_before(
+            self, mock_get, mock_post):
+        """Every run of every tool today: the opt-out must be exactly as narrow
+        as it claims to be."""
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = _response(status_code=202, json_data={})
+
+        with mock.patch.object(ToolServerClient, "_collect_detached",
+                               return_value=ToolResult(kind="text", text="done")):
+            self.client.run("AREG", args={"stop_after": {"ALI_CBCT": False,
+                                                         "ASO": False}},
+                            output_dir=self.work, run_id="run-1")
+
+        self.assertEqual(
+            mock_post.call_args.kwargs["headers"].get("X-Run-Delivery"), "detached")
+
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_a_resume_sends_one_field_per_step_named_after_its_folder(
+            self, mock_get, mock_post):
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = _response(
+            content=_zip_bytes({"AREG_output.nii.gz": "x"}),
+            headers={"Content-Type": "application/zip",
+                     "Content-Disposition": 'attachment; filename="AREG_output.zip"'})
+        correction = os.path.join(self.work, "01_ALI_CBCT.zip")
+        with open(correction, "wb") as handle:
+            handle.write(_zip_bytes({"corrected.mrk.json": "{}"}))
+
+        out = os.path.join(self.work, "out")
+        result = self.client.resume_run("AREG", "run-1",
+                                        corrections={"01_ALI_CBCT": correction},
+                                        output_dir=out)
+
+        self.assertEqual(mock_post.call_args.args[0],
+                         "http://server/runs/run-1/resume")
+        sent = mock_post.call_args.kwargs["files"]
+        self.assertEqual(list(sent), ["01_ALI_CBCT"])
+        self.assertEqual(sent["01_ALI_CBCT"][0], "01_ALI_CBCT.zip")
+        self.assertEqual(result.kind, "file")
+        self.assertEqual(result.path, os.path.join(out, "AREG_output.zip"))
+
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_a_resume_with_nothing_to_correct_sends_no_files(
+            self, mock_get, mock_post):
+        """Legal, and the cheap half of the feature: the server carries on with
+        what it produced."""
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = _response(json_data={"result": "done"})
+
+        self.client.resume_run("AREG", "run-1", corrections={},
+                               output_dir=self.work)
+
+        self.assertIsNone(mock_post.call_args.kwargs["files"])
+
+    @mock.patch("requests.Session.post")
+    @mock.patch("requests.Session.get")
+    def test_a_resume_that_stops_again_answers_another_checkpoint(
+            self, mock_get, mock_post):
+        """Two steps can be armed at once, and the second stop arrives on the
+        resume's own response. The loop has to be able to go round again."""
+        mock_get.return_value = _response(json_data=[self.TOOL])
+        mock_post.return_value = _response(json_data=dict(
+            self.QC, stopped_after="ASO", produced=["01_ALI_CBCT", "02_ASO"]))
+
+        with mock.patch.object(transfer, "download_ranged",
+                               side_effect=self._fake_download), \
+                mock.patch("requests.Session.delete"):
+            result = self.client.resume_run("AREG", "run-1", corrections={},
+                                            output_dir=self.work)
+
+        self.assertEqual(result.kind, "checkpoint")
+        self.assertEqual(result.checkpoint.stopped_after, "ASO")
+
+    def test_a_resume_without_a_run_id_is_refused_before_any_request(self):
+        with self.assertRaises(Exception):
+            self.client.resume_run("AREG", "", corrections={})
+
+
+# ----------------------------------------------------------------------
+# The panel: the loop, driven against a stub job and a stub reviewer
+# ----------------------------------------------------------------------
+
+class _Job:
+    """Stand-in for BackgroundJob, delivered on command. Same shape as
+    test_runs.py's, which is where the reasoning for having no thread is."""
+
+    started = []
+
+    def __init__(self, target, on_success=None, on_error=None, on_progress=None,
+                 cancel_event=None):
+        self.target = target
+        self.on_success = on_success
+        self.on_error = on_error
+        self.on_progress = on_progress
+        self.cancel_event = cancel_event if cancel_event is not None else threading.Event()
+
+    def start(self):
+        _Job.started.append(self)
+
+    def collect(self):
+        """Invoke the target here, the way the real worker thread would.
+
+        Separate from `start` so a case can look at the panel between the two,
+        which is the whole reason the stub has no thread of its own.
+        """
+        return self.target(lambda *_a, **_k: None)
+
+    def cancel(self):
+        self.cancel_event.set()
+
+    def succeed(self, result):
+        self.on_success(result)
+
+
+class _Reviewer:
+    """The review module, recorded instead of shown.
+
+    Stands in for `VISU.open_for_review`, which is the entire surface the panel
+    uses: a folder and a callable in, a bool out.
+    """
+
+    def __init__(self):
+        self.opened = []
+        self.available = True
+        self.on_continue = None
+
+    def open_for_review(self, folder, on_continue):
+        self.opened.append(folder)
+        self.on_continue = on_continue
+        return self.available
+
+    def press_continue(self, flagged=(), written=(), folder=None):
+        self.on_continue({"folder": folder if folder is not None else self.opened[-1],
+                          "flagged": set(flagged), "written": set(written)})
+
+
+class _RecordingClient:
+    def __init__(self):
+        self.resumed = []
+        self.cancelled = []
+
+    def run(self, tool_name, **kwargs):
+        raise AssertionError("the stub job never invokes its target")
+
+    def resume_run(self, tool_name, run_id, corrections=None, output_dir=None,
+                   progress_cb=None):
+        self.resumed.append({"tool": tool_name, "run_id": run_id,
+                             "corrections": dict(corrections or {}),
+                             "output_dir": output_dir})
+        return ToolResult(kind="text", text="carried on")
+
+    def cancel_run(self, run_id):
+        self.cancelled.append(run_id)
+        return True
+
+
+class PanelTest(unittest.TestCase):
+
+    def setUp(self):
+        _Job.started = []
+        self.addCleanup(setattr, base_widget, "BackgroundJob", base_widget.BackgroundJob)
+        base_widget.BackgroundJob = _Job
+
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, ignore_errors=True)
+        self.reviewer = _Reviewer()
+        self.client = _RecordingClient()
+        self.announced = []
+        self.handled = []
+        self.panel = self._panel()
+
+    def _panel(self):
+        panel = ServerToolWidgetBase.__new__(ServerToolWidgetBase)
+        panel.TOOL_NAME = "AREG"
+        panel._runs = []
+        panel._runsStarted = 0
+        panel._elapsedTimer = None
+        panel._outputFolderWidget = None
+        panel._statusJob = None
+        panel._downloadJob = None
+        panel._testFileRoot = None
+        panel._progressBar = None
+        panel._runControlsLayout = qt.QVBoxLayout()
+        panel._runControlsWidget = None
+        panel.applyButton = qt.QPushButton("Apply")
+        panel.cancelButton = qt.QPushButton("Cancel")
+        panel.client = self.client
+        panel.prepareInputFiles = lambda workspace: {"t1": "/data/p1.nii.gz"}
+        panel.collectArgs = lambda: {"stop_after": {"ALI_CBCT": True}}
+        panel.handleResult = self.handled.append
+        panel._announce = self.announced.append
+        panel._showPhase = lambda _message: None
+        panel._hideProgress = lambda: None
+        panel._checkCanApply = lambda *_args: None
+        panel._suggestOutputFolder = lambda: None
+        # The reviewer, in place of the lazy `importlib.import_module` of the
+        # real thing. The panel is not allowed to know more about the module
+        # than these two lines say it does.
+        panel._openReviewer = self.reviewer.open_for_review
+        return panel
+
+    # -- fixtures ------------------------------------------------------
+
+    def _checkpoint(self, produced=("01_ALI_CBCT",), members=None, flat=False):
+        """A stopped run's answer, with a real archive on disk.
+
+        `flat` is the single-step shape: the server's zip flattens ONE
+        directory to the archive root, so a lone step's files arrive at the top
+        and its folder name never appears in the archive.
+        """
+        members = members or {"p1_lm_Pred.mrk.json": "{}"}
+        if flat:
+            laid_out = dict(members)
+        else:
+            laid_out = {os.path.join(produced[0], name): data
+                        for name, data in members.items()}
+        archive = os.path.join(self.work, "AREG_stopped.zip")
+        with open(archive, "wb") as handle:
+            handle.write(_zip_bytes(laid_out))
+        return ToolResult(kind="checkpoint", checkpoint=RunCheckpoint(
+            run_id="run-1", stopped_after="ALI_CBCT",
+            produced=tuple(produced), path=archive))
+
+    def _apply(self):
+        self.panel.onApplyButton()
+        return _Job.started[-1]
+
+    def _stopped(self, **kwargs):
+        """Apply, and let the run come back stopped. Returns (run, job)."""
+        job = self._apply()
+        run = self.panel._runs[0]
+        run.output_dir = self.work
+        job.succeed(self._checkpoint(**kwargs))
+        return run, job
+
+    def _collectResume(self) -> dict:
+        """Let the resume job reach the client, and hand back what it sent."""
+        _Job.started[-1].collect()
+        return self.client.resumed[-1]
+
+    # -- a stopped run is not a finished one ---------------------------
+
+    def test_a_stopped_run_keeps_its_place_and_is_not_handled_as_a_result(self):
+        run, _job = self._stopped()
+
+        self.assertIn(run, self.panel._runs, "the run was retired while paused")
+        self.assertIsNotNone(run.paused)
+        self.assertEqual(self.handled, [], "a half-run chain was opened as the answer")
+
+    def test_a_stopped_run_is_never_started_a_second_time_by_the_pump(self):
+        """`running` is what the admission pump reads. A paused run holds no
+        thread, so without this it looks startable and the panel sends the same
+        request twice."""
+        run, _job = self._stopped()
+        started = len(_Job.started)
+
+        self.panel._pumpRuns()
+
+        self.assertTrue(run.running)
+        self.assertEqual(len(_Job.started), started)
+
+    def test_the_reviewer_is_opened_on_what_the_run_produced(self):
+        self._stopped()
+
+        folder = os.path.join(self.work, "quality_control")
+        self.assertEqual(self.reviewer.opened, [folder])
+        self.assertTrue(os.path.isfile(
+            os.path.join(folder, "01_ALI_CBCT", "p1_lm_Pred.mrk.json")))
+
+    def test_the_archive_is_removed_once_it_is_unpacked(self):
+        """The reader corrects the unpacked files; the zip beside them is a
+        second copy of a cohort nobody will open."""
+        self._stopped()
+        self.assertFalse(os.path.exists(os.path.join(self.work, "AREG_stopped.zip")))
+
+    # -- and back again ------------------------------------------------
+
+    def test_continue_sends_a_correction_per_step_and_carries_the_run_on(self):
+        run, _job = self._stopped()
+        self.reviewer.press_continue(flagged={"p1"}, written={"p1"})
+
+        sent = self._collectResume()
+        self.assertEqual(sent["run_id"], "run-1")
+        self.assertEqual(sorted(sent["corrections"]), ["01_ALI_CBCT"])
+        self.assertTrue(zipfile.is_zipfile(sent["corrections"]["01_ALI_CBCT"]))
+        self.assertIsNone(run.paused, "the run is going again")
+
+    def test_a_reader_who_changed_nothing_sends_nothing_back(self):
+        """A step is a cohort's worth of scans. Re-uploading every one of them
+        on behalf of somebody who only looked is the expensive half."""
+        self._stopped()
+        self.reviewer.press_continue(flagged={"p1"}, written=set())
+
+        self.assertEqual(self._collectResume()["corrections"], {})
+
+    def test_a_single_step_flattened_into_the_archive_is_still_found(self):
+        self._stopped(flat=True)
+        self.reviewer.press_continue(written={"p1"})
+
+        self.assertEqual(sorted(self._collectResume()["corrections"]),
+                         ["01_ALI_CBCT"])
+
+    def test_two_steps_are_two_corrections(self):
+        self._stopped(produced=("01_ALI_CBCT", "02_ASO"),
+                      members={"p1_lm_Pred.mrk.json": "{}"})
+        folder = os.path.join(self.work, "quality_control")
+        os.makedirs(os.path.join(folder, "02_ASO"), exist_ok=True)
+        with open(os.path.join(folder, "02_ASO", "p1_Or.nii.gz"), "w") as handle:
+            handle.write("x")
+
+        self.reviewer.press_continue(written={"p1"})
+
+        self.assertEqual(sorted(self._collectResume()["corrections"]),
+                         ["01_ALI_CBCT", "02_ASO"])
+
+    def test_the_answer_after_a_resume_is_handled_as_any_other_runs(self):
+        """The point of reusing the same callbacks: the loop ends in the
+        ordinary result path, not in a second one."""
+        self._stopped()
+        self.reviewer.press_continue(written={"p1"})
+
+        _Job.started[-1].succeed(ToolResult(kind="text", text="carried on"))
+
+        self.assertEqual([result.text for result in self.handled], ["carried on"])
+        self.assertEqual(self.panel._runs, [], "the finished run was not retired")
+
+    def test_a_second_checkpoint_goes_round_the_loop_again(self):
+        self._stopped()
+        self.reviewer.press_continue(written=set())
+
+        _Job.started[-1].succeed(self._checkpoint(produced=("02_ASO",)))
+
+        self.assertEqual(len(self.reviewer.opened), 2)
+        self.assertEqual(self.handled, [])
+        self.assertIsNotNone(self.panel._runs[0].paused)
+
+    # -- when there is nothing, or nobody, to review -------------------
+
+    def test_a_checkpoint_with_nothing_to_show_carries_the_run_on_at_once(self):
+        """The run is PAUSED on the server holding a patient's data. Leaving it
+        there until the reaper because there was nothing to draw is the one
+        answer that is worse than not stopping."""
+        job = self._apply()
+        run = self.panel._runs[0]
+        run.output_dir = self.work
+        job.succeed(ToolResult(kind="checkpoint", checkpoint=RunCheckpoint(
+            run_id="run-1", stopped_after="halfway", produced=(), path=None)))
+
+        self.assertEqual(self.reviewer.opened, [])
+        self.assertEqual(self._collectResume()["run_id"], "run-1")
+        self.assertTrue(any("carrying on" in said for said in self.announced))
+
+    def test_a_reviewer_that_will_not_open_does_not_strand_the_run(self):
+        self.reviewer.available = False
+        self._stopped()
+
+        self.assertEqual(self._collectResume()["corrections"], {})
+
+    def test_continue_on_a_run_that_is_no_longer_stopped_does_nothing(self):
+        """The reader was working while somebody pressed Cancel."""
+        run, _job = self._stopped()
+        run.paused = None
+
+        started = len(_Job.started)
+        self.reviewer.press_continue(written={"p1"})
+
+        self.assertEqual(len(_Job.started), started, "a dead run was resumed")
+        self.assertEqual(self.client.resumed, [])
+
+    # -- the runs that do not stop, which is all of them today ---------
+
+    def test_a_run_that_did_not_stop_is_handled_exactly_as_before(self):
+        job = self._apply()
+        run = self.panel._runs[0]
+
+        job.succeed(ToolResult(kind="text", text="done"))
+
+        self.assertEqual([result.text for result in self.handled], ["done"])
+        self.assertNotIn(run, self.panel._runs)
+        self.assertEqual(self.client.resumed, [])
+
+    def test_a_result_that_is_not_a_ToolResult_at_all_still_goes_through(self):
+        """`handleResult` takes whatever the client returned, and two of this
+        repository's own fixtures hand it a plain string."""
+        job = self._apply()
+
+        job.succeed("done")
+
+        self.assertEqual(self.handled, ["done"])
+
+
+class ReviewModuleTest(unittest.TestCase):
+    """The seam between the two halves, which is a NAME and a function.
+
+    `base_widget` reaches the viewer through `importlib` so that a library
+    every tool depends on does not import one particular module -- which means
+    nothing fails at import time if either side is renamed. This is what fails
+    instead.
+    """
+
+    def test_the_named_module_exists_and_offers_the_entry_point(self):
+        module = os.path.join(_CORE, "..",
+                              ServerToolWidgetBase.REVIEW_MODULE,
+                              ServerToolWidgetBase.REVIEW_MODULE + ".py")
+        self.assertTrue(os.path.isfile(module), module)
+        # Read rather than imported: that module needs a running Slicer, and
+        # what is being checked is a DECLARATION, which is there in the text.
+        with open(module, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        entry = [node for node in tree.body
+                 if isinstance(node, ast.FunctionDef)
+                 and node.name == "open_for_review"]
+        self.assertEqual(len(entry), 1,
+                         "the review module must offer open_for_review()")
+        self.assertEqual([arg.arg for arg in entry[0].args.args],
+                         ["folder", "on_continue"])
+
+
+class SlotLayoutTest(unittest.TestCase):
+    """`_checkpointSlots` alone: the two shapes the archive can have."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def test_named_folders_are_the_steps(self):
+        for name in ("01_ALI_CBCT", "02_ASO"):
+            os.makedirs(os.path.join(self.root, name))
+
+        found = ServerToolWidgetBase._checkpointSlots(
+            self.root, ("01_ALI_CBCT", "02_ASO"))
+
+        self.assertEqual(sorted(found), ["01_ALI_CBCT", "02_ASO"])
+        self.assertEqual(found["02_ASO"], os.path.join(self.root, "02_ASO"))
+
+    def test_one_step_flattened_to_the_root_is_the_root(self):
+        with open(os.path.join(self.root, "p1.mrk.json"), "w") as handle:
+            handle.write("{}")
+
+        found = ServerToolWidgetBase._checkpointSlots(self.root, ("01_ALI_CBCT",))
+
+        self.assertEqual(found, {"01_ALI_CBCT": self.root})
+
+    def test_two_steps_of_which_one_is_missing_is_the_one_that_is_there(self):
+        """A step that produced nothing is not in the archive. Reading the root
+        as that step would send one step's files back under another's name."""
+        os.makedirs(os.path.join(self.root, "01_ALI_CBCT"))
+
+        found = ServerToolWidgetBase._checkpointSlots(
+            self.root, ("01_ALI_CBCT", "02_ASO"))
+
+        self.assertEqual(sorted(found), ["01_ALI_CBCT"])
+
+
+if __name__ == "__main__":
+    unittest.main()

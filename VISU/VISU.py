@@ -487,6 +487,30 @@ def hosted_choices(found) -> tuple:
     return sorted(entries, key=lambda entry: entry["name"]), offered
 
 
+def open_for_review(folder: str, on_continue) -> bool:
+    """Bring this module up on `folder`, with a Continue that calls back.
+
+    Here rather than in the caller, and it is the only reason this function
+    exists: which Slicer module VISU is, how its panel is reached and what it
+    is asked are VISU's to know. A tool panel that stopped mid-run holds a
+    folder and a callable and nothing else, so the day this module is renamed
+    or its panel grows a second entry point, nothing outside this file moves.
+
+    False rather than an exception when the panel cannot be reached: the
+    caller is in the middle of a run that is PAUSED on the server, and it has
+    to be able to say so and release it rather than leaving a GPU job waiting
+    for a reader who was never shown anything.
+    """
+    try:
+        slicer.util.selectModule("VISU")
+        widget = slicer.modules.visu.widgetRepresentation().self()
+    except Exception as exc:  # noqa: BLE001 - reported to the caller, not raised
+        logger.warning("Could not open VISU on %s: %s", folder, exc)
+        return False
+    widget.openForReview(folder, on_continue)
+    return True
+
+
 class VISUWidget(ScriptedLoadableModuleWidget):
 
     def __init__(self, parent=None):
@@ -531,6 +555,15 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # folder they belong to. Read back off the folder on every open.
         self._flagged = set()
         self._folder = ""
+        # The case keys whose files this panel actually wrote back. Not the
+        # same list as the flagged one and not derivable from it: a reader
+        # corrects a landmark without flagging the patient, and flags a
+        # patient they could not correct at all.
+        self._written = set()
+        # Set by `openForReview` when somebody else opened this panel. None
+        # for a reader who opened it themselves -- who has nothing to
+        # continue, and must not be shown a button that says they have.
+        self._continue = None
         # Everything indexed, before the cohort chips narrow it.
         self._allCases = []
 
@@ -761,6 +794,24 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self.saveButton.connect("clicked()", self.onSave)
         actions.addWidget(self.saveButton, 1)
         self.panel.addLayout(actions)
+
+        # Hidden until somebody else opens this panel (see `openForReview`).
+        # A reader who opened VISU themselves has nothing to continue, and a
+        # button that says otherwise is a button that does nothing.
+        #
+        # `success_button` rather than `primary_button`: Save is the primary
+        # action here and it is pressed per patient, while this one is pressed
+        # once and ends the review. Two identical buttons side by side, one of
+        # which hands the cohort back to a running job, is the pair that gets
+        # pressed by mistake.
+        self.continueButton = design.success_button(_("Continue"))
+        self.continueButton.toolTip = _(
+            "Give this back to the tool that opened it. What you corrected is "
+            "written first, then the run carries on from where it stopped."
+        )
+        self.continueButton.connect("clicked()", self.onContinue)
+        self.continueButton.setVisible(False)
+        self.panel.addWidget(self.continueButton)
 
     # -- settings ----------------------------------------------------------
 
@@ -1301,6 +1352,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         if not self._points:
             return _("No landmarks on screen to save.")
         if moved:
+            self._written.add(self._currentKey())
             return _("{moved} point(s) written, in {files} file(s).").format(
                 moved=moved, files=files)
         # Said, rather than left silent. "Saved" over an unchanged file is a
@@ -1327,6 +1379,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             slicer.util.errorDisplay(
                 _("Could not write the transform: {error}").format(error=exc))
             return ""
+        self._written.add(self._currentKey())
         return _("Written: {name}").format(name=os.path.basename(destination))
 
     def onRevert(self) -> None:
@@ -1338,6 +1391,9 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self._filling = False
         self._show(reframe=False)
         self.modifyLabel.text = _("Reloaded from disk.")
+
+    def _currentKey(self) -> str:
+        return self.cases[self.position].key if self.cases else ""
 
     def _currentAnchor(self):
         if not self.views:
@@ -1356,6 +1412,73 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not take the adjustment off: %s", exc)
         self._adjustment = None
+
+    # -- opened by somebody else ---------------------------------------------
+
+    def openForReview(self, folder: str, on_continue=None) -> None:
+        """Show `folder`, and give the caller a way to be told when to carry on.
+
+        This is the whole of what VISU learns about the thing that opened it.
+        It is handed a directory and a callable; it does not know there is a
+        run, a server, or a step that stopped -- and it must not, or the next
+        caller with a folder and a question has to be added to it.
+
+        `on_continue` is what puts the Continue button on the panel. A reader
+        who opened VISU themselves passes none and sees none, because they
+        have nothing to hand back to.
+        """
+        self._continue = on_continue
+        self.continueButton.setVisible(on_continue is not None)
+        # Reviewing this folder starts now, whatever an earlier pass over it
+        # wrote: the caller wants what this reader changes, not the union.
+        self._written = set()
+        before = self.folderInput.currentPath
+        self.folderInput.setCurrentPath(folder)
+        if self.folderInput.currentPath == before:
+            # `setCurrentPath` notifies only on a CHANGE, and the same folder
+            # is opened twice whenever one run stops at a second checkpoint
+            # under one output directory. Indexing again is what puts the
+            # files the first resume produced on screen.
+            self.onIndex()
+
+    def reviewed(self) -> dict:
+        """What this pass produced, for whoever asked for it.
+
+        A dict rather than arguments in an order. This crosses the seam
+        between two modules that ship together and are read apart, and the
+        next thing a caller will want -- a note per patient, which
+        `VISULib.review` already versioned its file for -- must be one key
+        added here rather than a signature both sides change on the same day.
+
+        Three things, and each is something only the panel can answer:
+
+        * `folder`, because the reader can repoint the picker, so what was
+          reviewed is not necessarily what the caller opened;
+        * `flagged`, the reader's verdict, which exists nowhere else;
+        * `written`, the patients whose files this panel actually changed.
+          Without it a caller must send a whole cohort back -- hundreds of
+          megabytes -- on behalf of a reader who corrected nothing.
+        """
+        return {
+            "folder": self._folder,
+            "flagged": set(self._flagged),
+            "written": set(self._written),
+        }
+
+    def onContinue(self) -> None:
+        """Write what is pending, then hand control back. Once."""
+        if self._continue is None:
+            return
+        # The reader pressed Continue rather than Save, and the point they
+        # just dragged is exactly what the caller is about to collect. Same
+        # call the arrows make on the way out of a patient.
+        self._leaving()
+        # Taken before it is called: the handler will start an upload and may
+        # well come back through this panel, and a second Continue would
+        # resume one run twice.
+        handler, self._continue = self._continue, None
+        self.continueButton.setVisible(False)
+        handler(self.reviewed())
 
     # -- leaving -----------------------------------------------------------
 

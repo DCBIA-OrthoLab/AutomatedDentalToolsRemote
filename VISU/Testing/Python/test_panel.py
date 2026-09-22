@@ -1078,5 +1078,172 @@ class TestFileTest(unittest.TestCase):
         self.assertEqual(DOWNLOADS, [])
 
 
+class HandingBackTest(unittest.TestCase):
+    """VISU opened by somebody else, and the one thing it gives them back.
+
+    A tool panel whose run stopped at a checkpoint opens this panel on what
+    the run produced and waits for Continue. Everything VISU learns about that
+    is a folder and a callable: it has no idea there is a run, a server, or a
+    step that stopped, and these tests are what keeps it that way.
+    """
+
+    def setUp(self):
+        del SCENE[:]
+        del ERRORS[:]
+        qt_stubs.QSettings.store.clear()
+        self.root = tempfile.TemporaryDirectory()
+        self.addCleanup(self.root.cleanup)
+        self.widget = VISU.VISUWidget()
+        self.widget.setup()
+        self.addCleanup(self.widget.cleanup)
+        self.handed = []
+        # Two cases below drive the module-level entry point, which reaches
+        # Slicer's own module registry. Restored, because every other case in
+        # this file reads the same two objects.
+        self.addCleanup(setattr, slicer, "modules", slicer.modules)
+        self.addCleanup(setattr, slicer.util, "selectModule",
+                        getattr(slicer.util, "selectModule", None))
+
+    def folder(self, paths, name="results"):
+        tree(self.root.name, paths)
+        return os.path.join(self.root.name, name)
+
+    def _landmarks(self, at="results/p1_scan_lm_Pred.mrk.json"):
+        path = os.path.join(self.root.name, at)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"markups": [{"coordinateSystem": "LPS", "controlPoints": [
+                {"label": "Ba", "position": [1.0, 2.0, 3.0]},
+                {"label": "S", "position": [4.0, 5.0, 6.0]},
+            ]}]}, handle)
+        return path
+
+    def test_a_reader_who_opened_it_themselves_has_nothing_to_continue(self):
+        # The button is the whole of what this feature adds to an ordinary
+        # reader's panel, so it must add nothing at all.
+        self.widget.folderInput.setCurrentPath(
+            self.folder(["results/p1_scan.nii.gz"]))
+        self.assertFalse(self.widget.continueButton.isVisible())
+
+    def test_being_opened_by_somebody_else_offers_a_continue_and_shows_the_case(self):
+        self.widget.openForReview(
+            self.folder(["results/p1_scan.nii.gz"]), self.handed.append)
+
+        self.assertTrue(self.widget.continueButton.isVisible())
+        self.assertEqual(len(self.widget.cases), 1)
+        self.assertEqual(len(SCENE), 1, "the caller's folder was indexed but not shown")
+
+    def test_continue_reports_what_the_reader_flagged(self):
+        folder = self.folder([f"results/p{n}_scan.nii.gz" for n in (1, 2)])
+        self.widget.openForReview(folder, self.handed.append)
+        self.widget.flagButton.setChecked(True)
+        self.widget.onFlagToggled()
+
+        self.widget.onContinue()
+
+        self.assertEqual(len(self.handed), 1)
+        self.assertEqual(self.handed[0]["flagged"], {"p1"})
+        self.assertEqual(self.handed[0]["folder"], folder)
+
+    def test_continue_writes_the_correction_before_handing_back(self):
+        # The reader pressed Continue, not Save, and the point they just
+        # dragged is exactly what the caller is about to collect.
+        landmarks = self._landmarks()
+        self.widget.openForReview(
+            self.folder(["results/p1_scan.nii.gz"]), self.handed.append)
+        self.widget.unlockGroup.boxes["Landmarks"].setChecked(True)
+        node = [n for n in SCENE if n.path.endswith(".mrk.json")][0]
+        node.positions[0] = [-1.0, -2.0, 9.0]
+
+        self.widget.onContinue()
+
+        with open(landmarks, encoding="utf-8") as handle:
+            after = json.load(handle)["markups"][0]["controlPoints"]
+        self.assertEqual(after[0]["position"], [1.0, 2.0, 9.0])
+        self.assertEqual(self.handed[0]["written"], {"p1"})
+
+    def test_a_reader_who_changed_nothing_says_so(self):
+        """What lets the caller skip re-uploading a cohort on behalf of
+        somebody who only looked."""
+        self._landmarks()
+        self.widget.openForReview(
+            self.folder(["results/p1_scan.nii.gz"]), self.handed.append)
+        self.widget.onContinue()
+
+        self.assertEqual(self.handed[0]["written"], set())
+
+    def test_control_goes_back_once(self):
+        """The handler starts an upload and may well come back through this
+        panel; a second Continue would resume one run twice."""
+        self.widget.openForReview(
+            self.folder(["results/p1_scan.nii.gz"]), self.handed.append)
+
+        self.widget.onContinue()
+        self.widget.onContinue()
+
+        self.assertEqual(len(self.handed), 1)
+        self.assertFalse(self.widget.continueButton.isVisible())
+
+    def test_the_same_folder_opened_again_is_indexed_again(self):
+        """A run that stops at a second checkpoint reviews the same directory,
+        and `setCurrentPath` notifies only on a change."""
+        folder = self.folder(["results/p1_scan.nii.gz"])
+        self.widget.openForReview(folder, self.handed.append)
+        tree(self.root.name, ["results/p2_scan.nii.gz"])
+
+        self.widget.openForReview(folder, self.handed.append)
+
+        self.assertEqual(len(self.widget.cases), 2)
+        self.assertTrue(self.widget.continueButton.isVisible())
+
+    def test_the_module_level_entry_point_reaches_this_panel(self):
+        """The whole of what a tool panel uses: a folder and a callable in, a
+        bool out. Exercised here because the caller reaches it by NAME through
+        `importlib`, so nothing else in either half would catch a rename."""
+        selected = []
+        slicer.util.selectModule = selected.append
+        slicer.modules.visu = types.SimpleNamespace(
+            widgetRepresentation=lambda: types.SimpleNamespace(
+                self=lambda: self.widget))
+
+        opened = VISU.open_for_review(
+            self.folder(["results/p1_scan.nii.gz"]), self.handed.append)
+
+        self.assertTrue(opened)
+        self.assertEqual(selected, ["VISU"])
+        self.assertTrue(self.widget.continueButton.isVisible())
+
+    def test_a_panel_that_cannot_be_reached_is_reported_and_not_raised(self):
+        """The caller is in the middle of a run that is PAUSED on the server.
+        It has to be able to say so and release it, rather than leaving a GPU
+        job waiting for a reader who was never shown anything."""
+        def missing(_name):
+            raise RuntimeError("no such module")
+
+        slicer.util.selectModule = missing
+
+        self.assertFalse(VISU.open_for_review("/nowhere", self.handed.append))
+
+    def test_a_second_pass_starts_from_a_clean_slate(self):
+        """`written` is what THIS reader changed. A second checkpoint over the
+        same folder inheriting the first pass's list would have the caller
+        re-upload a cohort nobody touched."""
+        folder = self.folder(["results/p1_scan.nii.gz"])
+        self._landmarks()
+        self.widget.openForReview(folder, self.handed.append)
+        self.widget.unlockGroup.boxes["Landmarks"].setChecked(True)
+        node = [n for n in SCENE if n.path.endswith(".mrk.json")][0]
+        node.positions[0] = [-1.0, -2.0, 9.0]
+        self.widget.onContinue()
+        self.assertEqual(self.handed[0]["written"], {"p1"})
+
+        self.widget.unlockGroup.boxes["Landmarks"].setChecked(False)
+        self.widget.openForReview(folder, self.handed.append)
+        self.widget.onContinue()
+
+        self.assertEqual(self.handed[1]["written"], set(),
+                         "the second pass inherited the first one's writes")
+
+
 if __name__ == "__main__":
     unittest.main()

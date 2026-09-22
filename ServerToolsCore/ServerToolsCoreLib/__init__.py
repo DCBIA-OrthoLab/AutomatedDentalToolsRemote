@@ -11,6 +11,7 @@ Slicer, e.g. `from ServerToolsCoreLib.base_widget import ServerToolWidgetBase`.
 
 from . import config
 from .client import (
+    RunCheckpoint,
     ToolResult,
     ToolServerClient,
     accepts_folder,
@@ -46,6 +47,7 @@ __all__ = [
     "get_client",
     "ToolServerClient",
     "ToolResult",
+    "RunCheckpoint",
     "ServerToolError",
     "RunCancelled",
     "new_run_id",

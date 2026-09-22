@@ -11,6 +11,7 @@ See ARCHITECTURE.md, "How to add a new module in 5 minutes".
 import logging
 import fnmatch
 import glob
+import importlib
 import json
 import os
 import re
@@ -49,6 +50,12 @@ _OUTPUTS_SECTION = "Outputs"
 # Where the server files what a supervised chain produced, inside the result
 # archive. Its own, unimportable: `execution/runner.INTERMEDIATE_DIRNAME`.
 _INTERMEDIATE_DIRNAME = "intermediate"
+
+# Where what a STOPPED run produced is unpacked, under the run's output folder.
+# Apart from the results themselves, because the two are not the same thing: a
+# checkpoint holds a copy of a step's output for a reader to correct, and the
+# run is still going to write its real answer beside it.
+_CHECKPOINT_DIRNAME = "quality_control"
 
 # Result kinds drawn by their own display node rather than by a slice
 # layer. A volume is not one: it is shown by being put in a layer, and
@@ -197,6 +204,12 @@ class _Run:
         self.job = None
         self.phase = ""
         self.started_at = None  # None while the run is still queued
+        # The checkpoint this run is stopped at, or None. A stopped run holds
+        # no thread and no card -- the server is keeping its work for it while
+        # somebody reads what it produced -- but it is emphatically not over,
+        # and `running` answers True for it so the admission pump never starts
+        # a second copy of a run that is merely waiting on a person.
+        self.paused = None
 
         # Minted here, before anything is sent, because the id has to be known
         # to both sides while the request is still in flight -- which is the
@@ -222,7 +235,7 @@ class _Run:
 
     @property
     def running(self) -> bool:
-        return self.job is not None
+        return self.job is not None or self.paused is not None
 
     def clear_server_progress(self) -> None:
         """Forget what the server last said.
@@ -1912,6 +1925,14 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         threading.Thread(target=cancel_all, name="sadt-run-cancel", daemon=True).start()
 
     def _onJobSuccess(self, run, result) -> None:
+        if getattr(result, "checkpoint", None) is not None:
+            # The run has not finished: it stopped where it was asked to and
+            # the server is holding its work. Neither `_finishRun` nor
+            # `_countBatch` therefore -- the run is still this panel's, still
+            # cancellable, and its batch has not ended.
+            run.job = None
+            self._reviewCheckpoint(run, result.checkpoint)
+            return
         self._finishRun(run)
         self._countBatch(run)
         # Which run `handleResult` is handling. It takes only the result -- the
@@ -1985,6 +2006,158 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 _("Run {number} cancelled.").format(number=run.number), 3000)
             return
         slicer.util.errorDisplay(str(exc))
+
+    # ------------------------------------------------------------------
+    # Quality control: a run that stopped for somebody to look at it
+    # ------------------------------------------------------------------
+
+    # The Slicer module a checkpoint is reviewed in, by NAME and resolved only
+    # when one is reached. That module depends on this library and not the
+    # other way round, so importing it at the top would be a cycle -- and a
+    # deployment that ships without it must still run every tool it does have.
+    REVIEW_MODULE = "VISU"
+
+    def _reviewCheckpoint(self, run, checkpoint) -> None:
+        """Put what the run produced so far in front of a reader.
+
+        Everything specific to the reviewer is on the other side of
+        `_openReviewer`: this method knows a folder and a callback, exactly
+        what the viewer's own entry point takes.
+        """
+        run.paused = checkpoint
+        run.clear_server_progress()
+        run.phase = _("Stopped after {step} — waiting for your review").format(
+            step=checkpoint.stopped_after or _("a checkpoint"))
+        self._syncRunControls()
+
+        folder = self._unpackCheckpoint(run, checkpoint)
+        opened = folder is not None and self._openReviewer(
+            folder, lambda reviewed, run=run: self._onReviewed(run, reviewed))
+        if opened:
+            return
+        # Nothing to look at, or nowhere to look at it. The run is PAUSED on
+        # the server, holding its job directory with a patient's data in it,
+        # and carrying it on at once is the only answer that does not leave it
+        # there until the reaper. Said out loud: the reader asked for a stop
+        # and is not getting one.
+        self._announce(_(
+            "'{tool}' stopped after {step}, but there is nothing to review "
+            "here — carrying on.").format(
+                tool=self.TOOL_NAME, step=checkpoint.stopped_after or "?"))
+        self._resumeRun(run, {})
+
+    def _openReviewer(self, folder: str, on_continue) -> bool:
+        """Hand `folder` to the review module. False when it could not be."""
+        try:
+            module = importlib.import_module(self.REVIEW_MODULE)
+            return bool(module.open_for_review(folder, on_continue))
+        except Exception as exc:  # noqa: BLE001 - reported, never raised
+            logger.warning("Could not open '%s' on %s: %s",
+                           self.REVIEW_MODULE, folder, exc)
+            return False
+
+    def _unpackCheckpoint(self, run, checkpoint):
+        """Unpack what the stopped run produced, and say where. None if empty.
+
+        Under the run's own output folder rather than a temporary directory:
+        the reader is about to CORRECT these files, and a correction that
+        disappears with the panel is worse than no correction at all.
+        """
+        if not checkpoint.path or not run.output_dir:
+            return None
+        folder = os.path.join(run.output_dir, _CHECKPOINT_DIRNAME)
+        try:
+            os.makedirs(folder, exist_ok=True)
+            slicer_io.unzip_folder(checkpoint.path, folder)
+            os.remove(checkpoint.path)
+        except Exception as exc:  # noqa: BLE001 - a bad archive is not a crash
+            logger.warning("Could not unpack the checkpoint of run %d: %s",
+                           run.number, exc)
+            return None
+        return folder
+
+    @staticmethod
+    def _checkpointSlots(folder: str, produced) -> dict:
+        """{step name: the directory holding what that step produced}.
+
+        The archive has two shapes and the server picks between them by
+        counting: its zip flattens a SINGLE directory to the archive root, so
+        one step's files arrive at the top while two steps' arrive under
+        `01_X/` and `02_Y/`. Answered here rather than anywhere the difference
+        could be read as a step that went missing.
+        """
+        slots = {name: os.path.join(folder, name) for name in produced
+                 if os.path.isdir(os.path.join(folder, name))}
+        if not slots and len(produced) == 1 and os.path.isdir(folder):
+            return {produced[0]: folder}
+        return slots
+
+    def _onReviewed(self, run, reviewed) -> None:
+        """The reader pressed Continue. Send back what they changed."""
+        if run.paused is None:
+            # Continue on a run that is no longer stopped: it was cancelled,
+            # or the panel was torn down while the reader was working. There
+            # is nothing left here to carry on.
+            logger.info("A review came back for a run that is no longer stopped")
+            return
+        self._resumeRun(run, self._corrections(run, reviewed))
+
+    def _corrections(self, run, reviewed) -> dict:
+        """{step name: a zip of that step's folder}, or nothing at all.
+
+        Nothing at all when the reader wrote nothing, and that is the whole
+        value of the viewer reporting it: a step is a cohort's worth of scans,
+        and re-uploading every one of them on behalf of somebody who only
+        looked is the expensive half of this feature.
+
+        All the steps or none of them, never a subset. The viewer's verdict is
+        per PATIENT and a step is a folder of many, so picking the steps a
+        patient's file lives in means re-deriving the viewer's own pairing
+        here -- a third copy of the one algorithm this extension already keeps
+        too many of.
+        """
+        if not reviewed.get("written"):
+            return {}
+        folder = reviewed.get("folder") or ""
+        corrections = {}
+        for slot, path in self._checkpointSlots(folder, run.paused.produced).items():
+            corrections[slot] = self._zipFolder(run.workspace, slot, path)
+        return corrections
+
+    def _resumeRun(self, run, corrections) -> None:
+        """POST the corrections and carry the run on, on a thread of its own.
+
+        The same callbacks as a first attempt, deliberately: the answer of a
+        resume is whatever a finished run answers -- or ANOTHER checkpoint,
+        when a second one was armed -- so the loop is one recursion rather
+        than a second way of handling a result.
+        """
+        checkpoint, run.paused = run.paused, None
+        run.clear_server_progress()
+        run.phase = _("Carrying the run on...")
+
+        def task(progress_cb):
+            return self.client.resume_run(
+                self.TOOL_NAME,
+                checkpoint.run_id,
+                corrections=corrections,
+                output_dir=run.output_dir,
+                progress_cb=progress_cb,
+            )
+
+        run.job = BackgroundJob(
+            task,
+            on_success=lambda result, run=run: self._onJobSuccess(run, result),
+            on_error=lambda exc, run=run: self._onJobError(run, exc),
+            on_progress=lambda message, run=run: self._onJobProgress(run, message),
+            cancel_event=run.cancel_event,
+        )
+        run.job.start()
+        # `started_at` is NOT reset: what the panel counts is how long the
+        # clinician has been waiting for this run, and the review is part of
+        # that wait.
+        self._startElapsedTimer()
+        self._syncRunControls()
 
     def _onJobProgress(self, run, payload) -> None:
         """What the run has to say, from either side of the wire.
