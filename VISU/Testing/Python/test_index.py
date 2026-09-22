@@ -334,3 +334,42 @@ class ViewTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FolderTest(unittest.TestCase):
+    """Which level of a folder a case came from."""
+
+    def _cases(self, paths):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        tree(root.name, paths)
+        return index.build([("folder", os.path.join(root.name, "d"))])
+
+    def test_a_case_at_the_top_is_named_rather_than_left_blank(self):
+        cases = self._cases(["d/p1_scan.nii.gz"])
+        self.assertEqual(index.folder_of(cases[0]), index.AT_THE_TOP)
+
+    def test_the_first_level_is_what_a_reader_picks_between(self):
+        # Deeper levels are how a tool mirrors an input tree; one chip per
+        # patient would be a second case list.
+        cases = self._cases(["d/CBCT_SemiAuto/siteA/p1_scan.nii.gz"])
+        self.assertEqual(index.folder_of(cases[0]), "CBCT_SemiAuto")
+
+    def test_they_are_listed_in_the_order_the_cases_are(self):
+        cases = self._cases(["d/IOS_SemiAuto/u1.vtk",
+                             "d/CBCT_SemiAuto/p1_scan.nii.gz",
+                             "d/CBCT_SemiAuto/p2_scan.nii.gz"])
+        self.assertEqual(index.folders_in(cases), ["CBCT_SemiAuto", "IOS_SemiAuto"])
+
+    def test_a_role_folder_is_never_offered_as_one(self):
+        """`CBCT/` beside `Landmarks/` is how ONE cohort is filed, not two to
+        pick between -- and stripping them is what made the scan and its
+        points one patient in the first place."""
+        cases = self._cases(["d/CBCT/p1_scan.nii.gz",
+                             "d/Landmarks/p1_scan_lm_Pred.mrk.json"])
+        self.assertEqual(len(cases), 1)
+        self.assertEqual(index.folders_in(cases), [index.AT_THE_TOP])
+
+    def test_a_folder_with_no_levels_offers_one_entry(self):
+        cases = self._cases(["d/p1_scan.nii.gz", "d/p2_scan.nii.gz"])
+        self.assertEqual(index.folders_in(cases), [index.AT_THE_TOP])

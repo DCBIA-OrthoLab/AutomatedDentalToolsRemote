@@ -531,6 +531,8 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # folder they belong to. Read back off the folder on every open.
         self._flagged = set()
         self._folder = ""
+        # Everything indexed, before the cohort chips narrow it.
+        self._allCases = []
 
     # -- building the panel ------------------------------------------------
 
@@ -582,6 +584,17 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             "are shown together."
         )
         form.addRow(_("Folder"), self.sources.container)
+
+        # Which cohorts of this folder to look at. Hidden whenever there is
+        # only one, because a single chip that cannot be unticked without
+        # emptying the panel is a control with no decision in it.
+        # Built empty and filled per folder, so it is connected in
+        # `_offerFolders` instead of here: `connect_changed` walks the boxes
+        # that EXIST, and a rebuild makes new ones.
+        self.foldersGroup = formgen.MultiChoiceGroup({}, layout="chips")
+        self.foldersLabel = design.section_title(_("Folders"))
+        form.addRow("", self.foldersLabel)
+        form.addRow("", self.foldersGroup.container)
 
         self.countLabel = design.hint_label("")
         form.addRow("", self.countLabel)
@@ -773,7 +786,11 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self._remember()
         self._waiting = self._restoring
         folder = self.folderInput.currentPath
-        self.cases = index.build([(SOURCE, folder)] if folder else [])
+        # Everything the folder holds. `self.cases` is the ticked view of it,
+        # so unticking a cohort costs a filter rather than another walk.
+        self._allCases = index.build([(SOURCE, folder)] if folder else [])
+        self._offerFolders()
+        self.cases = self._ticked()
         self.position = 0
         self._folder = folder
         self._flagged = review.load(folder) if folder else set()
@@ -863,6 +880,40 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             box = self.showGroup.boxes.get(label)
             if box is not None:
                 box.setEnabled(kind in present)
+
+    def _offerFolders(self) -> None:
+        """Rebuild the cohort chips for the folder that was just opened."""
+        found = index.folders_in(self._allCases)
+        self._filling = True
+        try:
+            self.foldersGroup.rebuild({name: True for name in found})
+            formgen.connect_changed(self.foldersGroup, self.onFoldersChanged)
+        finally:
+            self._filling = False
+        # One cohort is not a choice. Shown from two, where unticking one
+        # leaves something to look at.
+        offered = len(found) > 1
+        self.foldersGroup.container.setVisible(offered)
+        self.foldersLabel.setVisible(offered)
+
+    def _ticked(self) -> list:
+        wanted = {name for name, on in self.foldersGroup.value().items() if on}
+        return [case for case in self._allCases
+                if index.folder_of(case) in wanted]
+
+    def onFoldersChanged(self, *_args) -> None:
+        """Narrow the cohort without re-reading the folder."""
+        if self._filling:
+            return
+        standing = self.cases[self.position].key if self.cases else None
+        self.cases = self._ticked()
+        # Stay on the same patient when it survived the change, rather than
+        # jumping to the first: a reader unticking a cohort is usually not
+        # looking at it.
+        keys = [case.key for case in self.cases]
+        self.position = keys.index(standing) if standing in keys else 0
+        self._waiting = False
+        self._refresh()
 
     def onFlagToggled(self) -> None:
         if not self.cases:

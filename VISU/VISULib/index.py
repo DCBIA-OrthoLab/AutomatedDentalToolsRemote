@@ -437,6 +437,37 @@ class Case:
         return views
 
 
+# What a case with no directory of its own is called in the picker. A blank
+# chip is unclickable and reads as a bug.
+AT_THE_TOP = "(at the top)"
+
+
+def folder_of(case) -> str:
+    """The first level under the folder that was opened, or `AT_THE_TOP`.
+
+    What a reader picks between when one folder holds several cohorts: the
+    hosted ASO fixture is eight subjects across `CBCT_SemiAuto/`,
+    `IOS_FullyAuto/` and four others, and wanting to look at the CBCT ones is
+    not a reason to open a different folder.
+
+    The FIRST level and not the whole path: deeper levels are how a tool
+    mirrors an input tree, and offering one chip per patient would be a
+    second case list.
+    """
+    directory = os.path.dirname(case.key)
+    return directory.split(os.sep)[0] if directory else AT_THE_TOP
+
+
+def folders_in(cases) -> list:
+    """The levels those cases came from, in the order they are listed."""
+    found = []
+    for case in cases:
+        name = folder_of(case)
+        if name not in found:
+            found.append(name)
+    return found
+
+
 def build(sources, drop_timepoint: bool = False) -> list:
     """Index `sources` -- `[(label, root), ...]` -- into cases, ordered by key.
 

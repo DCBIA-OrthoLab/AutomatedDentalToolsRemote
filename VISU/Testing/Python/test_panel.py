@@ -727,6 +727,50 @@ class PanelTest(unittest.TestCase):
         self.assertIsNone(self.widget._adjustment)
         self.assertIn("Reloaded", self.widget.modifyLabel.text)
 
+    def test_several_cohorts_in_one_folder_each_get_a_chip(self):
+        # The hosted ASO fixture is eight subjects across six levels, and
+        # wanting to look at the CBCT ones is not a reason to open another
+        # folder.
+        self.open(["scans/CBCT_SemiAuto/p1_scan.nii.gz",
+                   "scans/CBCT_SemiAuto/p2_scan.nii.gz",
+                   "scans/IOS_SemiAuto/u1.vtk"])
+        self.assertEqual(sorted(self.widget.foldersGroup.value()),
+                         ["CBCT_SemiAuto", "IOS_SemiAuto"])
+        self.assertEqual(len(self.widget.cases), 3)
+
+        self.widget.foldersGroup.boxes["IOS_SemiAuto"].setChecked(False)
+        self.assertEqual([c.key for c in self.widget.cases],
+                         [os.path.join("CBCT_SemiAuto", "p1"),
+                          os.path.join("CBCT_SemiAuto", "p2")])
+        self.assertIn("p1", self.widget.positionLabel.text)
+
+    def test_one_cohort_is_not_a_choice_and_is_not_shown(self):
+        # A single chip that cannot be unticked without emptying the panel is
+        # a control with no decision in it.
+        self.open(["scans/p1_scan.nii.gz", "scans/p2_scan.nii.gz"])
+        self.assertFalse(self.widget.foldersGroup.container.isVisible())
+        self.assertFalse(self.widget.foldersLabel.isVisible())
+
+    def test_narrowing_stays_on_the_patient_being_looked_at(self):
+        # A reader unticking a cohort is usually not looking at it.
+        self.open(["scans/A/p1_scan.nii.gz", "scans/A/p2_scan.nii.gz",
+                   "scans/B/q1_scan.nii.gz"])
+        self.widget.position = [c.key for c in self.widget.cases].index(
+            os.path.join("A", "p2"))
+        self.widget._refresh()
+        self.widget.foldersGroup.boxes["B"].setChecked(False)
+        self.assertEqual(self.widget.cases[self.widget.position].key,
+                         os.path.join("A", "p2"))
+
+    def test_unticking_what_is_being_looked_at_falls_back_to_the_first(self):
+        self.open(["scans/A/p1_scan.nii.gz", "scans/B/q1_scan.nii.gz"])
+        self.widget.position = [c.key for c in self.widget.cases].index(
+            os.path.join("B", "q1"))
+        self.widget._refresh()
+        self.widget.foldersGroup.boxes["B"].setChecked(False)
+        self.assertEqual(self.widget.cases[self.widget.position].key,
+                         os.path.join("A", "p1"))
+
     def test_flagging_a_patient_writes_the_list_beside_the_data(self):
         # The one thing a reviewer produces that is not a corrected file.
         self.open([f"scans/p{n}_scan.nii.gz" for n in range(1, 4)])
