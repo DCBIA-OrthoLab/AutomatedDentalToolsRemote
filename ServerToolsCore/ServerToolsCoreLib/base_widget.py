@@ -27,7 +27,8 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleWidget
 from slicer.util import VTKObservationMixin
 
-from . import config, design, formgen, is_file_type, new_run_id, slicer_io, testfile_entries
+from . import (config, design, digest, formgen, is_file_type, new_run_id,
+               slicer_io, testfile_entries)
 from .errors import RunCancelled, ServerToolError
 from .worker import BackgroundJob
 
@@ -210,6 +211,13 @@ class _Run:
         # and `running` answers True for it so the admission pump never starts
         # a second copy of a run that is merely waiting on a person.
         self.paused = None
+        # What the checkpoint folder held the moment it was unpacked, as
+        # {relative path: digest}. It is what "the reader changed this file"
+        # is measured against -- see `_corrections` -- and it is replaced on
+        # every unpack, because a run that stops twice reviews the same folder
+        # twice and the second pass must diff against what the FIRST resume
+        # produced, not against what the run started from.
+        self.checkpoint_digests = {}
 
         # Minted here, before anything is sent, because the id has to be known
         # to both sides while the request is still in flight -- which is the
@@ -2062,7 +2070,16 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         Under the run's own output folder rather than a temporary directory:
         the reader is about to CORRECT these files, and a correction that
         disappears with the panel is worse than no correction at all.
+
+        The digest of everything unpacked is taken here, before the reader can
+        touch any of it, and that timing is the whole mechanism: it is the only
+        moment at which the folder is known to hold exactly what the server
+        produced.
         """
+        # Cleared first, so a checkpoint that fails to unpack cannot leave the
+        # PREVIOUS one's baseline in place -- against which every file of a
+        # second step would read as changed.
+        run.checkpoint_digests = {}
         if not checkpoint.path or not run.output_dir:
             return None
         folder = os.path.join(run.output_dir, _CHECKPOINT_DIRNAME)
@@ -2074,6 +2091,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             logger.warning("Could not unpack the checkpoint of run %d: %s",
                            run.number, exc)
             return None
+        run.checkpoint_digests = digest.digest_tree(folder)
         return folder
 
     @staticmethod
@@ -2103,25 +2121,36 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._resumeRun(run, self._corrections(run, reviewed))
 
     def _corrections(self, run, reviewed) -> dict:
-        """{step name: a zip of that step's folder}, or nothing at all.
+        """{step name: a zip of the FILES that step's folder changed}, or nothing.
 
-        Nothing at all when the reader wrote nothing, and that is the whole
-        value of the viewer reporting it: a step is a cohort's worth of scans,
-        and re-uploading every one of them on behalf of somebody who only
-        looked is the expensive half of this feature.
+        A step is a cohort's worth of scans; the landmark file a reader moved
+        one point in is eight kilobytes. So what goes back is the difference,
+        measured against the digest taken when the checkpoint was unpacked --
+        changed files and new ones, nothing else. A step nobody touched
+        contributes no field at all, and a review that changed nothing
+        anywhere sends an empty body, which the server already accepts.
 
-        All the steps or none of them, never a subset. The viewer's verdict is
-        per PATIENT and a step is a folder of many, so picking the steps a
-        patient's file lives in means re-deriving the viewer's own pairing
-        here -- a third copy of the one algorithm this extension already keeps
-        too many of.
+        **This is only safe because the server lays a correction over the
+        step's output file by file** (`_Supervisor._substitute`), rather than
+        replacing the directory with what arrives. Against the older server
+        that swapped the whole directory, a partial set would delete every
+        file the reader did not touch.
+
+        The viewer's `written` is still read, and still first: it is the one
+        answer available without touching the disk, and it spares the reader
+        who only looked a second pass over a cohort to prove that nothing
+        moved. It cannot stand in for the digest, though -- it names a
+        PATIENT, and what has to be named here is a file.
         """
         if not reviewed.get("written"):
             return {}
         folder = reviewed.get("folder") or ""
+        changed = digest.changed_since(run.checkpoint_digests, folder)
         corrections = {}
         for slot, path in self._checkpointSlots(folder, run.paused.produced).items():
-            corrections[slot] = self._zipFolder(run.workspace, slot, path)
+            entries = digest.paths_under(changed, folder, path)
+            if entries:
+                corrections[slot] = self._zipFolder(run.workspace, slot, path, entries)
         return corrections
 
     def _resumeRun(self, run, corrections) -> None:

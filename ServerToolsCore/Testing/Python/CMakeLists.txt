@@ -88,3 +88,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE} -m unittest test_quality_control
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
+
+# test_digest.py: which files of a reviewed checkpoint travel back. Pure
+# stdlib against real files on a real disk, and it imports no qt/slicer stub
+# at all -- digest.py must stay free of both, and this failing to import is
+# what says it did not.
+add_test(
+  NAME ServerToolsCore_test_digest
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_digest
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )

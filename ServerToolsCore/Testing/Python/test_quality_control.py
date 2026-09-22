@@ -389,19 +389,26 @@ class PanelTest(unittest.TestCase):
 
     # -- fixtures ------------------------------------------------------
 
-    def _checkpoint(self, produced=("01_ALI_CBCT",), members=None, flat=False):
+    def _checkpoint(self, produced=("01_ALI_CBCT",), members=None, flat=False,
+                    steps=None):
         """A stopped run's answer, with a real archive on disk.
 
         `flat` is the single-step shape: the server's zip flattens ONE
         directory to the archive root, so a lone step's files arrive at the top
         and its folder name never appears in the archive.
+
+        `steps` lays files out per step for a chain that produced several;
+        `members` is the shorthand for the first one, which is every case that
+        does not care where the files went.
         """
         members = members or {"p1_lm_Pred.mrk.json": "{}"}
+        steps = steps or {produced[0]: members}
         if flat:
             laid_out = dict(members)
         else:
-            laid_out = {os.path.join(produced[0], name): data
-                        for name, data in members.items()}
+            laid_out = {os.path.join(step, name): data
+                        for step, files in steps.items()
+                        for name, data in files.items()}
         archive = os.path.join(self.work, "AREG_stopped.zip")
         with open(archive, "wb") as handle:
             handle.write(_zip_bytes(laid_out))
@@ -425,6 +432,29 @@ class PanelTest(unittest.TestCase):
         """Let the resume job reach the client, and hand back what it sent."""
         _Job.started[-1].collect()
         return self.client.resumed[-1]
+
+    # -- standing in for the reader -------------------------------------
+
+    def _reviewed(self) -> str:
+        """Where the checkpoint was unpacked, which is what the reader edits."""
+        return os.path.join(self.work, "quality_control")
+
+    def _edit(self, relative, data="moved"):
+        """Write into the unpacked checkpoint, as the reviewer's save does.
+
+        Subfolders are created, because a step mirrors its input tree and the
+        file a reader corrects can be two directories down.
+        """
+        path = os.path.join(self._reviewed(), relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(data)
+        return path
+
+    @staticmethod
+    def _members(archive_path) -> list:
+        with zipfile.ZipFile(archive_path) as archive:
+            return sorted(archive.namelist())
 
     # -- a stopped run is not a finished one ---------------------------
 
@@ -465,6 +495,7 @@ class PanelTest(unittest.TestCase):
 
     def test_continue_sends_a_correction_per_step_and_carries_the_run_on(self):
         run, _job = self._stopped()
+        self._edit(os.path.join("01_ALI_CBCT", "p1_lm_Pred.mrk.json"))
         self.reviewer.press_continue(flagged={"p1"}, written={"p1"})
 
         sent = self._collectResume()
@@ -483,23 +514,115 @@ class PanelTest(unittest.TestCase):
 
     def test_a_single_step_flattened_into_the_archive_is_still_found(self):
         self._stopped(flat=True)
+        self._edit("p1_lm_Pred.mrk.json")
         self.reviewer.press_continue(written={"p1"})
 
         self.assertEqual(sorted(self._collectResume()["corrections"]),
                          ["01_ALI_CBCT"])
 
     def test_two_steps_are_two_corrections(self):
-        self._stopped(produced=("01_ALI_CBCT", "02_ASO"),
-                      members={"p1_lm_Pred.mrk.json": "{}"})
-        folder = os.path.join(self.work, "quality_control")
-        os.makedirs(os.path.join(folder, "02_ASO"), exist_ok=True)
-        with open(os.path.join(folder, "02_ASO", "p1_Or.nii.gz"), "w") as handle:
-            handle.write("x")
+        self._stopped(produced=("01_ALI_CBCT", "02_ASO"), steps={
+            "01_ALI_CBCT": {"p1_lm_Pred.mrk.json": "{}"},
+            "02_ASO": {"p1_Or.nii.gz": "volume"}})
+        self._edit(os.path.join("01_ALI_CBCT", "p1_lm_Pred.mrk.json"))
+        self._edit(os.path.join("02_ASO", "p1_Or.nii.gz"))
 
         self.reviewer.press_continue(written={"p1"})
 
         self.assertEqual(sorted(self._collectResume()["corrections"]),
                          ["01_ALI_CBCT", "02_ASO"])
+
+    # -- only what the reader actually changed -------------------------
+
+    def test_a_checkpoint_nobody_edited_sends_nothing_even_when_written(self):
+        """`written` is the viewer's word for "this patient's panel saved
+        something", and a save that moved no bytes still sets it. The bytes
+        are what decides, so a step nothing changed contributes no field."""
+        self._stopped(members={"p1.mrk.json": "{}", "p2.mrk.json": "{}"})
+
+        self.reviewer.press_continue(flagged={"p1"}, written={"p1"})
+
+        self.assertEqual(self._collectResume()["corrections"], {})
+
+    def test_one_changed_file_out_of_several_is_the_only_one_sent(self):
+        """The point of the whole feature: a step of AMASSS is hundreds of
+        megabytes and the landmark file a reader moved a point in is eight
+        kilobytes."""
+        self._stopped(flat=True, members={"p1.mrk.json": "{}",
+                                          "p2.mrk.json": "{}",
+                                          "p3.nii.gz": "volume"})
+        self._edit("p2.mrk.json", '{"moved": true}')
+
+        self.reviewer.press_continue(written={"p2"})
+
+        sent = self._collectResume()["corrections"]
+        self.assertEqual(self._members(sent["01_ALI_CBCT"]), ["p2.mrk.json"])
+
+    def test_a_file_the_reader_added_is_sent(self):
+        """VISU writes an adjustment as its OWN transform beside the scan
+        rather than folding it into the tool's. A correction that only ever
+        looked at files the server produced would drop it."""
+        self._stopped(flat=True, members={"p1.nii.gz": "volume"})
+        self._edit("p1_adjust.tfm", "matrix")
+
+        self.reviewer.press_continue(written={"p1"})
+
+        sent = self._collectResume()["corrections"]
+        self.assertEqual(self._members(sent["01_ALI_CBCT"]), ["p1_adjust.tfm"])
+
+    def test_a_rewritten_file_whose_bytes_did_not_move_is_not_sent(self):
+        """This is why the comparison hashes rather than stats. The reviewer
+        saves on the way OUT of a patient, so mtime moves for every file a
+        reader merely stepped through -- and trusting it would send the cohort
+        back after all."""
+        self._stopped(flat=True, members={"p1.mrk.json": "{}"})
+        self._edit("p1.mrk.json", "{}")
+        os.utime(os.path.join(self._reviewed(), "p1.mrk.json"), (0, 0))
+
+        self.reviewer.press_continue(written={"p1"})
+
+        self.assertEqual(self._collectResume()["corrections"], {})
+
+    def test_a_correction_in_a_subfolder_keeps_its_path_in_the_zip(self):
+        """A step mirrors its input tree. Flattening the member name would
+        lay the correction over the wrong file, or over nothing at all."""
+        self._stopped(flat=True, members={os.path.join("p1", "lm.mrk.json"): "{}",
+                                          os.path.join("p2", "lm.mrk.json"): "{}"})
+        self._edit(os.path.join("p1", "lm.mrk.json"), "corrected")
+
+        self.reviewer.press_continue(written={"p1"})
+
+        sent = self._collectResume()["corrections"]
+        self.assertEqual(self._members(sent["01_ALI_CBCT"]), ["p1/lm.mrk.json"])
+
+    def test_only_the_step_that_changed_contributes_a_field(self):
+        """`_stage_corrections` names one field per step, and a step whose
+        files are untouched has nothing to say. Sending it empty would cost
+        the upload this change exists to avoid."""
+        self._stopped(produced=("01_ALI_CBCT", "02_ASO"), steps={
+            "01_ALI_CBCT": {"p1_lm_Pred.mrk.json": "{}"},
+            "02_ASO": {"p1_Or.nii.gz": "volume"}})
+        self._edit(os.path.join("02_ASO", "p1_Or.nii.gz"), "corrected")
+
+        self.reviewer.press_continue(written={"p1"})
+
+        self.assertEqual(sorted(self._collectResume()["corrections"]), ["02_ASO"])
+
+    def test_a_second_checkpoint_diffs_against_what_the_first_resume_produced(self):
+        """One folder is reviewed twice, and the baseline is retaken on every
+        unpack. Keeping the first one would resend every correction of round
+        one as if the reader had just made it."""
+        self._stopped(flat=True, members={"p1.mrk.json": "{}"})
+        self._edit("p1.mrk.json", "round one")
+        self.reviewer.press_continue(written={"p1"})
+        self._collectResume()
+
+        _Job.started[-1].succeed(self._checkpoint(
+            produced=("02_ASO",), members={"p2.nii.gz": "volume"}, flat=True))
+        self.reviewer.press_continue(written={"p1"})
+
+        self.assertEqual(self._collectResume()["corrections"], {},
+                         "round one's correction was sent a second time")
 
     def test_the_answer_after_a_resume_is_handled_as_any_other_runs(self):
         """The point of reusing the same callbacks: the loop ends in the
@@ -566,6 +689,18 @@ class PanelTest(unittest.TestCase):
         self.assertEqual([result.text for result in self.handled], ["done"])
         self.assertNotIn(run, self.panel._runs)
         self.assertEqual(self.client.resumed, [])
+
+    def test_a_run_that_did_not_stop_never_digests_anything(self):
+        """Every run of every tool today. Digesting is two passes over a
+        cohort, so a run that stopped at no checkpoint must not pay for one."""
+        job = self._apply()
+        run = self.panel._runs[0]
+
+        with mock.patch.object(base_widget.digest, "digest_tree") as digesting:
+            job.succeed(ToolResult(kind="text", text="done"))
+
+        digesting.assert_not_called()
+        self.assertEqual(run.checkpoint_digests, {})
 
     def test_a_result_that_is_not_a_ToolResult_at_all_still_goes_through(self):
         """`handleResult` takes whatever the client returned, and two of this
