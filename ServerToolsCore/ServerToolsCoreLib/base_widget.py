@@ -467,7 +467,16 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # results -- leaving an inference holding the card for an hour on
         # behalf of a widget that no longer exists is pure waste, and the GPU
         # is shared with every other client.
-        running = [run.run_id for run in self._runs if run.started_at is not None]
+        # A PAUSED run is the exception, and the reasoning above is what says
+        # so: it is holding nothing. It is not on the card, it is not in a
+        # worker thread, it is a job directory waiting for a person to finish
+        # looking -- and the server's idle TTL already bounds that, exactly as
+        # it bounds an abandoned transfer. Cancelling it threw away the review
+        # the moment the module was reloaded, which is precisely what one does
+        # while working on a tool: the reader pressed Continue and the resume
+        # came back 500, the run having been cancelled underneath them.
+        running = [run.run_id for run in self._runs
+                   if run.started_at is not None and run.paused is None]
         for run in list(self._runs):
             run.cancel()
         self._runs = []

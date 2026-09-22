@@ -369,6 +369,25 @@ class RunQueueTest(unittest.TestCase):
         for path in directories:
             self.assertFalse(os.path.exists(path))
 
+    def test_cleanup_leaves_a_paused_run_alone_on_the_server(self):
+        """A paused run holds nothing -- not the card, not a worker thread --
+        and the server's idle TTL already bounds it, exactly as it bounds an
+        abandoned transfer. Cancelling it threw the reader's review away the
+        moment the module was reloaded, which is precisely when one reloads."""
+        config.CONCURRENT_RUNS = 2
+        self._apply()
+        self._apply()
+        self.panel._removeOwnTestFiles = lambda: None
+        asked = []
+        self.panel._requestServerCancel = asked.extend
+        waiting_on_a_person, still_computing = self.panel._runs
+        waiting_on_a_person.paused = object()
+
+        self.panel.cleanup()
+
+        self.assertEqual(asked, [still_computing.run_id])
+
+
     # -- what the panel shows ------------------------------------------
 
     def test_apply_stays_available_so_another_run_can_be_queued(self):
