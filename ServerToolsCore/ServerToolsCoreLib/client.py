@@ -1245,8 +1245,15 @@ class ToolServerClient:
         corrections: Optional[dict] = None,
         output_dir: Optional[str] = None,
         progress_cb: Optional[Callable[[str], None]] = None,
+        rewind_to: Optional[str] = None,
     ) -> ToolResult:
         """Carry a stopped run on: POST /runs/{id}/resume.
+
+        `rewind_to` sends it BACKWARDS instead: the run is armed again at a
+        checkpoint it already cleared and stops there, with that step's
+        result untouched for a reader to correct. The same route otherwise --
+        one more field, one different path -- because what comes back is the
+        same thing either way: a finished run, or another checkpoint.
 
         `corrections` is {step name: local path}, the step names being exactly
         the `produced` entries of the checkpoint -- the server matches them
@@ -1264,11 +1271,14 @@ class ToolServerClient:
         if not run_id:
             raise ServerToolError("A run id is required to carry a stopped run on.")
         schema = self.get_tool_schema(tool_name)
-        url = f"{self._server_url}/runs/{quote(run_id, safe='')}/resume"
+        route = "rewind" if rewind_to else "resume"
+        url = f"{self._server_url}/runs/{quote(run_id, safe='')}/{route}"
         headers = {"Authorization": f"Bearer {self._token}"}
 
         if progress_cb:
-            progress_cb(f"Sending your corrections to '{tool_name}'...")
+            progress_cb(
+                f"Taking '{tool_name}' back to {rewind_to}..." if rewind_to
+                else f"Sending your corrections to '{tool_name}'...")
 
         # Straight multipart, with no /uploads staging: the server reads this
         # body as a form and has no reference field for it. A correction is a
@@ -1277,6 +1287,11 @@ class ToolServerClient:
         handles = []
         try:
             payload = {}
+            if rewind_to:
+                # A plain form field beside the file parts. The server reads
+                # the whole body as a form, so the two travel together and a
+                # rewind carrying corrections is one request.
+                payload["to"] = (None, rewind_to)
             for slot, path in (corrections or {}).items():
                 handle = open(path, "rb")
                 handles.append(handle)

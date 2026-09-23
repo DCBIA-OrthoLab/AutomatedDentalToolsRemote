@@ -2161,14 +2161,21 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return slots
 
     def _onReviewed(self, run, reviewed) -> None:
-        """The reader pressed Continue. Send back what they changed."""
+        """The reader pressed Continue, or asked to go back a step.
+
+        Both send the same thing -- whatever they changed here -- and differ
+        only in which direction the run then moves. Going back does not throw
+        that away: a reader who corrected something on the way to asking for
+        an earlier step still corrected it.
+        """
         if run.paused is None:
             # Continue on a run that is no longer stopped: it was cancelled,
             # or the panel was torn down while the reader was working. There
             # is nothing left here to carry on.
             logger.info("A review came back for a run that is no longer stopped")
             return
-        self._resumeRun(run, self._corrections(run, reviewed))
+        self._resumeRun(run, self._corrections(run, reviewed),
+                        rewind_to=(reviewed or {}).get("rewind_to"))
 
     def _corrections(self, run, reviewed) -> dict:
         """{step name: a zip of the FILES that step's folder changed}, or nothing.
@@ -2203,8 +2210,12 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 corrections[slot] = self._zipFolder(run.workspace, slot, path, entries)
         return corrections
 
-    def _resumeRun(self, run, corrections) -> None:
-        """POST the corrections and carry the run on, on a thread of its own.
+    def _resumeRun(self, run, corrections, rewind_to=None) -> None:
+        """POST the corrections and move the run, on a thread of its own.
+
+        `rewind_to` sends it BACKWARDS to a checkpoint it already cleared,
+        instead of onwards. The callbacks are the same either way, and so is
+        the answer: a finished run, or another checkpoint.
 
         The same callbacks as a first attempt, deliberately: the answer of a
         resume is whatever a finished run answers -- or ANOTHER checkpoint,
@@ -2213,7 +2224,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """
         checkpoint, run.paused = run.paused, None
         run.clear_server_progress()
-        run.phase = _("Carrying the run on...")
+        run.phase = (_("Going back to {step}...").format(step=rewind_to)
+                     if rewind_to else _("Carrying the run on..."))
 
         def task(progress_cb):
             return self.client.resume_run(
@@ -2222,6 +2234,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 corrections=corrections,
                 output_dir=run.output_dir,
                 progress_cb=progress_cb,
+                rewind_to=rewind_to,
             )
 
         run.job = BackgroundJob(

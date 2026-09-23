@@ -319,9 +319,10 @@ class _Reviewer:
         self.on_continue = on_continue
         return self.available
 
-    def press_continue(self, flagged=(), written=(), folder=None):
+    def press_continue(self, flagged=(), written=(), folder=None, rewind_to=None):
         self.on_continue({"folder": folder if folder is not None else self.opened[-1],
-                          "flagged": set(flagged), "written": set(written)})
+                          "flagged": set(flagged), "written": set(written),
+                          "rewind_to": rewind_to})
 
 
 class _RecordingClient:
@@ -333,10 +334,11 @@ class _RecordingClient:
         raise AssertionError("the stub job never invokes its target")
 
     def resume_run(self, tool_name, run_id, corrections=None, output_dir=None,
-                   progress_cb=None):
+                   progress_cb=None, rewind_to=None):
         self.resumed.append({"tool": tool_name, "run_id": run_id,
                              "corrections": dict(corrections or {}),
-                             "output_dir": output_dir})
+                             "output_dir": output_dir,
+                             "rewind_to": rewind_to})
         return ToolResult(kind="text", text="carried on")
 
     def cancel_run(self, run_id):
@@ -513,6 +515,31 @@ class PanelTest(unittest.TestCase):
         self.reviewer.press_continue(flagged={"p1"}, written=set())
 
         self.assertEqual(self._collectResume()["corrections"], {})
+
+    def test_going_back_asks_for_the_step_the_reader_named(self):
+        """Continue and Go back travel the same route and differ only in the
+        direction the run then moves."""
+        self._stopped()
+        self.reviewer.press_continue(flagged={"p1"}, rewind_to="01_ALI_CBCT")
+
+        self.assertEqual(self._collectResume()["rewind_to"], "01_ALI_CBCT")
+
+    def test_a_correction_made_on_the_way_back_is_not_thrown_away(self):
+        """A reader who fixed something here and THEN asked for an earlier
+        step still fixed it. Losing that would make going back cost work."""
+        self._stopped()
+        self._edit(os.path.join("01_ALI_CBCT", "p1_lm_Pred.mrk.json"))
+        self.reviewer.press_continue(written={"p1"}, rewind_to="01_ALI_CBCT")
+
+        sent = self._collectResume()
+        self.assertEqual(sent["rewind_to"], "01_ALI_CBCT")
+        self.assertEqual(sorted(sent["corrections"]), ["01_ALI_CBCT"])
+
+    def test_an_ordinary_continue_asks_for_no_rewind(self):
+        self._stopped()
+        self.reviewer.press_continue(written=set())
+
+        self.assertIsNone(self._collectResume()["rewind_to"])
 
     def test_a_single_step_flattened_into_the_archive_is_still_found(self):
         self._stopped(flat=True)
