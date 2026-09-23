@@ -2089,7 +2089,17 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return None
         kinds = ((getattr(self, "_schema", None) or {}).get("arguments", {})
                  .get("stop_after", {}).get("option_kind") or {})
-        for slot in reversed(list(checkpoint.produced or ())):
+        behind = list(checkpoint.produced or ())
+        # The step the reader is standing on is not somewhere to go BACK to.
+        # It is the last one that ran, and offering it would hand them a
+        # button that returns to where they already are. A qualified stop
+        # (`ASO/ALI_CBCT`) is named by its last segment, as the slots are.
+        standing = (checkpoint.stopped_after or "").rsplit("/", 1)[-1]
+        for index in range(len(behind) - 1, -1, -1):
+            if behind[index].partition("_")[2] == standing:
+                del behind[index]
+                break
+        for slot in reversed(behind):
             # "01_ALI_CBCT" -> "ALI_CBCT". The number is the call's position,
             # which is what keeps two calls to one tool apart; the kind is a
             # property of the tool, not of the position.

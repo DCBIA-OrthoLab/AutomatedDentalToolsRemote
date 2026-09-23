@@ -818,12 +818,13 @@ class PreviousCorrectableStepTest(unittest.TestCase):
     over and the offer lands where something can be done.
     """
 
-    def _panel(self, produced, kinds):
+    def _panel(self, produced, kinds, stopped_after=""):
         panel = base_widget.ServerToolWidgetBase.__new__(
             base_widget.ServerToolWidgetBase)
         panel._schema = {"arguments": {"stop_after": {"option_kind": kinds}}}
         run = types.SimpleNamespace(
-            paused=types.SimpleNamespace(produced=tuple(produced)))
+            paused=types.SimpleNamespace(produced=tuple(produced),
+                                         stopped_after=stopped_after))
         return panel._previousCorrectableStep(run)
 
     def test_the_nearest_editable_step_behind_is_offered(self):
@@ -832,6 +833,27 @@ class PreviousCorrectableStepTest(unittest.TestCase):
             {"ALI_CBCT": "landmarks", "Crown_Seg": "view"})
         self.assertEqual(found["slot"], "01_ALI_CBCT")
         self.assertEqual(found["kind"], "landmarks")
+
+    def test_the_step_the_reader_is_standing_on_is_not_a_way_back(self):
+        """ASO offers one checkpoint, so a reader stopped at it has nowhere
+        behind them -- and a button that returns to where they already are is
+        a button that does nothing twice."""
+        self.assertIsNone(self._panel(
+            ["01_ALI_CBCT"], {"ALI_CBCT": "landmarks"},
+            stopped_after="ALI_CBCT"))
+
+    def test_an_earlier_call_to_the_same_tool_is_still_a_way_back(self):
+        """Only the LAST occurrence is the one being stood on. A chain that
+        calls one tool twice can still send a reader back to the first."""
+        found = self._panel(
+            ["01_ALI_CBCT", "02_ALI_CBCT"], {"ALI_CBCT": "landmarks"},
+            stopped_after="ALI_CBCT")
+        self.assertEqual(found["slot"], "01_ALI_CBCT")
+
+    def test_a_qualified_stop_is_named_by_its_last_segment(self):
+        self.assertIsNone(self._panel(
+            ["01_ALI_CBCT"], {"ALI_CBCT": "landmarks"},
+            stopped_after="ASO/ALI_CBCT"))
 
     def test_a_step_that_can_only_be_looked_at_is_not_offered(self):
         self.assertIsNone(self._panel(
