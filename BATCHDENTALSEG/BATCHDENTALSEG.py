@@ -76,11 +76,18 @@ class BATCHDENTALSEGWidget(ServerToolWidgetBase):
     # happens, and nothing happens anyway for one whose files load as meshes.
     VOLUME_RENDERING = "CT-AAA"
 
+    # A segmentation comes back as a label VOLUME or as surfaces, depending on
+    # what the Export format box asked for, and the two load as different kinds
+    # of node: a labelmap carries the model's colour table, a mesh does not and
+    # would be rendered as one grey ramp if it were loaded as a volume.
     _LOADABLE = (
         ("*.nii.gz", "labelmap"),
         ("*.nii", "labelmap"),
         ("*.nrrd", "labelmap"),
         ("*.nrrd.gz", "labelmap"),
+        ("*.stl", "model"),
+        ("*.obj", "model"),
+        ("*.vtk", "model"),
     )
 
     def handleResult(self, result) -> None:
