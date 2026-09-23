@@ -2050,7 +2050,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         folder = self._unpackCheckpoint(run, checkpoint)
         opened = folder is not None and self._openReviewer(
             folder, lambda reviewed, run=run: self._onReviewed(run, reviewed),
-            rewind=self._previousCorrectableStep(run))
+            rewind=self._previousCorrectableStep(run),
+            origin={"tool": self.TOOL_NAME,
+                    "step": checkpoint.stopped_after or "",
+                    "run": run.number})
         if opened:
             return
         # Nothing to look at, or nowhere to look at it. The run is PAUSED on
@@ -2109,16 +2112,22 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 return {"slot": slot, "tool": tool, "kind": kind}
         return None
 
-    def _openReviewer(self, folder: str, on_continue, rewind=None) -> bool:
+    def _openReviewer(self, folder: str, on_continue, rewind=None,
+                      origin=None) -> bool:
         """Hand `folder` to the review module. False when it could not be.
 
         `rewind` is where flagged patients may be sent BACK to, or None. The
         reviewer decides what to offer from it; this side only knows which
         step it was.
+
+        `origin` says which run is waiting, so the reviewer can tell a reader
+        who pressed Apply in a tool panel and found themselves somewhere else
+        where they are.
         """
         try:
             module = importlib.import_module(self.REVIEW_MODULE)
-            return bool(module.open_for_review(folder, on_continue, rewind=rewind))
+            return bool(module.open_for_review(folder, on_continue, rewind=rewind,
+                                               origin=origin))
         except Exception as exc:  # noqa: BLE001 - reported, never raised
             logger.warning("Could not open '%s' on %s: %s",
                            self.REVIEW_MODULE, folder, exc)
@@ -2184,8 +2193,33 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # is nothing left here to carry on.
             logger.info("A review came back for a run that is no longer stopped")
             return
+        self._returnFromReview()
         self._resumeRun(run, self._corrections(run, reviewed),
                         rewind_to=(reviewed or {}).get("rewind_to"))
+
+    def _returnFromReview(self) -> None:
+        """Bring this panel back up, now that the reader has finished.
+
+        The run carries on HERE -- the progress line, the elapsed time and
+        whatever comes back are all on this panel -- and a reader left in the
+        reviewer sees none of it. They pressed Continue and then watched a
+        viewer do nothing.
+
+        Best effort: failing to switch module must not cost the resume that
+        is already under way.
+        """
+        # `moduleName` when Slicer set it, and the class name otherwise --
+        # `ASOWidget` is the `ASO` module. NOT `TOOL_NAME`: that is the
+        # SERVER's name for the tool, and the two differ wherever a module
+        # was named before the tool was (`BATCHDENTALSEG` against
+        # `Batch_Dental_Seg`).
+        name = getattr(self, "moduleName", "") or type(self).__name__
+        if name.endswith("Widget"):
+            name = name[: -len("Widget")]
+        try:
+            slicer.util.selectModule(name)
+        except Exception as exc:  # noqa: BLE001 - reported, never raised
+            logger.warning("Could not return to %s: %s", name, exc)
 
     def _corrections(self, run, reviewed) -> dict:
         """{step name: a zip of the FILES that step's folder changed}, or nothing.

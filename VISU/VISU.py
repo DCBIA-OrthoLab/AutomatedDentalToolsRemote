@@ -487,7 +487,7 @@ def hosted_choices(found) -> tuple:
     return sorted(entries, key=lambda entry: entry["name"]), offered
 
 
-def open_for_review(folder: str, on_continue, rewind=None) -> bool:
+def open_for_review(folder: str, on_continue, rewind=None, origin=None) -> bool:
     """Bring this module up on `folder`, with a Continue that calls back.
 
     Here rather than in the caller, and it is the only reason this function
@@ -507,7 +507,7 @@ def open_for_review(folder: str, on_continue, rewind=None) -> bool:
     except Exception as exc:  # noqa: BLE001 - reported to the caller, not raised
         logger.warning("Could not open VISU on %s: %s", folder, exc)
         return False
-    widget.openForReview(folder, on_continue, rewind=rewind)
+    widget.openForReview(folder, on_continue, rewind=rewind, origin=origin)
     return True
 
 
@@ -568,6 +568,9 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # somewhere. None is the ordinary case: a reader who opened VISU
         # on a folder has no run behind them.
         self._rewind = None
+        # Which run opened this panel, when one did. Empty for a reader
+        # who opened VISU on a folder of their own.
+        self._origin = {}
         # Everything indexed, before the cohort chips narrow it.
         self._allCases = []
 
@@ -593,7 +596,16 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self._refresh()
 
     def _buildInput(self) -> None:
-        box = ctk.ctkCollapsibleButton()
+        # Where this panel was opened FROM, when a run opened it. A reader who
+        # pressed Apply in ASO and landed here needs to be told that is where
+        # they are: without it the panel is a folder browser that appeared,
+        # and nothing says which run is waiting on them.
+        self.originLabel = design.hint_label("")
+        self.originLabel.setVisible(False)
+        self.panel.addWidget(self.originLabel)
+
+        self.folderBox = ctk.ctkCollapsibleButton()
+        box = self.folderBox
         box.text = _("Folder")
         self.panel.addWidget(box)
         form = qt.QFormLayout(box)
@@ -982,6 +994,36 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self.position = keys.index(standing) if standing in keys else 0
         self._waiting = False
         self._refresh()
+
+    def _showOrigin(self, origin) -> None:
+        """Say which run is waiting, and stop offering the folder picker.
+
+        A reader who pressed Apply in a tool panel and landed here did not
+        choose this folder and must not be invited to change it: repointing
+        the picker mid-review is how a correction ends up measured against
+        files the run never produced.
+
+        `origin` is `{"tool", "step", "run"}` -- the tool whose panel opened
+        this, the checkpoint it stopped at written as it was published
+        (`ALI_CBCT`, or `ASO/ALI_CBCT` for one inside a callee), and the
+        run's number on that panel.
+        """
+        self._origin = dict(origin or {})
+        opened_by_a_run = bool(self._origin)
+        # Hidden rather than disabled: a greyed control still reads as
+        # something that could be used, and there is nothing to decide here.
+        self.folderBox.setVisible(not opened_by_a_run)
+        self.originLabel.setVisible(opened_by_a_run)
+        if not opened_by_a_run:
+            return
+        tool = self._origin.get("tool") or _("a tool")
+        step = self._origin.get("step") or ""
+        number = self._origin.get("run")
+        where = "{} / {}".format(tool, step) if step else tool
+        self.originLabel.text = (
+            _("Reviewing run {number} of {where}. It is waiting for you.")
+            .format(number=number, where=where) if number
+            else _("Reviewing {where}. It is waiting for you.").format(where=where))
 
     def _syncRewindControls(self) -> None:
         """The flag's wording, and whether going back is offered at all.
@@ -1468,7 +1510,8 @@ class VISUWidget(ScriptedLoadableModuleWidget):
 
     # -- opened by somebody else ---------------------------------------------
 
-    def openForReview(self, folder: str, on_continue=None, rewind=None) -> None:
+    def openForReview(self, folder: str, on_continue=None, rewind=None,
+                      origin=None) -> None:
         """Show `folder`, and give the caller a way to be told when to carry on.
 
         This is the whole of what VISU learns about the thing that opened it.
@@ -1488,6 +1531,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         """
         self._continue = on_continue
         self._rewind = rewind
+        self._showOrigin(origin)
         self.continueButton.setVisible(on_continue is not None)
         # Reviewing this folder starts now, whatever an earlier pass over it
         # wrote: the caller wants what this reader changes, not the union.

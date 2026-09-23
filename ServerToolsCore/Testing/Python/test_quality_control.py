@@ -313,8 +313,9 @@ class _Reviewer:
         self.available = True
         self.on_continue = None
 
-    def open_for_review(self, folder, on_continue, rewind=None):
+    def open_for_review(self, folder, on_continue, rewind=None, origin=None):
         self.rewind = rewind
+        self.origin = dict(origin or {})
         self.opened.append(folder)
         self.on_continue = on_continue
         return self.available
@@ -515,6 +516,35 @@ class PanelTest(unittest.TestCase):
         self.reviewer.press_continue(flagged={"p1"}, written=set())
 
         self.assertEqual(self._collectResume()["corrections"], {})
+
+    def test_the_reviewer_is_told_which_run_is_waiting(self):
+        """A reader who pressed Apply in ASO and landed in a viewer needs to
+        be told that is where they are. Without it the panel is a folder
+        browser that appeared, and nothing says which run wants them."""
+        run, _job = self._stopped()
+
+        assert self.reviewer.origin["tool"] == self.panel.TOOL_NAME
+        assert self.reviewer.origin["step"] == "ALI_CBCT"
+        assert self.reviewer.origin["run"] == run.number
+
+    def test_pressing_continue_brings_the_tool_panel_back(self):
+        """The run carries on HERE -- the progress line, the elapsed time and
+        whatever comes back. A reader left in the reviewer pressed Continue
+        and then watched a viewer do nothing."""
+        import slicer
+
+        selected = []
+        self.addCleanup(setattr, slicer.util, "selectModule",
+                        getattr(slicer.util, "selectModule", None))
+        slicer.util.selectModule = selected.append
+
+        self._stopped()
+        self.reviewer.press_continue(written=set())
+
+        expected = type(self.panel).__name__
+        if expected.endswith("Widget"):
+            expected = expected[: -len("Widget")]
+        self.assertEqual(selected[-1:], [expected])
 
     def test_going_back_asks_for_the_step_the_reader_named(self):
         """Continue and Go back travel the same route and differ only in the
@@ -765,7 +795,7 @@ class ReviewModuleTest(unittest.TestCase):
         self.assertEqual(len(entry), 1,
                          "the review module must offer open_for_review()")
         self.assertEqual([arg.arg for arg in entry[0].args.args],
-                         ["folder", "on_continue", "rewind"],
+                         ["folder", "on_continue", "rewind", "origin"],
                          "the seam is a signature, so a change to it is a "
                          "change to what both modules agree on")
 
