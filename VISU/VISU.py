@@ -560,6 +560,13 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # corrects a landmark without flagging the patient, and flags a
         # patient they could not correct at all.
         self._written = set()
+        # `{file: {label: RAS position}}` as each landmark file was FIRST
+        # read this session -- what the tool produced, before this reader
+        # touched it. Kept in memory rather than as a backup file beside the
+        # data: a file the reader did not ask for is one more thing to
+        # explain, and one more thing a later run would re-ingest. The cost
+        # is stated where it is offered: closing Slicer forgets it.
+        self._asOpened = {}
         # Set by `openForReview` when somebody else opened this panel. None
         # for a reader who opened it themselves -- who has nothing to
         # continue, and must not be shown a button that says they have.
@@ -746,9 +753,22 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         formgen.connect_changed(self.unlockGroup, self.onUnlockChanged)
         column.addWidget(self.unlockGroup.container)
 
+        buttons = qt.QHBoxLayout()
+        column.addLayout(buttons)
         self.revertButton = design.secondary_button(_("Revert to what is on disk"))
+        self.revertButton.toolTip = _(
+            "Read the files again and throw away whatever has not been saved.")
         self.revertButton.connect("clicked()", self.onRevert)
-        column.addWidget(self.revertButton)
+        buttons.addWidget(self.revertButton, 1)
+
+        self.undoButton = design.secondary_button(_("Undo my changes"))
+        self.undoButton.toolTip = _(
+            "Write this patient back the way the tool produced it, so a "
+            "different correction can be made. Only what was opened in this "
+            "session can be put back: closing Slicer forgets it.")
+        self.undoButton.enabled = False
+        self.undoButton.connect("clicked()", self.onUndo)
+        buttons.addWidget(self.undoButton, 1)
 
         self.modifyLabel = design.hint_label("")
         self.modifyLabel.setWordWrap(True)
@@ -1293,6 +1313,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             self.frameLabel.text = ""
             self.contentsLabel.text = ""
             self.scene.clear()
+            self.undoButton.enabled = False
             return
 
         self._filling = True
@@ -1312,6 +1333,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         )
         self.viewCombo.setCurrentIndex(carrying)
         self._filling = False
+        self._syncUndo()
         if self._waiting:
             # Controls filled, nothing opened. Reading ahead waits too: it is
             # a courtesy for a reader who is stepping, not for one who has not
@@ -1365,6 +1387,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             if overlay.kind == index.MARKUPS:
                 points.append(node)
                 self._points.append((overlay, node))
+                self._rememberAsOpened(overlay, node)
         for _artifact, node in self.scene.shown():
             self.scene.watch(node, self.onSceneChanged)
         # Freshly loaded nodes carry the file's own flags; the reader's choice
@@ -1416,17 +1439,24 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             said.append(self._savePosition())
         self.modifyLabel.text = ("  ".join(s for s in said if s)
                                  or _("Nothing is unlocked, so nothing was written."))
+        self._syncUndo()
+
+    @staticmethod
+    def _positionsOf(node) -> dict:
+        """`{label: RAS position}` for a markups node, or `{}`."""
+        positions = {}
+        for point in range(node.GetNumberOfControlPoints()):
+            place = [0.0, 0.0, 0.0]
+            node.GetNthControlPointPosition(point, place)
+            positions[node.GetNthControlPointLabel(point)] = place
+        return positions
 
     def _saveLandmarks(self) -> str:
         """Write every point that moved back into the file it came from."""
         moved, files = 0, 0
         for artifact, node in self._points:
-            positions = {}
             try:
-                for point in range(node.GetNumberOfControlPoints()):
-                    place = [0.0, 0.0, 0.0]
-                    node.GetNthControlPointPosition(point, place)
-                    positions[node.GetNthControlPointLabel(point)] = place
+                positions = self._positionsOf(node)
             except Exception as exc:  # noqa: BLE001 - one file is not the save
                 logger.warning("Could not read %s back: %s", artifact.name, exc)
                 continue
@@ -1476,6 +1506,79 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             return ""
         self._written.add(self._currentKey())
         return _("Written: {name}").format(name=os.path.basename(destination))
+
+    def _rememberAsOpened(self, artifact, node) -> None:
+        """Keep this file's points as they were the first time it was read.
+
+        `setdefault`, and that is the whole subtlety: a reader who saves and
+        steps away comes back to a file that now holds THEIR positions, and a
+        second snapshot would quietly make the correction the thing undo
+        returns to.
+        """
+        if artifact.path in self._asOpened:
+            return
+        try:
+            self._asOpened[artifact.path] = self._positionsOf(node)
+        except Exception as exc:  # noqa: BLE001 - one file is not the panel
+            logger.warning("Could not read %s: %s", artifact.name, exc)
+
+    def _adjustmentFile(self) -> str:
+        """The transform this panel wrote beside the scan, if it is there."""
+        anchor = self._currentAnchor()
+        if anchor is None:
+            return ""
+        stem, _extension = index.split_extension(anchor.name)
+        path = os.path.join(os.path.dirname(anchor.path),
+                            f"{stem}{ADJUSTMENT_SUFFIX}")
+        return path if os.path.isfile(path) else ""
+
+    def onUndo(self) -> None:
+        """Put this patient back to what the tool produced, and rewrite it.
+
+        Not `Revert`, which reloads the file: once a correction has been
+        saved, the prediction the reader started from is no longer on disk,
+        so there is nothing to reload. This writes the opening positions
+        back, which is what lets a reader try a different correction rather
+        than having to undo their own by hand.
+        """
+        restored, failed = 0, 0
+        for artifact, _node in self._points:
+            opened = self._asOpened.get(artifact.path)
+            if not opened:
+                continue
+            try:
+                restored += edits.save_markups(artifact.path, opened)
+            except (OSError, ValueError) as exc:
+                failed += 1
+                slicer.util.errorDisplay(
+                    _("Could not put {name} back: {error}").format(
+                        name=artifact.name, error=exc))
+        dropped = self._adjustmentFile()
+        if dropped:
+            try:
+                os.remove(dropped)
+            except OSError as exc:
+                dropped = ""
+                logger.warning("Could not remove the transform: %s", exc)
+        self._detachAdjustment()
+        if not failed:
+            self._written.discard(self._currentKey())
+        self._show(reframe=False)
+        self._syncUndo()
+        said = []
+        if restored:
+            said.append(_("{count} point(s) put back.").format(count=restored))
+        if dropped:
+            said.append(_("Removed {name}.").format(
+                name=os.path.basename(dropped)))
+        self.modifyLabel.text = ("  ".join(said)
+                                 or _("Nothing to undo for this patient."))
+
+    def _syncUndo(self) -> None:
+        """Undo is offered only where there is something of ours to undo."""
+        key = self._currentKey()
+        self.undoButton.enabled = bool(key) and (
+            key in self._written or bool(self._adjustmentFile()))
 
     def onRevert(self) -> None:
         """Throw away every unsaved change by reloading from disk."""

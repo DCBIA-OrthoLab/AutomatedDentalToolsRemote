@@ -720,6 +720,72 @@ class PanelTest(unittest.TestCase):
         self.assertIsNone(self.widget._anchorNode.under)
         self.assertFalse(self.widget.unlockGroup.boxes["Position"].isChecked())
 
+    def test_undo_puts_back_the_prediction_the_reader_overwrote(self):
+        # What `Revert` cannot do: once a correction is saved, the file no
+        # longer holds what the tool produced, so reloading it reloads the
+        # correction. This is the button a reader needs to try another one.
+        landmarks = self._with_landmarks()
+        self.open(["scans/p1_scan.nii.gz"])
+        self.widget.unlockGroup.boxes["Landmarks"].setChecked(True)
+        node = [n for n in SCENE if n.path.endswith(".mrk.json")][0]
+        node.positions[0] = [-1.0, -2.0, 9.0]
+        self.widget.onSave()
+        with open(landmarks, encoding="utf-8") as handle:
+            saved = json.load(handle)["markups"][0]["controlPoints"]
+        self.assertEqual(saved[0]["position"], [1.0, 2.0, 9.0], "the save")
+
+        self.widget.onUndo()
+
+        with open(landmarks, encoding="utf-8") as handle:
+            after = json.load(handle)["markups"][0]["controlPoints"]
+        self.assertEqual(after[0]["position"], [1.0, 2.0, 3.0])
+        self.assertIn("put back", self.widget.modifyLabel.text)
+
+    def test_undo_is_offered_only_where_there_is_something_of_ours_to_undo(self):
+        self._with_landmarks()
+        self.open(["scans/p1_scan.nii.gz"])
+        self.assertFalse(self.widget.undoButton.enabled,
+                         "offered before anything was written")
+        self.widget.unlockGroup.boxes["Landmarks"].setChecked(True)
+        node = [n for n in SCENE if n.path.endswith(".mrk.json")][0]
+        node.positions[0] = [-1.0, -2.0, 9.0]
+        self.widget.onSave()
+        self.assertTrue(self.widget.undoButton.enabled)
+        self.widget.onUndo()
+        self.assertFalse(self.widget.undoButton.enabled)
+
+    def test_undo_removes_the_transform_this_panel_wrote(self):
+        # Ours, and named so: a reader who moved a scan and wants to move it
+        # differently should not have to find the file and delete it.
+        self.open(["scans/p1_scan.nii.gz"])
+        written = os.path.join(self.root.name, "scans", "p1_scan_VISU_adjust.tfm")
+        with open(written, "w", encoding="utf-8") as handle:
+            handle.write("a transform")
+        self.widget._syncUndo()
+        self.assertTrue(self.widget.undoButton.enabled)
+
+        self.widget.onUndo()
+
+        self.assertFalse(os.path.exists(written))
+        self.assertIn("p1_scan_VISU_adjust.tfm", self.widget.modifyLabel.text)
+
+    def test_a_second_visit_does_not_become_the_thing_undo_returns_to(self):
+        # A reader who saves and steps away comes back to a file holding
+        # THEIR positions. Snapshotting again there would quietly make the
+        # correction the original.
+        self._with_landmarks()
+        self.open(["scans/p1_scan.nii.gz"])
+        artifact, node = self.widget._points[0]
+        opened = dict(self.widget._asOpened[artifact.path])
+        node.positions[0] = [-1.0, -2.0, 9.0]
+        self.widget._rememberAsOpened(artifact, node)       # as a revisit does
+        self.assertEqual(self.widget._asOpened[artifact.path], opened)
+
+    def test_undoing_a_patient_nobody_changed_says_so(self):
+        self.open(["scans/p1_scan.nii.gz"])
+        self.widget.onUndo()
+        self.assertIn("Nothing to undo", self.widget.modifyLabel.text)
+
     def test_reverting_takes_the_adjustment_off(self):
         self.open(["scans/p1_scan.nii.gz"])
         self.widget.unlockGroup.boxes["Position"].setChecked(True)
