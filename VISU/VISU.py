@@ -487,7 +487,7 @@ def hosted_choices(found) -> tuple:
     return sorted(entries, key=lambda entry: entry["name"]), offered
 
 
-def open_for_review(folder: str, on_continue) -> bool:
+def open_for_review(folder: str, on_continue, rewind=None) -> bool:
     """Bring this module up on `folder`, with a Continue that calls back.
 
     Here rather than in the caller, and it is the only reason this function
@@ -507,7 +507,7 @@ def open_for_review(folder: str, on_continue) -> bool:
     except Exception as exc:  # noqa: BLE001 - reported to the caller, not raised
         logger.warning("Could not open VISU on %s: %s", folder, exc)
         return False
-    widget.openForReview(folder, on_continue)
+    widget.openForReview(folder, on_continue, rewind=rewind)
     return True
 
 
@@ -564,6 +564,10 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # for a reader who opened it themselves -- who has nothing to
         # continue, and must not be shown a button that says they have.
         self._continue = None
+        # Where a flagged patient goes BACK to, when the caller offered
+        # somewhere. None is the ordinary case: a reader who opened VISU
+        # on a folder has no run behind them.
+        self._rewind = None
         # Everything indexed, before the cohort chips narrow it.
         self._allCases = []
 
@@ -777,14 +781,27 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # reader does not have to know which file that lands in.
         actions = qt.QHBoxLayout()
         actions.setSpacing(design.SPACING_SM)
+        # Marking a patient IS asking for it to be re-done. It was a note
+        # before, which was a weaker thing than it looked: a reader who can
+        # see a bad result and cannot ask for it to be redone is being asked
+        # to keep a list somebody else will act on.
         self.flagButton = design.toggle_button(_("Flag"))
         self.flagButton.toolTip = _(
-            "Mark this patient as needing work. The list is written beside "
-            "the data, so it is still there tomorrow and for whoever opens "
-            "the folder next."
+            "Mark this patient to be done again from an earlier step. The "
+            "list is written beside the data, so it is still there tomorrow "
+            "and for whoever opens the folder next."
         )
         self.flagButton.connect("clicked()", self.onFlagToggled)
         actions.addWidget(self.flagButton, 1)
+
+        # Only when there IS somewhere to go back to. A caller that opened
+        # VISU on a folder, or a run whose earlier steps can only be looked
+        # at, offers nothing here -- and an offer that leads nowhere is worse
+        # than no offer.
+        self.rewindButton = design.primary_button(_("Go back"))
+        self.rewindButton.connect("clicked()", self.onRewind)
+        self.rewindButton.setVisible(False)
+        actions.addWidget(self.rewindButton, 1)
 
         self.saveButton = design.primary_button(_("Save"))
         self.saveButton.toolTip = _(
@@ -966,6 +983,41 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self._waiting = False
         self._refresh()
 
+    def _syncRewindControls(self) -> None:
+        """The flag's wording, and whether going back is offered at all.
+
+        The words are the local module's, unchanged: a reader who used it
+        reads the same sentence here, and "mark this one" never said what
+        marking would DO.
+        """
+        somewhere = bool(self._rewind)
+        if somewhere and self.flagButton.isChecked():
+            self.flagButton.setText(_("Cancel - this patient is fine"))
+        elif somewhere:
+            self.flagButton.setText(_("Go back and edit this patient"))
+        else:
+            self.flagButton.setText(_("Flag"))
+        self.rewindButton.setVisible(somewhere and bool(self._flagged))
+        if somewhere and self._flagged:
+            self.rewindButton.setText(
+                _("Go back to {step} for {count} patient(s)").format(
+                    step=self._rewind.get("tool") or _("the previous step"),
+                    count=len(self._flagged)))
+
+    def onRewind(self) -> None:
+        """Ask the caller to take the flagged patients back a step.
+
+        Saves first, exactly as Continue does: the point a reader dragged
+        before pressing this is part of what they are asking to be used.
+        """
+        if not (self._rewind and self._flagged and self._continue):
+            return
+        self._leaving()
+        handler, self._continue = self._continue, None
+        self.rewindButton.setVisible(False)
+        self.continueButton.setVisible(False)
+        handler(self.reviewed(rewind_to=self._rewind.get("slot")))
+
     def onFlagToggled(self) -> None:
         if not self.cases:
             self.flagButton.setChecked(False)
@@ -975,6 +1027,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             self._flagged.add(key)
         else:
             self._flagged.discard(key)
+        self._syncRewindControls()
         if self._folder and not review.save(self._folder, self._flagged):
             # Said once, where the list is, rather than in a dialog over a
             # scan. A hosted sample is unpacked into a temporary folder the
@@ -1415,7 +1468,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
 
     # -- opened by somebody else ---------------------------------------------
 
-    def openForReview(self, folder: str, on_continue=None) -> None:
+    def openForReview(self, folder: str, on_continue=None, rewind=None) -> None:
         """Show `folder`, and give the caller a way to be told when to carry on.
 
         This is the whole of what VISU learns about the thing that opened it.
@@ -1426,8 +1479,15 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         `on_continue` is what puts the Continue button on the panel. A reader
         who opened VISU themselves passes none and sees none, because they
         have nothing to hand back to.
+
+        `rewind` is the step a reader may send flagged patients BACK to, as
+        `{"slot", "tool", "kind"}`, or None when there is nowhere to go --
+        which is the ordinary case and is why it defaults to none. VISU still
+        learns nothing about runs: it is handed a NAME to show and hands the
+        flags back, and what that name means is the caller's.
         """
         self._continue = on_continue
+        self._rewind = rewind
         self.continueButton.setVisible(on_continue is not None)
         # Reviewing this folder starts now, whatever an earlier pass over it
         # wrote: the caller wants what this reader changes, not the union.
@@ -1441,7 +1501,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             # files the first resume produced on screen.
             self.onIndex()
 
-    def reviewed(self) -> dict:
+    def reviewed(self, rewind_to=None) -> dict:
         """What this pass produced, for whoever asked for it.
 
         A dict rather than arguments in an order. This crosses the seam
@@ -1458,11 +1518,17 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         * `written`, the patients whose files this panel actually changed.
           Without it a caller must send a whole cohort back -- hundreds of
           megabytes -- on behalf of a reader who corrected nothing.
+
+        `rewind_to` is the step the reader asked the FLAGGED patients to be
+        taken back to, or None for an ordinary Continue. It is the caller's
+        own name for that step, handed straight back: VISU is told a name and
+        repeats it, which is what keeps it ignorant of runs.
         """
         return {
             "folder": self._folder,
             "flagged": set(self._flagged),
             "written": set(self._written),
+            "rewind_to": rewind_to,
         }
 
     def onContinue(self) -> None:

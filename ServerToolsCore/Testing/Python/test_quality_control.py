@@ -25,6 +25,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import types
 import unittest
 import zipfile
 from unittest import mock
@@ -312,7 +313,8 @@ class _Reviewer:
         self.available = True
         self.on_continue = None
 
-    def open_for_review(self, folder, on_continue):
+    def open_for_review(self, folder, on_continue, rewind=None):
+        self.rewind = rewind
         self.opened.append(folder)
         self.on_continue = on_continue
         return self.available
@@ -736,7 +738,9 @@ class ReviewModuleTest(unittest.TestCase):
         self.assertEqual(len(entry), 1,
                          "the review module must offer open_for_review()")
         self.assertEqual([arg.arg for arg in entry[0].args.args],
-                         ["folder", "on_continue"])
+                         ["folder", "on_continue", "rewind"],
+                         "the seam is a signature, so a change to it is a "
+                         "change to what both modules agree on")
 
 
 class SlotLayoutTest(unittest.TestCase):
@@ -777,3 +781,50 @@ class SlotLayoutTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PreviousCorrectableStepTest(unittest.TestCase):
+    """Which stop a reader may send flagged patients back to.
+
+    Looking at a bad orientation is useless without a way back to the
+    landmarks that caused it, so a stop that can only be LOOKED at is stepped
+    over and the offer lands where something can be done.
+    """
+
+    def _panel(self, produced, kinds):
+        panel = base_widget.ServerToolWidgetBase.__new__(
+            base_widget.ServerToolWidgetBase)
+        panel._schema = {"arguments": {"stop_after": {"option_kind": kinds}}}
+        run = types.SimpleNamespace(
+            paused=types.SimpleNamespace(produced=tuple(produced)))
+        return panel._previousCorrectableStep(run)
+
+    def test_the_nearest_editable_step_behind_is_offered(self):
+        found = self._panel(
+            ["01_ALI_CBCT", "02_Crown_Seg"],
+            {"ALI_CBCT": "landmarks", "Crown_Seg": "view"})
+        self.assertEqual(found["slot"], "01_ALI_CBCT")
+        self.assertEqual(found["kind"], "landmarks")
+
+    def test_a_step_that_can_only_be_looked_at_is_not_offered(self):
+        self.assertIsNone(self._panel(
+            ["01_Crown_Seg"], {"Crown_Seg": "view"}))
+
+    def test_a_tool_the_schema_says_nothing_about_is_not_offered(self):
+        """The conservative direction: an offer that leads nowhere is worse
+        than no offer."""
+        self.assertIsNone(self._panel(["01_Mystery"], {}))
+
+    def test_the_slot_number_is_not_part_of_the_kind(self):
+        """`02_ALI_CBCT` is the same tool as `01_ALI_CBCT` -- the number is
+        the call's position, and what a reader may do there is a property of
+        the tool."""
+        found = self._panel(["02_ALI_CBCT"], {"ALI_CBCT": "landmarks"})
+        self.assertEqual(found["tool"], "ALI_CBCT")
+
+    def test_a_run_that_is_not_paused_offers_nothing(self):
+        panel = base_widget.ServerToolWidgetBase.__new__(
+            base_widget.ServerToolWidgetBase)
+        panel._schema = {}
+        self.assertIsNone(
+            panel._previousCorrectableStep(types.SimpleNamespace(paused=None)))

@@ -2049,7 +2049,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         folder = self._unpackCheckpoint(run, checkpoint)
         opened = folder is not None and self._openReviewer(
-            folder, lambda reviewed, run=run: self._onReviewed(run, reviewed))
+            folder, lambda reviewed, run=run: self._onReviewed(run, reviewed),
+            rewind=self._previousCorrectableStep(run))
         if opened:
             return
         # Nothing to look at, or nowhere to look at it. The run is PAUSED on
@@ -2063,11 +2064,51 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 tool=self.TOOL_NAME, step=checkpoint.stopped_after or "?"))
         self._resumeRun(run, {})
 
-    def _openReviewer(self, folder: str, on_continue) -> bool:
-        """Hand `folder` to the review module. False when it could not be."""
+    # What a reader may do at a stop, as the server publishes it on the
+    # `stop_after` argument. Only these two are somewhere to go BACK to:
+    # looking at a result is not a way to change the thing that caused it.
+    EDITABLE_KINDS = ("landmarks", "registration")
+
+    def _previousCorrectableStep(self, run):
+        """The nearest stop behind this one a reader could actually change.
+
+        Looking at a bad orientation is useless without a way back to the
+        landmarks that caused it, so stops that can only be LOOKED at are
+        stepped over and the offer lands where something can be done.
+
+        `produced` is the server's own folder names, in the order the steps
+        ran -- `("01_ASO", "02_ALI_CBCT")` -- so walking it backwards is
+        walking the run backwards. The kind comes from the schema, which the
+        server composed off the tool that WROTE each step.
+
+        Returns `{"slot": ..., "tool": ..., "kind": ...}`, or None when there
+        is nothing correctable behind the current stop.
+        """
+        checkpoint = getattr(run, "paused", None)
+        if checkpoint is None:
+            return None
+        kinds = ((getattr(self, "_schema", None) or {}).get("arguments", {})
+                 .get("stop_after", {}).get("option_kind") or {})
+        for slot in reversed(list(checkpoint.produced or ())):
+            # "01_ALI_CBCT" -> "ALI_CBCT". The number is the call's position,
+            # which is what keeps two calls to one tool apart; the kind is a
+            # property of the tool, not of the position.
+            _number, _sep, tool = slot.partition("_")
+            kind = kinds.get(tool, "view")
+            if kind in self.EDITABLE_KINDS:
+                return {"slot": slot, "tool": tool, "kind": kind}
+        return None
+
+    def _openReviewer(self, folder: str, on_continue, rewind=None) -> bool:
+        """Hand `folder` to the review module. False when it could not be.
+
+        `rewind` is where flagged patients may be sent BACK to, or None. The
+        reviewer decides what to offer from it; this side only knows which
+        step it was.
+        """
         try:
             module = importlib.import_module(self.REVIEW_MODULE)
-            return bool(module.open_for_review(folder, on_continue))
+            return bool(module.open_for_review(folder, on_continue, rewind=rewind))
         except Exception as exc:  # noqa: BLE001 - reported, never raised
             logger.warning("Could not open '%s' on %s: %s",
                            self.REVIEW_MODULE, folder, exc)
