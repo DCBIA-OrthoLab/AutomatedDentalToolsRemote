@@ -419,18 +419,25 @@ class CaptionNamesItsSourceTest(unittest.TestCase):
                         self.row.caption.text)
 
     def test_a_scene_pick_is_labelled_by_its_kind(self):
-        self.row.setSceneLabel("Surface")
-        self.row.setVolumeChoices(["L01_T2_L"])
+        self.row.setSceneLabel("ROI")
+        self.row.setVolumeChoices(["Crop box"])
         self.row.sceneCombo.setCurrentIndex(1)
 
-        self.assertEqual(self.row.caption.text, "Surface: L01_T2_L")
+        self.assertEqual(self.row.caption.text, "ROI: Crop box")
 
-    def test_a_row_taking_several_kinds_says_Scene(self):
-        """ALI takes a scan, a surface or a set of landmarks through one
-        argument; naming any one of them would be wrong for the other two."""
-        self.assertEqual(formgen.scene_label_for(("volume", "model", "markups")),
-                         "Scene")
-        self.assertEqual(formgen.scene_label_for(("markups",)), "Landmarks")
+    def test_a_volume_and_a_surface_are_both_simply_a_scan(self):
+        """Read off the kinds' own labels rather than off their number: ALI
+        takes a CBCT or an intraoral surface through one argument, and both are
+        a scan. Counting would have answered "Scene" -- the container rather
+        than the thing -- on the one row where a true word exists."""
+        self.assertEqual(formgen.scene_label_for(("volume", "model")), "Scan")
+        self.assertEqual(formgen.scene_label_for(("volume",)), "Scan")
+        self.assertEqual(formgen.scene_label_for(("roi",)), "ROI")
+        self.assertEqual(formgen.scene_label_for(("volume", "roi")), "Scene")
+
+    def test_the_dropdown_says_what_it_holds(self):
+        self.assertEqual(formgen.scene_prompt_for("Scan"), "Imported scan...")
+        self.assertEqual(formgen.scene_prompt_for("ROI"), "Drawn ROI...")
 
     def test_every_row_has_the_second_line_even_without_dropdowns(self):
         """A `.csv` argument is wrapped in nothing, and used to show nothing at
@@ -444,15 +451,21 @@ class CaptionNamesItsSourceTest(unittest.TestCase):
 
 
 class ScenePermissionTest(unittest.TestCase):
-    """Only landmarks and scans may come from the scene."""
+    """Only SCANS may come from the scene -- a CBCT volume or an intraoral
+    surface. Landmarks may not, and were offered until 2026-09-24: a set of
+    points one row below a scan in the same dropdown reads as another scan,
+    and picking the wrong one is a run that fails on a file the tool cannot
+    open."""
 
-    def test_scans_surfaces_and_landmarks_may(self):
+    def test_a_volume_and_a_surface_may(self):
         self.assertEqual(formgen.scene_kinds_for(SCAN), ("volume",))
         self.assertEqual(formgen.scene_kinds_for(MESH), ("model",))
+
+    def test_landmarks_may_not(self):
         self.assertEqual(
             formgen.scene_kinds_for(
                 {"types": ["path"], "extensions": {"path": [".mrk.json"]}}),
-            ("markups",))
+            ())
 
     def test_nothing_else_may(self):
         """A spreadsheet or an archive has no counterpart in a scene, and
@@ -523,10 +536,13 @@ class NameVocabularyTest(unittest.TestCase):
         for name in ("scans", "cbct", "t1_masks", "masks"):
             self.assertEqual(self._kinds(name), ("volume",), name)
 
-    def test_a_landmark_argument_offers_markups(self):
+    def test_a_landmark_argument_offers_nothing(self):
+        """And the rule that answers it is FIRST in the table: `cbct_landmarks`
+        holds `cbct`, so falling through would offer it the scene's volumes --
+        the one answer that is certainly wrong."""
         for name in ("landmarks", "cbct_landmarks", "ios_landmarks",
                      "mgl_landmarks"):
-            self.assertEqual(self._kinds(name), ("markups",), name)
+            self.assertEqual(self._kinds(name), (), name)
 
     def test_a_surface_argument_offers_models(self):
         for name in ("meshes", "surfaces", "ios"):
@@ -538,7 +554,7 @@ class NameVocabularyTest(unittest.TestCase):
         the honest answer -- what the user picks is what they meant."""
         self.assertEqual(self._kinds("t1"), ("volume", "model"))
         self.assertEqual(self._kinds("t2"), ("volume", "model"))
-        self.assertEqual(formgen.scene_label_for(self._kinds("t1")), "Scene")
+        self.assertEqual(formgen.scene_label_for(self._kinds("t1")), "Scan")
 
     def test_a_transform_or_a_table_offers_nothing(self):
         """No counterpart in a scene, and guessing one wrong is worse than
@@ -554,15 +570,14 @@ class NameVocabularyTest(unittest.TestCase):
 
         self.assertEqual(formgen.scene_kinds_for(spec, "scans"), ())
 
-    def test_every_scan_and_landmark_argument_in_the_extension_is_covered(self):
-        """The ask, stated as a test: every argument that takes a scan or a set
-        of landmarks can be filled from the scene -- not ALI's alone."""
+    def test_every_scan_argument_in_the_extension_is_covered(self):
+        """The ask, stated as a test: every argument that takes a scan can be
+        filled from the scene -- not ALI's alone. Landmark arguments are
+        deliberately absent from this list; see ScenePermissionTest."""
         covered = {
             "scans": ("volume",), "cbct": ("volume",), "masks": ("volume",),
             "t1_masks": ("volume",), "meshes": ("model",),
             "surfaces": ("model",), "ios": ("model",),
-            "landmarks": ("markups",), "cbct_landmarks": ("markups",),
-            "ios_landmarks": ("markups",), "mgl_landmarks": ("markups",),
         }
         for name, kinds in covered.items():
             self.assertEqual(self._kinds(name), kinds, name)

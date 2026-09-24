@@ -1481,14 +1481,14 @@ class InputSourcesTest(unittest.TestCase):
 
         self.assertEqual(self.widget.local.container.toolTip(), path)
 
-    def test_an_open_volume_says_it_is_one(self):
+    def test_an_imported_scan_says_it_is_one(self):
         """Nothing is on disk for it, so `describe_file` has nothing to read --
         and "no file chosen" would be a lie about a satisfied argument."""
         self.widget.sceneCombo.setCurrentIndex(1)
 
-        # Named for what it IS: "Volume" over a surface would be wrong on ALI,
-        # which takes scans, surfaces and landmarks through one argument.
-        self.assertIn("Volume:", self.widget.caption.text)
+        # "Scan", which is true of a CBCT volume and of an intraoral surface
+        # alike -- ALI takes either through the one argument.
+        self.assertIn("Scan:", self.widget.caption.text)
         self.assertIn("CBCT_patient1", self.widget.caption.text)
 
     def test_the_caption_empties_when_the_input_does(self):
@@ -1513,9 +1513,7 @@ class InputSourcesTest(unittest.TestCase):
         )
         self.assertEqual(
             [scene.itemText(i) for i in range(scene.count)],
-            [formgen.ServerFileInput.PROMPT_VOLUMES,
-             formgen.OPEN_VOLUME_PREFIX + "CBCT_patient1",
-             formgen.OPEN_VOLUME_PREFIX + "CBCT_patient2"],
+            [formgen.scene_prompt_for("Scan"), "CBCT_patient1", "CBCT_patient2"],
         )
 
     def test_the_prompt_names_what_the_list_holds(self):
@@ -1576,7 +1574,7 @@ class InputSourcesTest(unittest.TestCase):
         self.assertEqual(self.widget.combo.toolTip(),
                          formgen.ServerFileInput.PROMPT_HOSTED)
         self.assertEqual(self.widget.sceneCombo.toolTip(),
-                         formgen.ServerFileInput.PROMPT_VOLUMES)
+                         formgen.scene_prompt_for("Scan"))
 
     def test_the_default_state_names_nothing(self):
         self.assertEqual(self.widget.hosted_name(), "")
@@ -1677,8 +1675,8 @@ class InputSourcesTest(unittest.TestCase):
 
     def test_a_test_file_named_like_a_volume_entry_is_not_misread(self):
         # Selection kind is decided by index, so even a hosted file named
-        # like a volume entry stays a hosted selection.
-        tricky = formgen.OPEN_VOLUME_PREFIX + "CBCT_patient1"
+        # exactly like a scene entry stays a hosted selection.
+        tricky = "CBCT_patient1"
         self.widget.setChoices([{"name": tricky, "kind": None, "size": None}])
 
         self.widget.combo.setCurrentIndex(1)

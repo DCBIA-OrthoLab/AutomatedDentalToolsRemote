@@ -126,10 +126,6 @@ _POPUP_PADDING = 40
 # publishes today measures 265 px, so this is a guard rail, not a budget.
 _POPUP_MAX_WIDTH = 720
 
-# How a volume already open in the scene appears in the input dropdown, below
-# the server-hosted test files. Selection kind is decided by index, never by
-# parsing this prefix back (see ServerFileInput._selection).
-OPEN_VOLUME_PREFIX = "Open volume: "
 
 # 1024-based, like every other size this extension prints (transfer._Meter,
 # client._download_message). A test file is a download the user is about to
@@ -332,12 +328,17 @@ _SURFACE_EXTENSIONS = {".vtk", ".vtp", ".stl", ".obj", ".ply"}
 # "what can satisfy this argument" is a widget decision and this file is where
 # every other one lives.
 SCENE_NODE_KINDS = {
+    # The two shapes a SCAN takes in this extension: a CBCT is a scalar volume,
+    # an intraoral scan is a surface. Both are "a scan" to a clinician, and the
+    # dropdown says so in those words.
     "volume": ("vtkMRMLScalarVolumeNode", ".nii.gz"),
     "model": ("vtkMRMLModelNode", ".vtk"),
-    # Landmarks placed by hand, or loaded from an earlier run. A tool that
-    # takes them takes them from the scene too: placing points IS the reason a
-    # clinician has Slicer open beside the panel.
-    "markups": ("vtkMRMLMarkupsFiducialNode", ".mrk.json"),
+    # **Landmarks are deliberately absent**, and were offered here until
+    # 2026-09-24. The scene list is the imported SCAN a run is about, and a set
+    # of points sitting in the same list read as another scan -- the two are
+    # picked from one dropdown, one row apart, and choosing the wrong one is a
+    # run that fails on a file the tool cannot open. What it costs: landmarks
+    # placed by hand have to be saved and browsed to, rather than picked.
     # A crop box, and a kind of its own because Slicer's is NOT a markups
     # fiducial: `vtkMRMLMarkupsROINode.IsA("vtkMRMLMarkupsFiducialNode")` is
     # false, so offering it under "markups" offers nothing at all. Same file
@@ -350,12 +351,22 @@ SCENE_NODE_KINDS = {
 # What a pick of each kind is called on the row's second line. A row accepting
 # more than one says "Scene", because naming one of them would be wrong for
 # the others -- ALI takes all three.
-SCENE_LABELS = {"volume": "Volume", "model": "Surface", "markups": "Landmarks",
-                "roi": "ROI"}
+# What a pick of each kind is called on the row's second line, and what its
+# dropdown offers to fill the row with. A CBCT volume and an intraoral surface
+# are both "a scan", so a row taking either says the one word that is true of
+# both rather than falling back on "Scene".
+SCENE_LABELS = {"volume": "Scan", "model": "Scan", "roi": "ROI"}
 
-# Landmark formats, the third thing the scene can answer with. Separate table
-# for the same reason as the other two: they map to their own node class.
-_MARKUP_EXTENSIONS = {".mrk.json", ".fcsv", ".json"}
+# The first entry of the scene dropdown, per label -- the one place that says
+# what the list holds. Keyed by the LABEL and not by the kind, so a row taking
+# a volume or a surface gets one prompt rather than two that disagree.
+SCENE_PROMPTS = {
+    "Scan": "Imported scan...",
+    # Drawn rather than imported: a ROI is made in Slicer, which is the whole
+    # reason it is offered here instead of being asked for as a file.
+    "ROI": "Drawn ROI...",
+}
+_SCENE_PROMPT_FALLBACK = "From the scene..."
 
 
 # What an argument's NAME says about the scene node that could satisfy it.
@@ -370,7 +381,10 @@ _MARKUP_EXTENSIONS = {".mrk.json", ".fcsv", ".json"}
 # NOTHING: a spreadsheet or a transform has no counterpart in a scene, and
 # guessing one wrong is worse than offering none.
 SCENE_NAME_KINDS = (
-    ("landmark", ("markups",)),
+    # FIRST, and answering NOTHING. `cbct_landmarks` holds `cbct`, so a
+    # landmark argument falling through to the rest of this table would be
+    # offered the scene's volumes -- the one answer that is certainly wrong.
+    ("landmark", ()),
     # Before the rest, because it is the narrowest: a box, not points.
     ("roi", ("roi",)),
     # A mask is labelled voxels, which is a volume node like any other.
@@ -389,7 +403,7 @@ SCENE_NAME_KINDS = (
     ("t1", ("volume", "model")),
     ("t2", ("volume", "model")),
     ("input", ("volume", "model")),
-    ("files", ("volume", "model", "markups")),
+    ("files", ("volume", "model")),
 )
 
 
@@ -424,19 +438,29 @@ def scene_kinds_for(spec: dict, name: str = "") -> tuple:
     if extensions & _SURFACE_EXTENSIONS or any(
             "surface" in name or "mesh" in name for name in argument_types(spec)):
         kinds.append("model")
-    if extensions & _MARKUP_EXTENSIONS or any(
-            "markup" in name or "landmark" in name for name in argument_types(spec)):
-        kinds.append("markups")
+    # No markups branch, and no `_MARKUP_EXTENSIONS` table to go with it: an
+    # argument declaring `.mrk.json` gets nothing from the scene. See
+    # SCENE_NODE_KINDS for why the list is scans only.
     return tuple(kinds)
 
 
 def scene_label_for(kinds) -> str:
-    """The word a scene pick goes under: the kind's own when there is one,
-    "Scene" when the row takes several and no single word is true."""
-    kinds = tuple(kinds)
-    if len(kinds) == 1:
-        return SCENE_LABELS.get(kinds[0], "Volume")
+    """The word a scene pick goes under.
+
+    Read off the kinds' own labels rather than off their number: a volume and a
+    surface are both a Scan, so a row taking either says `Scan` where counting
+    would have said `Scene` -- a word that names the container instead of the
+    thing, on the one row where a true word exists.
+    """
+    words = {SCENE_LABELS[kind] for kind in kinds if kind in SCENE_LABELS}
+    if len(words) == 1:
+        return words.pop()
     return "Scene"
+
+
+def scene_prompt_for(label: str) -> str:
+    """The scene dropdown's first entry, for a row labelled `label`."""
+    return SCENE_PROMPTS.get(label, _SCENE_PROMPT_FALLBACK)
 
 
 def accepts_volume(spec: dict, name: str = "") -> bool:
@@ -1362,18 +1386,17 @@ class ServerFileInput:
     # fallback for a list with nothing in it. `_prompt` picks the words.
     CHOOSE_OPTION = PATH_PLACEHOLDER
     PROMPT_HOSTED = "Test data..."
-    PROMPT_VOLUMES = "Open volume..."
-    PROMPT_BOTH = "Test data or open volume..."
     PROMPT_MODEL = "Model on the server..."
 
     def __init__(self, local, hosted_downloads=True, on_hosted=None):
         self.local = local
         self._syncing = False
         self._hosted = []  # [{"name", "kind", "size"}], in server order
-        # How a scene pick is named on the second line. Set by base_widget from
-        # the kinds this argument accepts, because "Volume" over a surface or a
-        # set of landmarks would be wrong -- and ALI takes all three.
-        self._scene_label = "Volume"
+        # How a scene pick is named on the second line, and what its dropdown
+        # calls itself. Set by base_widget from the kinds this argument
+        # accepts: a CBCT and an intraoral surface are both a Scan, a crop box
+        # is not.
+        self._scene_label = SCENE_LABELS["volume"]
         # Whether this row can EVER be filled from the scene. Distinct from
         # having something to offer right now: "never" is a property of the
         # argument and hides the control, "nothing at the moment" is a property
@@ -1436,8 +1459,8 @@ class ServerFileInput:
         self.sceneCombo.sizeAdjustPolicy = \
             qt.QComboBox.AdjustToMinimumContentsLengthWithIcon
         self.sceneCombo.minimumContentsLength = 14
-        self.sceneCombo.addItems([self.PROMPT_VOLUMES])
-        self.sceneCombo.setToolTip(self.PROMPT_VOLUMES)
+        self.sceneCombo.addItems([self._scenePrompt()])
+        self.sceneCombo.setToolTip(self._scenePrompt())
         # Hidden until there is something in it: an empty dropdown is a control
         # that can only disappoint, and most rows never get one.
         self.sceneCombo.setVisible(False)
@@ -1500,9 +1523,18 @@ class ServerFileInput:
         self._rebuildScene()
 
     def setSceneLabel(self, label: str) -> None:
-        """What a scene pick is called on the caption: Volume, Surface,
-        Landmarks -- or "Scene" for a row accepting more than one of them."""
-        self._scene_label = label or "Volume"
+        """What a scene pick is called on the caption -- Scan, ROI -- and,
+        through `scene_prompt_for`, what its dropdown calls itself.
+
+        Redraws, because the label IS the prompt's source: set after the list
+        was last built, it would otherwise name the row correctly on the
+        caption and leave the old words at the top of the dropdown.
+        """
+        self._scene_label = label or SCENE_LABELS["volume"]
+        self._rebuildScene()
+
+    def _scenePrompt(self) -> str:
+        return scene_prompt_for(self._scene_label)
 
     def setVolumeChoices(self, names) -> None:
         """What the scene currently offers THIS argument, as display names.
@@ -1542,9 +1574,15 @@ class ServerFileInput:
         ]
 
     def _sceneEntries(self) -> list:
-        return [self.PROMPT_VOLUMES] + [
-            OPEN_VOLUME_PREFIX + name for name in self._volume_names
-        ]
+        """The prompt, then the scene's own node names, unadorned.
+
+        They used to be prefixed `Open volume: `, from when one dropdown held
+        the hosted files and the scene together and a reader needed telling
+        which was which. The scene has had a list of its own since, whose first
+        entry names what it holds -- so the prefix was the same four words
+        repeated down every row of it.
+        """
+        return [self._scenePrompt()] + list(self._volume_names)
 
     def _rebuildScene(self) -> None:
         """Redraw the scene list, keeping the current pick when still offered.
@@ -1559,8 +1597,11 @@ class ServerFileInput:
             self.sceneCombo.clear()
             entries = self._sceneEntries()
             self.sceneCombo.addItems(entries)
-            if previous in entries:
-                self.sceneCombo.setCurrentIndex(entries.index(previous))
+            # Searched from index 1, never from 0: the entries are bare node
+            # names now, so a node named exactly like the prompt would
+            # otherwise restore to the prompt and read as nothing chosen.
+            if previous in entries[1:]:
+                self.sceneCombo.setCurrentIndex(entries.index(previous, 1))
             self.sceneCombo.setToolTip(entries[0])
         finally:
             self._syncing = False
