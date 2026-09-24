@@ -78,29 +78,14 @@ class SelectAllTest(unittest.TestCase):
 
     def test_a_redraw_does_not_leave_two_of_each_button(self):
         """`rebuild` empties the column; anything added once in __init__ used to
-        survive as an orphan. The description had exactly that bug."""
-        group = _group(select_all=True, description="what these steps are")
+        survive as an orphan. The description had exactly that bug, back when
+        the field printed one."""
+        group = _group(select_all=True)
         group.rebuild({"ALI_CBCT": False, "ASO": False})
 
         widgets = getattr(group._column, "widgets", [])
         holders = [w for w in widgets if getattr(w, "layout", None) is not None]
         self.assertEqual(len(holders), 1, "the button row was drawn twice")
-
-    def test_the_description_survives_a_redraw(self):
-        """Found while adding the buttons: `rebuild` took the hint label out and
-        `_draw` never put it back, so a facade narrowing its options lost the
-        sentence explaining them."""
-        hint = "what these steps are"
-        group = _group(select_all=True, description=hint)
-        self.assertIn(hint, self._texts(group))
-
-        group.rebuild({"ALI_CBCT": False, "ASO": False})
-        self.assertIn(hint, self._texts(group),
-                      "the sentence explaining the options was dropped")
-
-    @staticmethod
-    def _texts(group):
-        return [getattr(w, "text", None) for w in getattr(group._column, "widgets", [])]
 
 
 if __name__ == "__main__":
@@ -127,18 +112,24 @@ class TheyLookLikeControlsNotLinksTest(unittest.TestCase):
         for button in self._buttons():
             self.assertNotIn("text-decoration: underline", button._stylesheet)
 
-    def test_each_one_is_outlined_so_it_reads_as_a_button(self):
+    def test_each_one_is_outlined_so_it_reads_as_a_control(self):
+        """The panel's own way of saying "a control": every one of them is a
+        surface with a hairline round it, and a bulk command that said it
+        differently would read as a different kind of thing."""
         for button in self._buttons():
-            self.assertIn("border: 1px solid", button._stylesheet)
+            self.assertIn("1px solid {}".format(design.tokens()["BORDER"]),
+                          button._stylesheet)
             self.assertIn("border-radius", button._stylesheet)
+            self.assertIn(design.tokens()["SURFACE"], button._stylesheet)
 
     def test_neither_one_is_filled_like_apply(self):
         """A filled blue slab a few rows above Apply competes with the one
         button that starts a run. That is why these are not primary buttons,
         and the tabbed layout's full-width pair is."""
         for button in self._buttons():
-            self.assertIn("background: transparent", button._stylesheet)
             self.assertNotIn("qlineargradient", button._stylesheet)
+            self.assertNotIn("background-color: " + design.tokens()["PRIMARY"],
+                             button._stylesheet)
 
     def test_the_text_is_the_panels_own_size(self):
         """Shrunk to 8pt they were the smallest thing on the panel and in the

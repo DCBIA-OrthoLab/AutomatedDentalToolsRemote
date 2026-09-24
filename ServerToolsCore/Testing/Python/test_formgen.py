@@ -11,6 +11,7 @@ Usage:
 """
 
 import json
+import io
 import os
 import re
 import shutil
@@ -222,15 +223,16 @@ class MultiChoiceWidgetTest(unittest.TestCase):
             self.assertIsInstance(box, qt.QCheckBox)
 
     def test_checkboxes_are_laid_out_in_declaration_order(self):
-        # The group also lays out the argument's description as a hint label
-        # above the boxes, so filter to the boxes themselves.
         laid_out = [w for w in self.group.container.layout.widgets if isinstance(w, qt.QCheckBox)]
         self.assertEqual([box.text for box in laid_out], ["summary", "preview", "columns"])
 
-    def test_the_description_is_laid_out_above_the_boxes(self):
-        laid_out = self.group.container.layout.widgets
-        self.assertIsInstance(laid_out[0], qt.QLabel)
-        self.assertEqual(laid_out[0].text, "Which result files to produce")
+    def test_nothing_but_the_options_is_printed_in_the_field(self):
+        """The description used to be rendered here, as a small grey paragraph
+        above the boxes. Several of those stacked down a panel is text a reader
+        scrolls past; it is the label's tooltip now."""
+        printed = [w.text for w in self.group.container.layout.widgets
+                   if getattr(w, "text", None)]
+        self.assertNotIn("Which result files to produce", printed)
 
     def test_initial_state_matches_the_declared_booleans(self):
         self.assertEqual(
@@ -271,14 +273,15 @@ class MultiChoiceWidgetTest(unittest.TestCase):
         self.assertGreater(bottom, 0)
 
 
-    def test_the_description_is_shown_rather_than_hovered(self):
-        """It used to be BOTH: rendered as a hint label above the options and
-        set as the container's tooltip. Qt hands a container's tooltip to every
-        child that has none, so ALI's 304-character note on `landmarks` popped
-        up under each of its 236 chips."""
-        shown = [w for w in self.group.container.layout.widgets
-                 if getattr(w, "text", None) == "Which result files to produce"]
-        self.assertEqual(len(shown), 1)
+    def test_the_description_is_hovered_on_the_label(self):
+        """Not on the container, which Qt would hand to every child that has
+        none -- ALI's 304-character note on `landmarks` popped up under each of
+        its 236 chips that way. The label has no children to hand it down to,
+        and is where a reader looks for what a field means."""
+        label = dict((field, label) for label, field in self.layout.rows)[
+            self.group.container]
+
+        self.assertEqual(label.toolTip(), "Which result files to produce")
         self.assertFalse(self.group.container.toolTip())
 
 
@@ -512,14 +515,12 @@ class FileOrFolderInputTest(unittest.TestCase):
     """The `input` argument: `types` = ["csv_file", "folder"] - one row taking
     either, with the client working out which it got.
 
-    **There is nothing to type a path into any more.** The row used to carry an
-    editable path field beside its browse buttons, and that field answered the
-    question the caption under the row already answers - badly: truncated to
-    the width left over from two dropdowns and two buttons, it showed a
-    fragment of a temporary directory where the caption reads
-    `MG_test_scan.nii.gz - NIfTI volume, 94 MB`. The two browse dialogs and
-    `set_local_path` are the only writers now; `currentPath` is what the rest
-    of the panel reads, and the full path is one hover away on the container.
+    **There is nothing to type a path into.** The row shows what it holds in a
+    READ-ONLY box on the left and a `Select` button on the right -- the
+    ordinary file-picker shape -- and an editable field there would be a box a
+    clinician can type a path into which is then ignored, since the dialog and
+    `set_local_path` are the only writers. `currentPath` is what the rest of
+    the panel reads, and the full path is one hover away on the container.
     """
 
     def setUp(self):
@@ -533,46 +534,49 @@ class FileOrFolderInputTest(unittest.TestCase):
         self.folder = os.path.join(self.work, "cohort")
         os.makedirs(self.folder)
 
-    def test_folder_in_types_gives_one_row_offering_both(self):
-        """An argument taking a file OR a folder is one row with both browse
-        buttons - not two rows, and not a kind selector the user has to set
-        correctly before picking."""
+    def test_folder_in_types_gives_one_row_accepting_both(self):
+        """An argument taking a file OR a folder is ONE row with ONE button -
+        not two rows, and not a kind selector the user has to set correctly
+        before picking. Which dialog the button opens follows the segmented
+        control above it."""
         self.assertIsInstance(self.field, formgen.FileOrFolderInput)
-        self.assertIsNotNone(self.field.fileButton)
-        self.assertIsNotNone(self.field.folderButton)
+        self.assertEqual(self.field.modes, ("file", "folder"))
+        self.assertEqual(self.field.selectButton.text, formgen.SELECT_LABEL)
 
-    def test_a_single_file_argument_offers_no_folder_button(self):
-        """A button whose result the server is going to refuse is worse than no
-        button at all: the folder is zipped and uploaded first, and the run
+    def test_a_single_file_argument_accepts_no_folder(self):
+        """A source whose result the server is going to refuse is worse than no
+        source at all: the folder is zipped and uploaded first, and the run
         fails after the bytes have travelled."""
         field = formgen.file_widget({"type": "csv_file", "types": ["csv_file"]})
 
-        self.assertIsNotNone(field.fileButton)
-        self.assertIsNone(field.folderButton)
+        self.assertEqual(field.modes, ("file",))
 
-    def test_a_folder_argument_offers_no_file_button(self):
+    def test_a_folder_argument_accepts_no_file(self):
         """The mirror image: an argument taking a whole folder (zipped on the
-        way out) must not invite a single file it cannot use."""
+        way out) must not invite a single file it cannot use -- and its one
+        button must open the folder dialog without being told."""
         field = formgen.file_widget({"type": "folder", "types": ["folder"]})
 
-        self.assertIsNone(field.fileButton)
-        self.assertIsNotNone(field.folderButton)
+        self.assertEqual(field.modes, ("folder",))
+        qt.QFileDialog.next_directory = self.folder
+        self.addCleanup(setattr, qt.QFileDialog, "next_directory", "")
+        field.selectButton.clicked.emit()
+        self.assertEqual(field.currentPath, self.folder)
 
     def test_there_is_nothing_to_type_a_path_into(self):
-        """The only writers are the two browse dialogs and `set_local_path`.
+        """The dialog and `set_local_path` are the only writers.
 
-        Pinned rather than left to the class docstring: a text field added back
-        onto this row would look harmless and would put two answers to "which
-        file is loaded" side by side again, the shorter one truncated.
+        Pinned rather than left to the class docstring: the box on the left IS
+        a QLineEdit now, and one that accepted typing would take a path the row
+        then ignores.
         """
         self.assertFalse(hasattr(self.field, "pathEdit"))
-        for widget in self.field.container.layout.widgets:
-            self.assertNotIsInstance(widget, qt.QLineEdit)
+        self.assertTrue(self.field.caption.isReadOnly())
 
     def test_the_file_dialog_is_restricted_to_the_declared_extensions(self):
         # The extensions still come from `types` - that is the whole point of
         # driving the dialog here rather than letting ctkPathLineEdit do it.
-        self.field.fileButton.clicked.emit()
+        self.field.selectButton.clicked.emit()
 
         self.assertIn("*.csv", qt.QFileDialog.last_open_file_args[3])
 
@@ -586,7 +590,7 @@ class FileOrFolderInputTest(unittest.TestCase):
         """
         field = formgen.file_widget({"type": "file", "types": ["file"]})
 
-        field.fileButton.clicked.emit()
+        field.selectButton.clicked.emit()
 
         self.assertEqual(field._extensions, ())
         self.assertEqual(qt.QFileDialog.last_open_file_args[3], "")
@@ -633,27 +637,39 @@ class FileOrFolderInputTest(unittest.TestCase):
 
         self.assertFalse(self.field.is_folder())
 
-    def test_each_browse_button_fills_the_same_selection(self):
+    def test_the_one_button_opens_whichever_dialog_the_mode_asks_for(self):
         qt.QFileDialog.next_directory = self.folder
         qt.QFileDialog.next_file = self.csv
         self.addCleanup(setattr, qt.QFileDialog, "next_directory", "")
         self.addCleanup(setattr, qt.QFileDialog, "next_file", "")
 
-        self.field.folderButton.clicked.emit()
+        self.field.setBrowseMode("folder")
+        self.field.selectButton.clicked.emit()
         self.assertEqual(self.field.currentPath, self.folder)
         self.assertTrue(self.field.is_folder())
 
-        self.field.fileButton.clicked.emit()
+        self.field.setBrowseMode("file")
+        self.field.selectButton.clicked.emit()
         self.assertEqual(self.field.currentPath, self.csv)
         self.assertFalse(self.field.is_folder())
+
+    def test_a_mode_it_does_not_know_leaves_the_button_alone(self):
+        """It is set from a source key, and a key this row never offered must
+        not silently turn a file picker into a folder picker."""
+        self.field.setBrowseMode("file")
+        self.field.setBrowseMode("scene")
+
+        self.assertEqual(self.field._mode, "file")
 
     def test_a_cancelled_dialog_keeps_the_current_selection(self):
         self.field.setCurrentPath(self.csv)
         qt.QFileDialog.next_directory = ""  # what Qt returns when cancelled
         qt.QFileDialog.next_file = ""
 
-        self.field.folderButton.clicked.emit()
-        self.field.fileButton.clicked.emit()
+        self.field.setBrowseMode("folder")
+        self.field.selectButton.clicked.emit()
+        self.field.setBrowseMode("file")
+        self.field.selectButton.clicked.emit()
 
         self.assertEqual(self.field.currentPath, self.csv)
 
@@ -669,7 +685,8 @@ class FileOrFolderInputTest(unittest.TestCase):
         self.addCleanup(setattr, qt.QFileDialog, "next_directory", "")
 
         self.field.setCurrentPath(self.csv)
-        self.field.folderButton.clicked.emit()
+        self.field.setBrowseMode("folder")
+        self.field.selectButton.clicked.emit()
         self.field.setCurrentPath(os.path.join(self.work, "other.xlsx"))
 
         self.assertEqual(len(calls), 3)
@@ -690,12 +707,12 @@ class FileOrFolderInputTest(unittest.TestCase):
     def test_an_explicit_mode_overrides_the_schema_rule(self):
         # SurgMovPred's "input" is typed zip_file and the module still wants a
         # folder picker (it zips it): a declared mode wins over the derived one,
-        # and decides which browse buttons the row gets.
+        # and decides which source the row accepts at all.
         field = formgen.file_widget({"type": "zip_file", "types": ["zip_file"]}, "folder_zip")
 
         self.assertIsInstance(field, formgen.FileOrFolderInput)
-        self.assertIsNone(field.fileButton)
-        self.assertIsNotNone(field.folderButton)
+        self.assertEqual(field.modes, ("folder",))
+        self.assertEqual(field._mode, "folder")
 
     def test_a_volume_argument_gets_the_sources_dropdown_around_its_picker(self):
         field = formgen.file_widget({"type": "nifti_file", "types": ["nifti_file"]})
@@ -704,11 +721,11 @@ class FileOrFolderInputTest(unittest.TestCase):
         # in the scene, so its picker comes wrapped in the sources dropdown.
         self.assertIsInstance(field, formgen.ServerFileInput)
         self.assertIsInstance(field.local, formgen.FileOrFolderInput)
-        self.assertIsNone(field.local.folderButton)
+        self.assertEqual(field.local.modes, ("file",))
 
         # Wrapping it changes nothing about what the local half offers: the
         # declared extensions still reach the dialog.
-        field.local.fileButton.clicked.emit()
+        field.local.selectButton.clicked.emit()
 
         self.assertIn("Supported files (*.nii *.nii.gz)",
                       qt.QFileDialog.last_open_file_args[3])
@@ -752,7 +769,7 @@ class MultiChoiceLayoutTest(unittest.TestCase):
     """
 
     def _group(self, layout, groups=None):
-        return formgen.MultiChoiceGroup(_LAYOUT_CHOICES, "", layout=layout, groups=groups)
+        return formgen.MultiChoiceGroup(_LAYOUT_CHOICES, layout=layout, groups=groups)
 
     def test_every_layout_reads_back_identically(self):
         for layout, groups in ((None, None), ("inline", None),
@@ -826,7 +843,7 @@ class MultiChoiceLayoutTest(unittest.TestCase):
         many = ["opt{}".format(i) for i in range(40)]
         choices = {option: False for option in few + many}
         group = formgen.MultiChoiceGroup(
-            choices, "", layout="tabs", groups={"Few": few, "Many": many})
+            choices, layout="tabs", groups={"Few": few, "Many": many})
         tabs = [w for w in group.container.layout.widgets if isinstance(w, qt.QTabWidget)][0]
 
         small = tabs.maximumHeight()
@@ -839,7 +856,7 @@ class MultiChoiceLayoutTest(unittest.TestCase):
     def test_the_height_comes_back_when_the_small_tab_does(self):
         few, many = ["a"], ["opt{}".format(i) for i in range(40)]
         group = formgen.MultiChoiceGroup(
-            {option: False for option in few + many}, "",
+            {option: False for option in few + many},
             layout="tabs", groups={"Few": few, "Many": many})
         tabs = [w for w in group.container.layout.widgets if isinstance(w, qt.QTabWidget)][0]
 
@@ -850,7 +867,7 @@ class MultiChoiceLayoutTest(unittest.TestCase):
 
     def test_a_long_catalogue_is_capped_rather_than_pushing_apply_off_screen(self):
         many = {"opt{}".format(i): False for i in range(200)}
-        group = formgen.MultiChoiceGroup(many, "", layout="tabs", groups=None)
+        group = formgen.MultiChoiceGroup(many, layout="tabs", groups=None)
         tabs = [w for w in group.container.layout.widgets if isinstance(w, qt.QTabWidget)][0]
 
         self.assertEqual(tabs.maximumHeight(), design.TABS_MAX_HEIGHT)
@@ -858,7 +875,7 @@ class MultiChoiceLayoutTest(unittest.TestCase):
     def test_a_short_catalogue_no_longer_gets_a_tall_empty_box(self):
         """The floor used to be 220 px whatever the content held."""
         few = {"a": False, "b": True}
-        group = formgen.MultiChoiceGroup(few, "", layout="tabs", groups=None)
+        group = formgen.MultiChoiceGroup(few, layout="tabs", groups=None)
         tabs = [w for w in group.container.layout.widgets if isinstance(w, qt.QTabWidget)][0]
 
         self.assertEqual(tabs.maximumHeight(), design.tabs_height_for(1))
@@ -988,7 +1005,7 @@ class MultiChoiceLayoutTest(unittest.TestCase):
         short = ["Ba", "S", "N", "RPo", "LPo", "C2"]
         long = ["UR3OIPxx", "LFZygxxx", "RFZygxxx", "UL6Oxxxx"]
         group = formgen.MultiChoiceGroup(
-            {option: False for option in short + long}, "",
+            {option: False for option in short + long},
             layout="tabs", groups={"Short": short, "Long": long})
         tabs = [w for w in group.container.layout.widgets if isinstance(w, qt.QTabWidget)][0]
 
@@ -1017,13 +1034,31 @@ class MultiChoiceLayoutTest(unittest.TestCase):
         """The columns ARE the arch. Spreading them across whatever width the
         panel happens to have destroys the adjacency the layout exists to show,
         which is why only the rows take the slack here."""
-        group = self._group("grid", _LAYOUT_GROUPS)
-        area = [w for w in group.container.layout.widgets
-                if isinstance(w, qt.QScrollArea)][0]
-        grid = area.widget.layout
+        grid = self._chart_grid(self._group("grid", _LAYOUT_GROUPS))
 
         self.assertEqual(grid.rowStretch.get(grid.rowCount()), 1)
         self.assertEqual(grid.columnStretch, {})
+
+    def test_the_chart_is_drawn_on_a_table_surface(self):
+        """A tabbed layout gets its frame from QTabWidget::pane; this one has
+        no pane, and without a frame thirty-two chips sat on the panel with no
+        edge saying where the table stopped."""
+        group = self._group("grid", _LAYOUT_GROUPS)
+        frame = group.container.layout.widgets[-1]
+
+        self.assertIn("tableFrame", frame._stylesheet)
+        self.assertIn(design.tokens()["SURFACE_TABLE"], frame._stylesheet)
+        self.assertIn("1px solid {}".format(design.tokens()["BORDER"]),
+                      frame._stylesheet)
+
+    @staticmethod
+    def _chart_grid(group):
+        """The chart's own QGridLayout, through the table frame it now sits
+        in."""
+        frame = group.container.layout.widgets[-1]
+        area = [w for w in frame.layout.widgets
+                if isinstance(w, qt.QScrollArea)][0]
+        return area.widget.layout
 
     def test_no_layout_carries_a_global_selection_bar(self):
         """`All` / `None` / `Default` were three small links under the options.
@@ -1083,7 +1118,7 @@ class FacadeGroupsTest(unittest.TestCase):
     def test_rebuilding_keeps_what_survives_and_defaults_the_rest(self):
         """Switching mode and back must not silently clear a selection."""
         group = formgen.MultiChoiceGroup(
-            {"Ba": False, "S": True}, "", layout="tabs", groups={"Cranial base": ["Ba", "S"]})
+            {"Ba": False, "S": True}, layout="tabs", groups={"Cranial base": ["Ba", "S"]})
         group.boxes["Ba"].setChecked(True)
 
         group.rebuild({"Ba": False, "L0MG": True}, {"Mucogingival Lower": ["L0MG"]})
@@ -1093,7 +1128,7 @@ class FacadeGroupsTest(unittest.TestCase):
         self.assertTrue(group.boxes["L0MG"].isChecked(), "a new one takes its declared default")
 
     def test_rebuilding_with_the_same_options_redraws_nothing(self):
-        group = formgen.MultiChoiceGroup({"a": True, "b": False}, "", layout="tabs")
+        group = formgen.MultiChoiceGroup({"a": True, "b": False}, layout="tabs")
         before = group.boxes["a"]
 
         group.rebuild({"a": True, "b": False}, None)
@@ -1101,7 +1136,7 @@ class FacadeGroupsTest(unittest.TestCase):
         self.assertIs(group.boxes["a"], before)
 
     def test_the_group_still_reads_back_the_complete_state(self):
-        group = formgen.MultiChoiceGroup({"a": True, "b": False}, "", layout="tabs")
+        group = formgen.MultiChoiceGroup({"a": True, "b": False}, layout="tabs")
 
         group.rebuild({"b": False, "c": True}, None)
 
@@ -1368,19 +1403,22 @@ class InputSourcesTest(unittest.TestCase):
         self.temp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.temp, True)
 
-    def test_the_controls_are_one_line_with_the_caption_under_them(self):
-        """Two lines, and only two: the controls, then what they hold.
+    def test_the_row_is_three_lines_source_control_and_answer(self):
+        """The segmented control on top, the chosen source's own control under
+        it, and what came of it underneath.
 
-        The controls stayed on one line -- that was the point of the row and
-        still is. The caption is a line of its own because it is the only place
-        that can name the file and its kind without eliding one of them.
+        The control stayed on ONE line -- that was the point of the row and
+        still is. What changed is that only one control is on it: the four
+        sources used to sit side by side and be kept exclusive by a rule
+        nobody could see.
         """
         column = self.widget.container.layout
         self.assertIsInstance(column, qt.QVBoxLayout)
-        controls = column.widgets[0]
+        self.assertIs(column.widgets[0], self.widget.sourceBar)
+        controls = column.widgets[1]
         self.assertIsInstance(controls.layout, qt.QHBoxLayout)
-        self.assertIs(controls.layout.widgets[0], self.widget.combo)
-        # The second line lives on the PICKER now, so a row without dropdowns
+        self.assertIn(self.widget.combo, controls.layout.widgets)
+        # The last line lives on the PICKER, so a row without extra sources
         # has one too -- a `.csv` argument used to show nothing at all.
         self.assertIs(self.widget.caption, self.widget.local.caption)
 
@@ -1463,14 +1501,14 @@ class InputSourcesTest(unittest.TestCase):
 
         self.assertEqual(self.widget.local.container.toolTip(), path)
 
-    def test_an_open_volume_says_it_is_one(self):
+    def test_an_imported_scan_says_it_is_one(self):
         """Nothing is on disk for it, so `describe_file` has nothing to read --
         and "no file chosen" would be a lie about a satisfied argument."""
         self.widget.sceneCombo.setCurrentIndex(1)
 
-        # Named for what it IS: "Volume" over a surface would be wrong on ALI,
-        # which takes scans, surfaces and landmarks through one argument.
-        self.assertIn("Volume:", self.widget.caption.text)
+        # "Scan", which is true of a CBCT volume and of an intraoral surface
+        # alike -- ALI takes either through the one argument.
+        self.assertIn("Scan:", self.widget.caption.text)
         self.assertIn("CBCT_patient1", self.widget.caption.text)
 
     def test_the_caption_empties_when_the_input_does(self):
@@ -1495,9 +1533,7 @@ class InputSourcesTest(unittest.TestCase):
         )
         self.assertEqual(
             [scene.itemText(i) for i in range(scene.count)],
-            [formgen.ServerFileInput.PROMPT_VOLUMES,
-             formgen.OPEN_VOLUME_PREFIX + "CBCT_patient1",
-             formgen.OPEN_VOLUME_PREFIX + "CBCT_patient2"],
+            [formgen.scene_prompt_for("Scan"), "CBCT_patient1", "CBCT_patient2"],
         )
 
     def test_the_prompt_names_what_the_list_holds(self):
@@ -1525,9 +1561,11 @@ class InputSourcesTest(unittest.TestCase):
         self.widget.setVolumeChoices([])
         self.assertEqual(self.widget.combo.itemText(0),
                          formgen.ServerFileInput.PROMPT_HOSTED)
-        # Shown but GREY: hidden, nobody learns the row can be filled that way
-        # at all -- which is exactly how the feature looked missing on every
-        # module but the one whose scene happened to hold the right kind.
+
+        # Offered but GREY: without the segment nobody learns the row can be
+        # filled that way at all -- which is exactly how the feature looked
+        # missing on every module but the one whose scene happened to match.
+        self.widget._chooseSource(formgen.ServerFileInput.SOURCE_SCENE)
         self.assertTrue(self.widget.sceneCombo.isVisible())
         self.assertFalse(self.widget.sceneCombo._enabled)
 
@@ -1536,6 +1574,7 @@ class InputSourcesTest(unittest.TestCase):
         self.assertEqual(self.widget.combo.itemText(0),
                          formgen.ServerFileInput.CHOOSE_OPTION)
         self.assertTrue(self.widget.sceneCombo.isVisible())
+        self.assertTrue(self.widget.sceneCombo._enabled)
 
     def test_an_empty_list_keeps_the_neutral_words(self):
         self.widget.setChoices([])
@@ -1558,7 +1597,7 @@ class InputSourcesTest(unittest.TestCase):
         self.assertEqual(self.widget.combo.toolTip(),
                          formgen.ServerFileInput.PROMPT_HOSTED)
         self.assertEqual(self.widget.sceneCombo.toolTip(),
-                         formgen.ServerFileInput.PROMPT_VOLUMES)
+                         formgen.scene_prompt_for("Scan"))
 
     def test_the_default_state_names_nothing(self):
         self.assertEqual(self.widget.hosted_name(), "")
@@ -1659,8 +1698,8 @@ class InputSourcesTest(unittest.TestCase):
 
     def test_a_test_file_named_like_a_volume_entry_is_not_misread(self):
         # Selection kind is decided by index, so even a hosted file named
-        # like a volume entry stays a hosted selection.
-        tricky = formgen.OPEN_VOLUME_PREFIX + "CBCT_patient1"
+        # exactly like a scene entry stays a hosted selection.
+        tricky = "CBCT_patient1"
         self.widget.setChoices([{"name": tricky, "kind": None, "size": None}])
 
         self.widget.combo.setCurrentIndex(1)
@@ -1876,11 +1915,18 @@ class JoystickWidgetTest(unittest.TestCase):
         pad.setValues(1.0, 1.0, notify=True)
         self.assertEqual(widget.value(), [3.0, 2.0])
 
-    def test_the_description_is_shown_above_the_widgets(self):
-        widget = formgen._make_widget("k", _vec2(ui="joystick", description="Move the landmark"))
-        laid_out = widget.container.layout.widgets
-        self.assertIsInstance(laid_out[0], qt.QLabel)
-        self.assertEqual(laid_out[0].text, "Move the landmark")
+    def test_the_description_is_hovered_rather_than_printed(self):
+        """It was printed above the pad, as a small grey paragraph. Every
+        argument's description is the row label's tooltip now; a pad that also
+        printed its own would be the one field on the panel saying it twice."""
+        schema = {"k": _vec2(ui="joystick", description="Move the landmark")}
+        layout = qt.QFormLayout()
+        formgen.build(schema, layout)
+        label, field = layout.rows[0]
+
+        printed = [w.text for w in field.layout.widgets if getattr(w, "text", None)]
+        self.assertNotIn("Move the landmark", printed)
+        self.assertEqual(label.toolTip(), "Move the landmark")
 
     def test_an_invalid_range_falls_back_to_the_unit_axis(self):
         widget = self._one(_vec2(ui="joystick", x_range=[3], y_range=[0, 1]))
@@ -1996,7 +2042,7 @@ class ToolTipStyleTest(unittest.TestCase):
         disappears in dark, which is the theme nobody tests in. Each colour the
         rule resolves to has to be a value the token table actually holds."""
         for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
-            rule = re.search(r"QToolTip \{(.*?)\n      \}",
+            rule = re.search(r"QToolTip \{(.*?)\n    \}",
                              design._base_stylesheet(theme), re.S).group(1)
             colours = re.findall(r"#[0-9a-fA-F]{3,8}", rule)
             self.assertTrue(colours, name)
@@ -2006,16 +2052,16 @@ class ToolTipStyleTest(unittest.TestCase):
     def test_the_two_themes_do_not_resolve_to_the_same_bubble(self):
         """A rule that renders identically in both is one that took its colours
         from somewhere other than the palette."""
-        light = re.search(r"QToolTip \{(.*?)\n      \}",
+        light = re.search(r"QToolTip \{(.*?)\n    \}",
                           design._base_stylesheet(design._LIGHT), re.S).group(1)
-        dark = re.search(r"QToolTip \{(.*?)\n      \}",
+        dark = re.search(r"QToolTip \{(.*?)\n    \}",
                          design._base_stylesheet(design._DARK), re.S).group(1)
         self.assertNotEqual(light, dark)
 
 
 
 class MultiChoiceTooltipTest(unittest.TestCase):
-    """A group's description is shown, not hovered."""
+    """A group's description never lands on the group itself."""
 
     CHOICES = {"Ba": False, "S": False, "N": False}
     NOTE = ("Predict exactly these landmarks -- naming any of them REPLACES the "
@@ -2026,13 +2072,13 @@ class MultiChoiceTooltipTest(unittest.TestCase):
         """Qt hands a container's tooltip to every child that has none, so this
         paragraph popped up under each of ALI's 236 chips -- printed and hovered
         at once, and the hovered copy is the one nobody asked for."""
-        group = formgen.MultiChoiceGroup(self.CHOICES, self.NOTE)
+        group = formgen.MultiChoiceGroup(self.CHOICES)
         group.setToolTip(self.NOTE)
         self.assertFalse(group.container._tooltip)
 
     def test_every_other_composite_still_takes_one(self):
-        """Only the multichoice shows its description already. A file picker's
-        tooltip says which path it holds, and nothing else says that."""
+        """Only the multichoice refuses it. A file picker's tooltip says which
+        path it holds, and nothing else says that."""
         field = formgen.FileOrFolderInput()
         field.setToolTip("/data/patient/scan.nii.gz")
         self.assertEqual(field.container._tooltip, "/data/patient/scan.nii.gz")
@@ -2051,7 +2097,7 @@ class OptionHelpTest(unittest.TestCase):
 
     def _group(self, layout=None, help_texts=None, groups=None):
         return formgen.MultiChoiceGroup(
-            self.CHOICES, "", layout=layout, groups=groups,
+            self.CHOICES, layout=layout, groups=groups,
             option_help=self.HELP if help_texts is None else help_texts)
 
     def test_the_named_option_carries_its_line(self):
@@ -2107,7 +2153,7 @@ class ChipsLayoutTest(unittest.TestCase):
 
     def _group(self, groups=None, help_texts=None):
         return formgen.MultiChoiceGroup(
-            {option: False for option in self.STRUCTURES}, "",
+            {option: False for option in self.STRUCTURES},
             layout="chips", groups=groups, option_help=help_texts)
 
     def _grid(self, group, index=0):
@@ -2369,51 +2415,742 @@ class DescribeFolderTest(unittest.TestCase):
                       formgen.describe_file(os.path.join(self.dir, "scan.nii.gz")))
 
 
-class SelectionLabelTest(unittest.TestCase):
-    """The row's second line is feedback, not a footnote.
+class ValueFieldTest(unittest.TestCase):
+    """The box on the LEFT of an input row, saying what the row holds.
 
-    There is no path field any more and a dropdown returns to its prompt as
-    soon as it is picked, so this line is the ONLY thing saying a choice
-    registered. Rendered as a hint -- muted, 8pt -- it read as explanatory text
-    a reader may skip, and a clinician who had just chosen a scan could not
-    tell whether the panel had taken it.
+    It replaced a wrapped label on a line of its own under the controls --
+    three lines per input, on a panel where ASO has four of them. The row is
+    the ordinary file-picker shape now: the value on the left, the button that
+    changes it on the right.
     """
+
+    def test_it_is_read_only_and_says_so_to_Qt(self):
+        """There IS no typing path into a row, so a box a clinician can type a
+        path into which is then ignored is worse than no box. Enforced rather
+        than implied."""
+        self.assertTrue(design.value_field("Nothing selected").isReadOnly())
+
+    def test_it_shows_its_text_from_the_start(self):
+        """A path is longest on its left and a file name is what a reader is
+        looking for, so a box scrolled to the end shows the one part that means
+        nothing."""
+        self.assertEqual(design.value_field("/very/long/path/scan.nii.gz").cursorPosition, 0)
 
     def test_it_is_the_largest_text_on_the_row(self):
         """Raised twice before it read as feedback: 8pt muted was a footnote,
         10pt was still close enough to the surrounding text to be scanned
-        past. Everything above this line is a control offering a choice; this
+        past. Everything else on the row is a control offering a choice; this
         is the answer, and it should be the thing the eye lands on."""
-        selection = design.selection_label("Folder: /data/cohort")
+        value = design.value_field("Folder: /data/cohort")
         hint = design.hint_label("CBCT only: ignored for intraoral scans")
 
-        self.assertIn("font-size: 12pt", selection._stylesheet)
-        self.assertIn("font-weight: 600", selection._stylesheet)
+        self.assertIn("font-size: 12pt", value._stylesheet)
         self.assertIn("font-size: 8pt", hint._stylesheet)
 
-    def test_it_is_still_a_statement_and_not_a_control(self):
-        """No border, no fill: a filled block here would read as a third thing
-        to click, beside two dropdowns and two buttons."""
-        style = design.selection_label("Folder: /data/cohort")._stylesheet
+    def test_it_only_shouts_once_the_row_holds_something(self):
+        """Empty it reads "Nothing selected" -- a prompt in full-strength
+        semi-bold is a panel of four inputs all demanding attention. The weight
+        and the colour are what change when a scan actually lands."""
+        field = design.value_field("Nothing selected")
+        empty = field._stylesheet
 
-        self.assertNotIn("border", style)
-        self.assertNotIn("background", style)
+        design.set_input_filled(design.input_card(), field, True)
 
-    def test_it_uses_the_body_colour_not_the_muted_one(self):
-        selection = design.selection_label("Folder: /data/cohort")
+        self.assertIn("font-weight: 500", empty)
+        self.assertIn("font-weight: 600", field._stylesheet)
 
-        self.assertIn(design.tokens()["TEXT"], selection._stylesheet)
-        self.assertNotIn(design.tokens()["TEXT_MUTED"], selection._stylesheet)
+    def test_it_is_not_a_second_slot_inside_the_first(self):
+        """It sits INSIDE the input card, which is itself a filled slot: a box
+        in a box, in the same colour, is to say invisible. Both declarations
+        are explicit because the panel's own QLineEdit rule would otherwise
+        fill and round it like a field to type in."""
+        style = design.value_field("Folder: /data/cohort")._stylesheet
 
-    def test_it_wraps_rather_than_eliding(self):
-        """A full path is long, and the whole reason this line replaced the
-        field is that a field could only show a fragment of one."""
-        selection = design.selection_label("Folder: " + "/very/long/path" * 8)
+        self.assertIn("background: transparent", style)
+        self.assertIn("border: none", style)
 
-        self.assertTrue(selection.wordWrap)
+    def test_a_filled_row_uses_the_body_colour_not_the_muted_one(self):
+        field = design.value_field("Folder: /data/cohort")
+        design.set_input_filled(design.input_card(), field, True)
+
+        self.assertIn(design.tokens()["TEXT"], field._stylesheet)
+        self.assertNotIn(design.tokens()["TEXT_MUTED"], field._stylesheet)
 
     def test_both_themes_define_what_it_needs(self):
         """A colour defined in one theme and not the other is a KeyError in
         the theme nobody tests in."""
         for theme in (design._LIGHT, design._DARK):
             self.assertIn("TEXT", theme)
+
+
+class ThemeSymmetryTest(unittest.TestCase):
+    """A token defined in one theme and not the other is a KeyError in the
+    theme nobody tests in -- and the theme nobody tests in is whichever one the
+    author was not running."""
+
+    def test_the_two_tables_hold_exactly_the_same_names(self):
+        self.assertEqual(set(design._LIGHT), set(design._DARK))
+
+    def test_no_token_has_the_same_value_in_both(self):
+        """Not a style rule -- a detection. A value that survived a palette
+        rewrite unchanged in both tables is one that was never re-chosen for
+        the second theme."""
+        shared = [name for name in design._LIGHT
+                  if design._LIGHT[name] == design._DARK[name]
+                  and name not in ("DANGER",)]
+        self.assertEqual(shared, [], "carried over rather than chosen")
+
+    def test_the_ground_is_told_from_everything_standing_on_it(self):
+        """The one separation a line cannot make: the panel's ground has no
+        edge of its own, so a card standing on it has to differ in colour or
+        the panel is one flat sheet."""
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            self.assertNotEqual(theme["BACKGROUND"], theme["SURFACE"], name)
+
+    def test_a_chosen_slot_cannot_be_mistaken_for_an_empty_one(self):
+        """`FIELD` and `ACCENT_SOFT` are the two states of an input row, and
+        the only thing that tells them apart now that neither is outlined."""
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            self.assertNotEqual(theme["FIELD"], theme["ACCENT_SOFT"], name)
+
+
+class DropdownArrowTest(unittest.TestCase):
+    """A dropdown has to look like one. It had Qt's default arrow -- a grey
+    triangle a few pixels across -- so next to a spin box of the same size and
+    the same outline, nothing said there was a list behind it.
+
+    **And then, for a while, it had no arrow at all.** The chevron shipped as
+    `url("data:image/svg+xml,<svg .../>")` and on this Slicer Qt that draws
+    nothing: the sheet parses, the rule applies, the image is never resolved,
+    and the only symptom is a light blue square at the end of the box. The
+    icons are written to real files now and referenced by path.
+    """
+
+    def test_the_stylesheet_points_at_a_file_that_exists(self):
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            sheet = design._base_stylesheet(theme)
+            paths = re.findall(r'image: url\("([^"]+)"\)', sheet)
+            self.assertTrue(paths, name)
+            for path in paths:
+                self.assertTrue(os.path.exists(path), "{}: {}".format(name, path))
+
+    def test_it_is_never_a_data_uri(self):
+        """The whole reason the arrow was missing. Pinned so it cannot come
+        back looking like a tidy-up."""
+        self.assertNotIn("data:image", design._base_stylesheet(design._LIGHT))
+
+    def test_the_chevron_is_a_filled_path_and_not_a_stroked_line(self):
+        """Qt renders SVG Tiny, where a fill is the one thing every renderer
+        of that profile agrees on. A stroked polyline needs four properties to
+        all land, and when one does not the shape is not wrong -- it is
+        absent."""
+        svg = design._chevron_svg("#1f6fbf")
+
+        self.assertIn("fill='#1f6fbf'", svg)
+        self.assertNotIn("stroke", svg)
+
+    def test_the_open_state_points_the_other_way(self):
+        """The only feedback a collapsed combo box gives that its list is
+        down."""
+        self.assertNotEqual(design._chevron_svg("#1f6fbf"),
+                            design._chevron_svg("#1f6fbf", up=True))
+
+    def test_each_theme_gets_a_file_of_its_own(self):
+        """The file is named after a digest of its contents, so a changed
+        colour is a different file and a stale one is never picked up."""
+        light = design._icon_url(design._chevron_svg(design._LIGHT["PRIMARY"]))
+        dark = design._icon_url(design._chevron_svg(design._DARK["PRIMARY"]))
+
+        self.assertNotEqual(light, dark)
+        self.assertIn(design._LIGHT["PRIMARY"], io.open(light).read())
+        self.assertIn(design._DARK["PRIMARY"], io.open(dark).read())
+
+    def test_an_icon_that_cannot_be_written_leaves_the_rule_out(self):
+        """Which falls back to the platform's own arrow. Drawing `url("")`
+        instead would be the missing-arrow bug again, by another route."""
+        design._ICON_FILES.clear()
+        self.addCleanup(design._ICON_FILES.clear)
+        original = design._icon_dir
+        design._icon_dir = lambda: "/proc/nowhere/sadt"
+        self.addCleanup(setattr, design, "_icon_dir", original)
+
+        self.assertEqual(design._image_rule("<svg/>"), "")
+
+    def test_both_themes_draw_an_arrow_of_their_own(self):
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            sheet = design._base_stylesheet(theme)
+            self.assertIn("QComboBox::down-arrow", sheet, name)
+            self.assertIn("QComboBox::drop-down", sheet, name)
+
+    def test_the_text_clears_the_arrow_zone(self):
+        """Without the right padding a long hosted entry runs under the
+        chevron rather than being elided before it."""
+        sheet = design._base_stylesheet(design._LIGHT)
+        self.assertIn(
+            "padding-right: {}px".format(
+                design.DROPDOWN_ARROW_WIDTH + design.SPACING_MD),
+            sheet)
+
+
+class TableSurfaceTest(unittest.TestCase):
+    """ASO's landmark chooser is a table, and a table is an object you look
+    into -- not a region of the panel's own ground with a hairline round it."""
+
+    def test_the_pane_is_an_outlined_surface(self):
+        """It was filled in its own colour and given a border of that same
+        colour -- which on this palette is a white table on a white card, with
+        nothing at all saying where it starts."""
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            rule = re.search(r"QTabWidget::pane \{(.*?)\n    \}",
+                             design._base_stylesheet(theme), re.S).group(1)
+            self.assertIn("background-color: {}".format(theme["SURFACE_TABLE"]),
+                          rule, name)
+            self.assertIn("border: 1px solid {}".format(theme["BORDER"]), rule, name)
+
+    def test_a_tab_changes_nothing_but_its_colours_when_chosen(self):
+        """Qt sizes a tab from what it holds when the bar is laid out, so
+        anything that changed its box with the selection would make the open
+        tab wider than its own slot and clip its label -- `Cranial base`
+        rendered as `ranial bas`. Only fills and text colours move."""
+        sheet = design._base_stylesheet(design._LIGHT)
+        selected = re.search(r"QTabBar::tab:selected \{(.*?)\n    \}",
+                             sheet, re.S).group(1)
+        for property_name in ("border", "padding", "margin", "font"):
+            self.assertNotIn(property_name + ":", selected)
+
+    def test_a_table_frame_styles_itself_and_not_its_children(self):
+        """An id selector, because every child of it holds a control that has
+        to keep the styling the panel's own sheet gives it."""
+        frame = design.table_frame()
+        self.assertTrue(frame._stylesheet.startswith("#tableFrame"))
+
+
+class ChipGroupSpacingTest(unittest.TestCase):
+    """AMASSS declares three groups -- Bones, Soft tissue, Masks -- and they
+    were drawn at the column's own 4px option spacing, so `Soft tissue` sat as
+    close to the last chip of `Bones` as two chips of one group sit to each
+    other. Three groups, read as one run of nine."""
+
+    STRUCTURES = {"MAND": False, "MAX": False, "SKIN": False, "UAW": False}
+    GROUPS = {"Bones": ["MAND", "MAX"], "Soft tissue": ["SKIN", "UAW"]}
+
+    def _headings(self):
+        group = formgen.MultiChoiceGroup(
+            dict(self.STRUCTURES), layout="chips", groups=self.GROUPS)
+        return [w for w in group.container.layout.widgets
+                if getattr(w, "text", None) in self.GROUPS]
+
+    def test_every_group_still_gets_its_heading(self):
+        self.assertEqual([w.text for w in self._headings()],
+                         ["Bones", "Soft tissue"])
+
+    def test_a_heading_carries_its_air_above_it_and_none_below(self):
+        """The heading and the chips it names are ONE block: every pixel spent
+        separating them is a pixel that pushes the third group out of the eye's
+        first pass, and comparing the three at a glance is the whole point of
+        grouping them."""
+        for heading in self._headings():
+            self.assertIn("margin-top", heading._stylesheet)
+            self.assertIn("padding: 0px", heading._stylesheet)
+            self.assertNotIn("border-bottom", heading._stylesheet)
+
+
+    def test_the_heading_is_not_shrunk_to_make_room(self):
+        """Compactness comes from taking out the padding and the rule, never
+        from making the words smaller: this panel has been told twice that its
+        small text cannot be read."""
+        self.assertNotIn("font-size", design.group_heading("Soft tissue")._stylesheet)
+
+    def test_it_is_not_the_plain_section_title_it_used_to_be(self):
+        self.assertNotEqual(design.group_heading("Bones")._stylesheet,
+                            design.section_title("Bones")._stylesheet)
+
+
+class ExplainedLabelTest(unittest.TestCase):
+    """The argument's description used to be printed under the field, as a
+    small grey paragraph. It is the label's tooltip now, and the label says so
+    with a dotted rule -- the oldest convention there is for "there is more
+    here if you hover", and one that costs the label no words."""
+
+    def _label(self, name):
+        """The row label of one argument, found by the words it shows."""
+        spec = EXAMPLE_TOOL_SCHEMA["arguments"][name]
+        wanted = formgen.label_for(name, spec)
+        layout = qt.QFormLayout()
+        formgen.build(EXAMPLE_TOOL_SCHEMA["arguments"], layout)
+        return [label for label, _field in layout.rows
+                if label.text.startswith(wanted)][0]
+
+    def test_an_explained_field_is_marked_and_hovered(self):
+        label = self._label("outputs")
+        self.assertIn("dotted", label._stylesheet)
+        self.assertEqual(label.toolTip(), "Which result files to produce")
+
+    def test_a_field_with_nothing_to_say_carries_no_rule(self):
+        plain = design.section_title("Jaws")
+        self.assertNotIn("dotted", plain._stylesheet)
+        self.assertNotIn("border-bottom", plain._stylesheet)
+
+    def test_the_mark_survives_the_required_star(self):
+        self.assertIn("dotted", design.required_label("Input", True)._stylesheet)
+        self.assertIn("dotted", design.optional_label("Landmarks", True)._stylesheet)
+
+
+class InputCardTest(unittest.TestCase):
+    """One input row is up to five controls on one line -- two dropdowns, two
+    browse buttons -- and a sentence under them. Laid out bare that is five
+    shapes and no edge anywhere, and the question a clinician actually has
+    ("have I given this tool its scan yet?") was answered only by a line of
+    12pt text among all of it.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.temp, True)
+        self.scan = os.path.join(self.temp, "patient1.nii.gz")
+        with open(self.scan, "wb") as handle:
+            handle.write(b"0" * 32)
+
+    def test_an_untouched_row_goes_white_against_the_panels_ground(self):
+        """Which is the whole of what it needs to say -- see
+        EverythingIsOutlinedTest for why this one block carries no line."""
+        row = formgen.FileOrFolderInput()
+        self.assertIn(design.tokens()["SURFACE"], row.container._stylesheet)
+        self.assertIn("border: none", row.container._stylesheet)
+
+    def test_a_filled_row_takes_the_accent(self):
+        row = formgen.FileOrFolderInput()
+        row.setCurrentPath(self.scan)
+
+        self.assertIn(design.tokens()["ACCENT_SOFT"], row.container._stylesheet)
+
+    def test_emptying_it_again_takes_the_accent_back(self):
+        row = formgen.FileOrFolderInput()
+        row.setCurrentPath(self.scan)
+        row.setCurrentPath("")
+
+        self.assertNotIn(design.tokens()["ACCENT_SOFT"], row.container._stylesheet)
+
+    def test_only_the_fill_changes_with_the_state(self):
+        """It is the outermost thing on the row: anything that changed its box
+        would move every control inside it by a pixel the moment a file was
+        chosen."""
+        row = formgen.FileOrFolderInput()
+        empty = row.container._stylesheet
+        row.setCurrentPath(self.scan)
+        filled = row.container._stylesheet
+
+        strip = lambda sheet: re.sub(r"background-color:[^;]*;", "", sheet)
+        self.assertEqual(strip(empty), strip(filled))
+
+    def test_it_styles_itself_and_not_the_controls_inside_it(self):
+        """Every child of the card holds a control that has to keep the
+        styling the panel's own sheet gives it."""
+        self.assertTrue(formgen.FileOrFolderInput().container._stylesheet
+                        .startswith("#inputCard"))
+
+    def test_a_wrapped_row_paints_the_box_the_panel_actually_shows(self):
+        """The picker inside a `ServerFileInput` is never added to a layout --
+        only its buttons are -- so painting its own card would leave the box a
+        clinician can see saying the row is still empty."""
+        widget = formgen.file_widget(_VOLUME_SPEC, "file_or_folder")
+        widget.setChoices([{"name": "MG_test_scan.nii.gz", "kind": "file", "size": 94}])
+        formgen.set_local_path(widget, self.scan)
+
+        self.assertIn(design.tokens()["ACCENT_SOFT"], widget.container._stylesheet)
+
+    def test_a_scene_pick_fills_the_row_though_no_path_was_chosen(self):
+        """An open volume is exported at upload time and has no local path at
+        all, so a card driven off `currentPath` would call a satisfied row
+        empty."""
+        widget = formgen.file_widget(_VOLUME_SPEC, "file_or_folder")
+        widget.setSceneSupported(True)
+        widget.setVolumeChoices(["CBCT_patient1"])
+        widget.sceneCombo.setCurrentIndex(1)
+
+        self.assertTrue(widget.volume_name(), "the scene pick did not register")
+        self.assertIn(design.tokens()["ACCENT_SOFT"], widget.container._stylesheet)
+
+    def test_the_line_inside_it_says_the_same_thing_the_box_does(self):
+        """The box says THAT the row is satisfied and the line says WITH WHAT.
+        A panel where those two disagreed would be worse than either alone."""
+        row = formgen.FileOrFolderInput()
+        row.setCurrentPath(self.scan)
+
+        self.assertIn("patient1.nii.gz", row.caption.text)
+        self.assertIn("font-weight: 600", row.caption._stylesheet)
+
+
+class EverythingIsOutlinedTest(unittest.TestCase):
+    """Every control a clinician operates is a white surface with a hairline
+    round it -- and the line is what separates it from the card it sits on,
+    which is why the two can be the same colour.
+
+    A borderless treatment was built and compared against this one on a real
+    panel: a control as a tinted slot sunk into its card, no lines anywhere. It
+    read as washed out on the screens this actually runs on, and the fills it
+    depended on kept drifting together. What is pinned here is the decision.
+    """
+
+    #: The rules that draw a control the user acts on.
+    CONTROLS = ("QLineEdit", "QComboBox", "QSpinBox", "QCheckBox::indicator",
+                "QTabWidget::pane", "QTabBar::tab", "QProgressBar")
+
+    def _sheet(self, theme):
+        return re.sub(r"/\*.*?\*/", "", design._base_stylesheet(theme), flags=re.S)
+
+    def test_every_control_carries_the_hairline(self):
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            sheet = self._sheet(theme)
+            for selector in self.CONTROLS:
+                rule = re.search(re.escape(selector) + r"[^{}]*\{([^{}]*)\}", sheet)
+                self.assertIsNotNone(rule, "{}: {}".format(name, selector))
+                self.assertIn("1px solid {}".format(theme["BORDER"]), rule.group(1),
+                              "{}: {}".format(name, selector))
+
+    def test_the_edge_is_one_pixel_in_every_state(self):
+        """Only the COLOUR moves. A hairline that thickened on focus would grow
+        its field by a pixel under the pointer, Qt laying a row out from the
+        border box -- and a tab that did it would clip its own label."""
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            widths = set(re.findall(r"border:\s*(\d+)px solid", self._sheet(theme)))
+            self.assertEqual(widths, {"1"}, name)
+
+    def test_the_accent_is_what_a_focused_control_takes(self):
+        sheet = self._sheet(design._LIGHT)
+        self.assertIn("border-color: {}".format(design._LIGHT["PRIMARY"]), sheet)
+
+    def test_a_filled_surface_factory_carries_it_too(self):
+        """The trap the borderless pass left behind: on this palette FIELD and
+        SURFACE are both white, so a chip or a frame filled with one and given
+        no edge is white on white -- an option nobody can see until they hover
+        it."""
+        for widget in (design.option_chip("MAND"), design.segment_button("File"),
+                       design.ghost_button("Select all"),
+                       design.table_frame(), design.cohort_frame()):
+            self.assertIn("1px solid", widget._stylesheet, widget)
+
+    def test_the_input_row_is_the_one_exception(self):
+        """A hairline separates a CONTROL from the card it sits on. An input
+        row is not a control -- it is a block standing on the panel's own grey
+        ground, and going white against that ground already says where it
+        starts. An outline on it was the fifth line in a row of four, drawn
+        round something that was not in any doubt."""
+        card = design.input_card()
+
+        self.assertIn("border: none", card._stylesheet)
+        self.assertIn(design.tokens()["SURFACE"], card._stylesheet)
+
+
+class EveryColourComesFromTheTablesTest(unittest.TestCase):
+    """The trap: a hard-coded hex survives light mode and disappears in dark,
+    which is the theme nobody tests in. Checked over the WHOLE sheet rather
+    than one rule at a time -- the tooltip-only version of this test was
+    passing while six other rules carried their own colours."""
+
+    def _sources(self, theme, fills):
+        known = set(theme.values())
+        known |= {colour for role in fills.values() for colour in role.values()}
+        known |= {design._TOGGLE_OFF, design._TOGGLE_ON}
+        return known
+
+    def test_no_rule_invents_a_colour(self):
+        for name, theme, fills in (
+                ("light", design._LIGHT, design._BUTTON_FILLS_LIGHT),
+                ("dark", design._DARK, design._BUTTON_FILLS_DARK)):
+            known = self._sources(theme, fills)
+            body = re.sub(r"/\*.*?\*/", "", design._base_stylesheet(theme), flags=re.S)
+            loose = {found for found in re.findall(r"#[0-9a-fA-F]{6}", body)
+                     if found not in known}
+            self.assertEqual(loose, set(), name)
+
+    def test_the_chevron_is_drawn_in_the_accent_of_its_own_theme(self):
+        """It is a drawn icon, so its colour is baked into a file -- the one
+        place a theme colour could be frozen without anyone noticing."""
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            drawn = design._icon_url(design._chevron_svg(theme["PRIMARY"]))
+            self.assertIn(theme["PRIMARY"], io.open(drawn).read(), name)
+
+    def test_a_sheet_rendered_for_one_theme_holds_that_themes_buttons(self):
+        """`_button_stylesheet` took a palette and then asked the application
+        which theme it was, so a caller handing it one got the buttons of the
+        other. Harmless while only `apply` calls it -- and exactly the kind of
+        agreement that holds until it does not."""
+        dark = design._base_stylesheet(design._DARK)
+        self.assertIn(design._BUTTON_FILLS_DARK["primary"]["base"], dark)
+        self.assertNotIn(design._BUTTON_FILLS_LIGHT["primary"]["base"], dark)
+
+
+class OneSourceAtATimeTest(unittest.TestCase):
+    """A file argument can be satisfied four ways -- a file on this machine, a
+    folder, the test data the server hosts, a scan already open in Slicer --
+    and exactly one at a time.
+
+    That rule used to be enforced invisibly: all four controls sat on the row
+    at once and picking in one silently emptied the others. Now the rule IS the
+    interface -- one segment pressed, one control on the row.
+    """
+
+    SOURCES = formgen.ServerFileInput
+
+    def setUp(self):
+        self.temp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.temp, True)
+        self.widget = formgen.file_widget(_VOLUME_SPEC, "file_or_folder")
+        self.widget.setChoices([
+            {"name": "MG_test_scan.nii.gz", "kind": "file", "size": 94},
+        ])
+        self.widget.setSceneSupported(True)
+        self.widget.setVolumeChoices(["CBCT_patient1"])
+
+    def _file(self, name="patient1.nii.gz"):
+        path = os.path.join(self.temp, name)
+        with open(path, "wb") as handle:
+            handle.write(b"0" * 16)
+        return path
+
+    def test_all_four_sources_are_offered(self):
+        self.assertEqual(list(self.widget.sourceButtons),
+                         [self.SOURCES.SOURCE_FILE, self.SOURCES.SOURCE_FOLDER,
+                          self.SOURCES.SOURCE_HOSTED, self.SOURCES.SOURCE_SCENE])
+
+    def test_exactly_one_segment_is_pressed(self):
+        for key in list(self.widget.sourceButtons):
+            self.widget.sourceButtons[key].click()
+            pressed = [name for name, button in self.widget.sourceButtons.items()
+                       if button.isChecked()]
+            self.assertEqual(pressed, [key])
+
+    def test_exactly_one_control_is_on_the_right_of_the_row(self):
+        """Three controls share the right-hand slot -- the `Select` button
+        serving both local sources, and the two lists -- and which one is SHOWN
+        is the whole answer to "where is this input coming from"."""
+        controls = {
+            "select": self.widget.local.selectButton,
+            "hosted": self.widget.combo,
+            "scene": self.widget.sceneCombo,
+        }
+        expected = {
+            self.SOURCES.SOURCE_FILE: "select",
+            self.SOURCES.SOURCE_FOLDER: "select",
+            self.SOURCES.SOURCE_HOSTED: "hosted",
+            self.SOURCES.SOURCE_SCENE: "scene",
+        }
+        for key in list(self.widget.sourceButtons):
+            self.widget.sourceButtons[key].click()
+            shown = [name for name, widget in controls.items() if widget.isVisible()]
+            self.assertEqual(shown, [expected[key]], key)
+
+    def test_the_value_field_is_never_the_one_that_hides(self):
+        """Every source fills the same row, and what it holds is the one thing
+        that does not depend on where it came from."""
+        for key in list(self.widget.sourceButtons):
+            self.widget.sourceButtons[key].click()
+            self.assertTrue(self.widget.caption.isVisible(), key)
+
+    def test_the_button_opens_the_dialog_the_chosen_source_asks_for(self):
+        """Which is why it can say `Select` rather than naming a kind the
+        pressed segment already names."""
+        self.widget.sourceButtons[self.SOURCES.SOURCE_FOLDER].click()
+        self.assertEqual(self.widget.local._mode, "folder")
+
+        self.widget.sourceButtons[self.SOURCES.SOURCE_FILE].click()
+        self.assertEqual(self.widget.local._mode, "file")
+
+    def test_switching_source_empties_the_row(self):
+        """Emptying is the point rather than a side effect: a row that kept its
+        scan while showing the folder button would be saying two things at
+        once."""
+        self.widget.sourceButtons[self.SOURCES.SOURCE_FILE].click()
+        formgen.set_local_path(self.widget, self._file())
+        self.assertTrue(self.widget.currentPath)
+
+        self.widget.sourceButtons[self.SOURCES.SOURCE_SCENE].click()
+
+        self.assertEqual(self.widget.currentPath, "")
+        self.assertEqual(self.widget.caption.text, formgen.NOTHING_CHOSEN)
+
+    def test_a_row_with_one_source_shows_no_segments_at_all(self):
+        """A choice of one is not a choice, and a single pressed segment over
+        a lone control is a decoration that looks like a decision."""
+        alone = formgen.file_widget(dict(_VOLUME_SPEC, server_selectable=None),
+                                    "single_file")
+        self.assertEqual(alone.sourceButtons, {})
+        self.assertFalse(alone.sourceBar.isVisible())
+
+    def test_a_source_that_arrives_late_gets_its_segment(self):
+        """The hosted list arrives with the schema and the scene list is
+        refreshed on every enter(): what a row can be filled from moves under
+        the panel, so the bar is rebuilt rather than drawn once."""
+        late = formgen.file_widget(_VOLUME_SPEC, "single_file")
+        self.assertNotIn(self.SOURCES.SOURCE_HOSTED, late.sourceButtons)
+
+        late.setChoices([{"name": "MG_test_scan.nii.gz", "kind": "file", "size": 1}])
+
+        self.assertIn(self.SOURCES.SOURCE_HOSTED, late.sourceButtons)
+
+    def test_the_chosen_source_survives_a_refresh_that_still_offers_it(self):
+        """Both lists are refreshed on every enter(), and a refresh must not
+        silently move the row back to its first source."""
+        self.widget.sourceButtons[self.SOURCES.SOURCE_SCENE].click()
+
+        self.widget.setVolumeChoices(["CBCT_patient1", "CBCT_patient2"])
+
+        self.assertTrue(
+            self.widget.sourceButtons[self.SOURCES.SOURCE_SCENE].isChecked())
+
+    def test_a_source_that_goes_away_hands_the_row_to_another(self):
+        """A tool whose DATA/ folder was emptied between two runs, while the
+        row was sitting on its test data."""
+        self.widget.sourceButtons[self.SOURCES.SOURCE_HOSTED].click()
+
+        self.widget.setChoices([])
+
+        self.assertNotIn(self.SOURCES.SOURCE_HOSTED, self.widget.sourceButtons)
+        self.assertEqual(self.widget._source, self.SOURCES.SOURCE_FILE)
+        self.assertTrue(self.widget.local.selectButton.isVisible())
+
+    def test_a_hosted_model_calls_its_segment_what_it_is(self):
+        """A model is never fetched -- the weights stay on the server and the
+        run names them -- so `Test data` would be wrong twice over."""
+        row = formgen.file_widget(dict(_VOLUME_SPEC, server_selectable="model"),
+                                  "single_file")
+        row.setChoices([{"name": "AMASSS_models", "kind": "folder", "size": 1}])
+
+        self.assertEqual(row.sourceButtons[self.SOURCES.SOURCE_HOSTED].text,
+                         self.SOURCES.SOURCE_MODEL_LABEL)
+
+    def test_every_segment_says_what_it_means_on_hover(self):
+        """Four one-word labels on a narrow panel: `Imported` alone does not
+        say imported into WHAT."""
+        for button in self.widget.sourceButtons.values():
+            self.assertTrue(button.toolTip())
+
+
+class TheSurfacesAreTellingApartTest(unittest.TestCase):
+    """With no outlines anywhere, the only thing separating a control from what
+    holds it is how far apart their two fills are. The first borderless pass
+    put BACKGROUND at #e8ecf2 and FIELD at #e7ebf1 -- ONE count apart -- and
+    the panel read as washed out because it was."""
+
+    #: Perceived-brightness gap two neighbouring surfaces must clear. Eight is
+    #: about where a step stops being deniable on a mid-range clinical monitor
+    #: in a bright room, which is the screen this runs on.
+    STEP = 8
+
+    #: The pairs that actually touch on screen, with the pair each one is.
+    #: The pairs that have to be told apart by COLOUR. `SURFACE` and `FIELD`
+    #: are deliberately absent, and are the same white: the hairline between a
+    #: control and its card is what separates those two, which is the whole
+    #: bargain of an outlined design.
+    NEIGHBOURS = (
+        ("BACKGROUND", "SURFACE"),      # a section card on the panel's ground
+        ("FIELD", "FIELD_HOVER"),       # a control under the pointer
+        ("FIELD", "ACCENT_SOFT"),       # empty against chosen
+    )
+
+    @staticmethod
+    def _brightness(colour):
+        red, green, blue = (int(colour[index:index + 2], 16) for index in (1, 3, 5))
+        return 0.299 * red + 0.587 * green + 0.114 * blue
+
+    def test_every_pair_that_touches_is_a_step_you_can_see(self):
+        for theme_name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            for lower, upper in self.NEIGHBOURS:
+                gap = abs(self._brightness(theme[lower]) - self._brightness(theme[upper]))
+                self.assertGreaterEqual(
+                    gap, self.STEP,
+                    "{}: {} and {} are {:.0f} apart".format(theme_name, lower, upper, gap))
+
+    def test_text_stands_well_clear_of_the_surface_it_sits_on(self):
+        """The muted colour is the one at risk: it is the quieter of the two
+        and it carries every label on the panel."""
+        for theme_name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            for ground in ("SURFACE", "FIELD"):
+                gap = abs(self._brightness(theme["TEXT_MUTED"])
+                          - self._brightness(theme[ground]))
+                self.assertGreater(gap, 80, "{}: TEXT_MUTED on {}".format(theme_name, ground))
+
+
+class OutputFolderRowTest(unittest.TestCase):
+    """The output folder is built by the PANEL, not by the schema -- and it was
+    the last ctkPathLineEdit in a generated panel: an editable box with a small
+    grey `...` at its end, sitting under four rows that had stopped looking
+    anything like it. It is the same row as every other now, in folder mode.
+    """
+
+    def setUp(self):
+        # Exactly as base_widget builds it.
+        self.row = formgen.FileOrFolderInput(modes=("folder",), destination=True)
+        self.temp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.temp, True)
+
+    def test_it_shows_the_whole_path(self):
+        """A patient's scan is identified by its NAME and the directory above
+        it is noise. A folder results are about to be written into is
+        identified by WHERE it is -- `out` or `Documents` on its own says
+        nothing about which of them it is."""
+        formgen.set_local_path(self.row, self.temp)
+
+        self.assertIn(self.temp, self.row.caption.text)
+
+    def test_it_never_takes_the_accent(self):
+        """The accent answers "have I given this tool its scan yet?", and this
+        row fills ITSELF in the moment the panel opens -- so accented it would
+        be a blue block sitting permanently on every panel, saying something
+        that was never in doubt and pulling the eye off the rows where it is."""
+        formgen.set_local_path(self.row, self.temp)
+
+        self.assertNotIn(design.tokens()["ACCENT_SOFT"], self.row.container._stylesheet)
+        self.assertIn(design.tokens()["SURFACE"], self.row.container._stylesheet)
+
+    def test_its_text_still_goes_to_full_strength(self):
+        """What is there is worth reading whether or not the box is lit."""
+        formgen.set_local_path(self.row, self.temp)
+
+        self.assertIn("font-weight: 600", self.row.caption._stylesheet)
+
+    def test_an_input_row_is_the_other_way_round(self):
+        """The same two decisions, both inverted -- which is what makes
+        `destination` one flag rather than two."""
+        scan = os.path.join(self.temp, "patient1.nii.gz")
+        with open(scan, "wb") as handle:
+            handle.write(b"0" * 16)
+        row = formgen.FileOrFolderInput(modes=("file",))
+
+        row.setCurrentPath(scan)
+
+        self.assertNotIn(self.temp, row.caption.text)
+        self.assertIn("patient1.nii.gz", row.caption.text)
+        self.assertIn(design.tokens()["ACCENT_SOFT"], row.container._stylesheet)
+
+    def test_it_offers_one_primary_select_button(self):
+        self.assertEqual(self.row.selectButton.text, formgen.SELECT_LABEL)
+        self.assertIn(design._fills_for(design.tokens())["primary"]["base"],
+                      self.row.selectButton._stylesheet)
+
+    def test_its_one_button_opens_the_folder_dialog(self):
+        qt.QFileDialog.next_directory = self.temp
+        self.addCleanup(setattr, qt.QFileDialog, "next_directory", "")
+
+        self.row.selectButton.clicked.emit()
+
+        self.assertEqual(self.row.currentPath, self.temp)
+
+    def test_a_proposed_folder_is_written_through_the_generic_writer(self):
+        """`_suggestOutputFolder` fills this row in so Apply works on a panel
+        nobody set up, and it has to announce it or Apply stays grey."""
+        seen = []
+        formgen.connect_changed(self.row, lambda *args: seen.append(1))
+
+        formgen.set_local_path(self.row, self.temp)
+
+        self.assertEqual(self.row.currentPath, self.temp)
+        self.assertTrue(seen, "the folder was filled in and nothing was told")
+
+    def test_assigning_currentPath_directly_is_refused(self):
+        """The trap this row replaced a ctkPathLineEdit into: that widget takes
+        `widget.currentPath = path`, and this one raises. Pinned so the panel
+        keeps writing through `set_local_path`, which serves both."""
+        with self.assertRaises(AttributeError):
+            self.row.currentPath = self.temp

@@ -63,8 +63,16 @@ class QObject:
         """`rebuild` detaches a widget this way; the stub only has to accept it."""
         self.parent = parent
 
+    def setObjectName(self, name):
+        """An id selector is how a container styles ITSELF without the rule
+        reaching every child, which is what `design.table_frame` relies on."""
+        self.objectName = name
+
     def setStyleSheet(self, sheet):
         self._stylesheet = sheet
+        # Readable under the name Qt publishes it under, so a test asserting
+        # what a widget was painted with reads the same on every stub class.
+        self.styleSheet = sheet
 
     def setCursor(self, _cursor):
         pass
@@ -387,6 +395,20 @@ class QLineEdit(QObject):
     def setPlaceholderText(self, text):
         self.placeholderText = text
 
+    def setReadOnly(self, read_only):
+        """A value field is a QLineEdit you cannot type into: it shows what the
+        row holds and the button beside it is what changes that. Recorded, so a
+        test can tell it from a field a user is meant to fill."""
+        self.readOnly = bool(read_only)
+
+    def isReadOnly(self):
+        return getattr(self, "readOnly", False)
+
+    def setCursorPosition(self, position):
+        """Where the visible text starts when it is longer than the box. A path
+        shown from its END is a path whose file name is off screen."""
+        self.cursorPosition = position
+
     @property
     def text(self):
         return self._text
@@ -520,6 +542,17 @@ class QComboBox(QObject):
         return self._index
 
     def setCurrentIndex(self, index):
+        """Emits only on a REAL change, as Qt does.
+
+        It emitted unconditionally, which is a stub lying in the direction of
+        "everything notifies" -- and it hid a live defect: picking a node in
+        the scene list re-evaluated Apply only because resetting the OTHER
+        list to an index it was already on fired a signal here. Against real
+        Qt it fired nothing, and the panel kept Apply greyed over a row the
+        user had just filled.
+        """
+        if index == self._index:
+            return
         self._index = index
         # Both, as Qt does. A panel that reacts to the SELECTION rather than to
         # the label has to connect currentIndexChanged — two entries can show
@@ -650,9 +683,6 @@ class QFrame(QWidget):
     def __init__(self, parent=None):
         QWidget.__init__(self, parent)
         self.styleSheet = ""
-
-    def setStyleSheet(self, sheet):
-        self.styleSheet = sheet
 
 
 class QPalette:

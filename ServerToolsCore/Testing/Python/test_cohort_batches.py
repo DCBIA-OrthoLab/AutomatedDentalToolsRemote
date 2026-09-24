@@ -24,7 +24,7 @@ sys.path.insert(0, _CORE)
 
 import test_hosted_test_files as fixtures  # noqa: F401,E402 - installs the stubs
 
-from ServerToolsCoreLib import slicer_io  # noqa: E402
+from ServerToolsCoreLib import design, slicer_io  # noqa: E402
 
 
 MB = 1024 * 1024
@@ -1014,12 +1014,15 @@ class CohortPanelTest(unittest.TestCase):
 
     # --- it has to look like it belongs in Slicer ----------------------
 
-    def test_the_box_paints_no_background_of_its_own(self):
-        """It first shipped painted white, which on Slicer's grey panel read as
-        something pasted in from another application. A border is the whole of
-        what it needs to say."""
+    def test_the_box_is_the_same_outlined_surface_as_every_other(self):
+        """It has been a hairline with no fill, then a fill with no hairline,
+        and is now what the whole panel is: a surface with a line round it.
+        The thing it must never be is a shape the panel uses nowhere else --
+        this box appears mid-run, and a reader should not have to work out
+        what kind of object just arrived."""
         self._cohort()
         view = self._view()
 
-        self.assertIn("transparent", view.frame.styleSheet)
-        self.assertIn("border", view.frame.styleSheet)
+        self.assertIn(design.tokens()["SURFACE"], view.frame.styleSheet)
+        self.assertIn("1px solid {}".format(design.tokens()["BORDER"]),
+                      view.frame.styleSheet)

@@ -711,9 +711,16 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         if self.resultKind == "save_as":
             outputsLayout = self._sectionLayouts[_OUTPUTS_SECTION]
-            self._outputFolderWidget = ctk.ctkPathLineEdit()
-            self._outputFolderWidget.filters = ctk.ctkPathLineEdit.Dirs
-            outputsLayout.addRow(design.required_label(_("Output folder")), self._outputFolderWidget)
+            # The SAME row every input on the panel is: what it holds on the
+            # left, one blue `Select` on the right. It was the last
+            # ctkPathLineEdit in a generated panel -- an editable box with a
+            # small grey `...` at its end, sitting under four rows that had
+            # stopped looking anything like it. One folder, so no source bar:
+            # a choice of one is not a choice.
+            self._outputFolderWidget = formgen.FileOrFolderInput(
+                modes=("folder",), destination=True)
+            outputsLayout.addRow(design.required_label(_("Output folder")),
+                                 formgen.row_widget(self._outputFolderWidget))
             formgen.connect_changed(self._outputFolderWidget, self._checkCanApply)
             self._suggestOutputFolder()
 
@@ -1646,7 +1653,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         except Exception:  # noqa: BLE001 - a convenience must never break a panel
             logger.warning("could not propose an output folder", exc_info=True)
             return
-        widget.currentPath = self._suggestedOutput
+        # Through the generic writer: `currentPath` is read-only on the picker
+        # this row is built from, and assigning it raises rather than writing.
+        formgen.set_local_path(widget, self._suggestedOutput)
 
     def _checkCanApply(self, *_args) -> None:
         if not self.applyButton:

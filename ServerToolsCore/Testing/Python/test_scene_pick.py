@@ -266,19 +266,21 @@ class TwoDropdownsTest(unittest.TestCase):
         nothing to learn from the control, so it is not there."""
         self.assertFalse(self.row.sceneCombo.isVisible())
 
-    def test_a_row_it_could_fill_shows_it_greyed_while_the_scene_is_empty(self):
-        """Hidden, the feature stays invisible until the day the scene happens
-        to hold the right kind -- and nobody discovers a control that is not
-        there. That is exactly how it looked missing on every module but the
-        one whose scene happened to match. Greyed, the row says it CAN be
-        filled this way, and says why it cannot right now."""
+    def test_a_row_it_could_fill_offers_the_source_while_the_scene_is_empty(self):
+        """Without the segment the feature stays invisible until the day the
+        scene happens to hold the right kind -- and nobody discovers a control
+        that is not there. That is exactly how it looked missing on every
+        module but the one whose scene happened to match. Offered and greyed,
+        the row says it CAN be filled this way, and why it cannot right now."""
         self.row.setSceneSupported(True)
+        self.row.sourceButtons[formgen.ServerFileInput.SOURCE_SCENE].click()
 
         self.assertTrue(self.row.sceneCombo.isVisible())
         self.assertFalse(self.row.sceneCombo._enabled)
 
     def test_it_comes_alive_once_the_scene_has_something_to_offer(self):
         self.row.setSceneSupported(True)
+        self.row.sourceButtons[formgen.ServerFileInput.SOURCE_SCENE].click()
         self.row.setVolumeChoices(["L01_T2_L"])
 
         self.assertTrue(self.row.sceneCombo.isVisible())
@@ -344,11 +346,15 @@ class EmptyListsTest(unittest.TestCase):
         self.assertFalse(row.combo.isVisible())
         self.assertFalse(row.sceneCombo.isVisible())
 
-    def test_the_hosted_list_appears_with_its_first_entry(self):
+    def test_the_hosted_source_appears_once_the_server_offers_one(self):
         row = formgen.file_widget(dict(SCAN, server_selectable="testfile"),
                                   "single_file")
+        self.assertNotIn(formgen.ServerFileInput.SOURCE_HOSTED, row.sourceButtons)
 
         row.setChoices([{"name": "MG_test_scan.nii.gz", "kind": "file", "size": 1}])
+
+        self.assertIn(formgen.ServerFileInput.SOURCE_HOSTED, row.sourceButtons)
+        row.sourceButtons[formgen.ServerFileInput.SOURCE_HOSTED].click()
         self.assertTrue(row.combo.isVisible())
 
     def test_it_goes_again_when_the_server_offers_nothing(self):
@@ -356,8 +362,11 @@ class EmptyListsTest(unittest.TestCase):
         row = formgen.file_widget(dict(SCAN, server_selectable="testfile"),
                                   "single_file")
         row.setChoices([{"name": "MG_test_scan.nii.gz", "kind": "file", "size": 1}])
+        row.sourceButtons[formgen.ServerFileInput.SOURCE_HOSTED].click()
 
         row.setChoices([])
+
+        self.assertNotIn(formgen.ServerFileInput.SOURCE_HOSTED, row.sourceButtons)
         self.assertFalse(row.combo.isVisible())
 
 
@@ -391,13 +400,17 @@ class CaptionNamesItsSourceTest(unittest.TestCase):
         self.assertTrue(self.row.caption.text.startswith("File: "),
                         self.row.caption.text)
 
-    def test_a_browsed_file_shows_its_whole_path(self):
-        """Not just its name: confirming you picked the right one means seeing
-        WHERE it is, and the caption wraps rather than eliding."""
+    def test_a_browsed_file_shows_its_name_and_keeps_the_path_one_hover_away(self):
+        """It showed the whole path, back when it had a line of its own and
+        wrapped. The box is half a row wide now, and a path elided into it is
+        the one part of itself that means nothing: `/tmp/tmpgt7qr_f5/pati...`
+        where a reader is looking for `scan.nii.gz`."""
         path = self._file("scan.nii.gz")
         formgen.set_local_path(self.row, path)
 
-        self.assertIn(path, self.row.caption.text)
+        self.assertIn("scan.nii.gz", self.row.caption.text)
+        self.assertNotIn(self.dir, self.row.caption.text)
+        self.assertEqual(self.row.local.container.toolTip(), path)
 
     def test_a_browsed_folder_is_labelled_Folder_and_says_what_it_holds(self):
         self._file("a.vtk")
@@ -419,18 +432,25 @@ class CaptionNamesItsSourceTest(unittest.TestCase):
                         self.row.caption.text)
 
     def test_a_scene_pick_is_labelled_by_its_kind(self):
-        self.row.setSceneLabel("Surface")
-        self.row.setVolumeChoices(["L01_T2_L"])
+        self.row.setSceneLabel("ROI")
+        self.row.setVolumeChoices(["Crop box"])
         self.row.sceneCombo.setCurrentIndex(1)
 
-        self.assertEqual(self.row.caption.text, "Surface: L01_T2_L")
+        self.assertEqual(self.row.caption.text, "ROI: Crop box")
 
-    def test_a_row_taking_several_kinds_says_Scene(self):
-        """ALI takes a scan, a surface or a set of landmarks through one
-        argument; naming any one of them would be wrong for the other two."""
-        self.assertEqual(formgen.scene_label_for(("volume", "model", "markups")),
-                         "Scene")
-        self.assertEqual(formgen.scene_label_for(("markups",)), "Landmarks")
+    def test_a_volume_and_a_surface_are_both_simply_a_scan(self):
+        """Read off the kinds' own labels rather than off their number: ALI
+        takes a CBCT or an intraoral surface through one argument, and both are
+        a scan. Counting would have answered "Scene" -- the container rather
+        than the thing -- on the one row where a true word exists."""
+        self.assertEqual(formgen.scene_label_for(("volume", "model")), "Scan")
+        self.assertEqual(formgen.scene_label_for(("volume",)), "Scan")
+        self.assertEqual(formgen.scene_label_for(("roi",)), "ROI")
+        self.assertEqual(formgen.scene_label_for(("volume", "roi")), "Scene")
+
+    def test_the_dropdown_says_what_it_holds(self):
+        self.assertEqual(formgen.scene_prompt_for("Scan"), "Imported scan...")
+        self.assertEqual(formgen.scene_prompt_for("ROI"), "Drawn ROI...")
 
     def test_every_row_has_the_second_line_even_without_dropdowns(self):
         """A `.csv` argument is wrapped in nothing, and used to show nothing at
@@ -444,15 +464,21 @@ class CaptionNamesItsSourceTest(unittest.TestCase):
 
 
 class ScenePermissionTest(unittest.TestCase):
-    """Only landmarks and scans may come from the scene."""
+    """Only SCANS may come from the scene -- a CBCT volume or an intraoral
+    surface. Landmarks may not, and were offered until 2026-09-24: a set of
+    points one row below a scan in the same dropdown reads as another scan,
+    and picking the wrong one is a run that fails on a file the tool cannot
+    open."""
 
-    def test_scans_surfaces_and_landmarks_may(self):
+    def test_a_volume_and_a_surface_may(self):
         self.assertEqual(formgen.scene_kinds_for(SCAN), ("volume",))
         self.assertEqual(formgen.scene_kinds_for(MESH), ("model",))
+
+    def test_landmarks_may_not(self):
         self.assertEqual(
             formgen.scene_kinds_for(
                 {"types": ["path"], "extensions": {"path": [".mrk.json"]}}),
-            ("markups",))
+            ())
 
     def test_nothing_else_may(self):
         """A spreadsheet or an archive has no counterpart in a scene, and
@@ -463,25 +489,26 @@ class ScenePermissionTest(unittest.TestCase):
             self.assertEqual(formgen.scene_kinds_for(spec), ())
 
 
-class CaptionSpansTheRowTest(unittest.TestCase):
-    """The second line starts at the row's left edge, under everything.
+class ValueFieldLeadsTheRowTest(unittest.TestCase):
+    """What the row holds is the FIRST thing on the control line, and the one
+    control that changes it is the last.
 
-    It shipped nested inside the picker's own container, which sits after the
-    two dropdowns -- so it began where the browse buttons do, indented past
-    them, and read as a caption for the buttons rather than for the row. No
-    test looked at WHERE it was, which is why that shipped.
+    It began life on a line of its own underneath, and before that nested
+    inside the picker's own container -- where it started where the browse
+    buttons did, indented past the dropdowns, reading as a caption for the
+    buttons rather than for the row. No test looked at WHERE it was, which is
+    why both of those shipped.
     """
 
     WRAPPED = dict(ALI, server_selectable="testfile")
 
-    def test_a_wrapped_row_puts_it_under_the_dropdowns_too(self):
+    def test_a_wrapped_row_leads_its_control_line_with_it(self):
         row = formgen.file_widget(self.WRAPPED, "file_or_folder")
 
-        column = row.container.layout
-        self.assertIs(column.widgets[-1], row.caption,
-                      "the caption is not the row's own last line")
-        controls = column.widgets[0]
-        self.assertNotIn(row.caption, getattr(controls.layout, "widgets", []))
+        controls = row.container.layout.widgets[1]
+        self.assertIs(controls.layout.widgets[0], row.caption,
+                      "the value is not the first thing on the control line")
+        self.assertNotIn(row.caption, row.container.layout.widgets)
 
     def test_the_picker_no_longer_holds_it(self):
         """Two layouts both believing they hold one widget is how a caption
@@ -491,17 +518,21 @@ class CaptionSpansTheRowTest(unittest.TestCase):
         self.assertNotIn(row.caption,
                          getattr(row.local.container.layout, "widgets", []))
 
-    def test_an_unwrapped_row_keeps_it_on_its_own_column(self):
-        """There are no dropdowns to span, so it is already at the left edge."""
+    def test_an_unwrapped_row_keeps_it_on_its_own_line(self):
+        """There is nothing to wrap it in, so it is already at the left edge."""
         plain = formgen.file_widget(TABLE, "single_file")
 
-        self.assertIn(plain.caption, plain.container.layout.widgets)
+        self.assertIs(plain.container.layout.widgets[0], plain.caption)
 
-    def test_the_buttons_stay_on_the_first_line(self):
+    def test_the_one_button_closes_the_control_line(self):
+        """`Select`, on the right, whatever the row accepts: which dialog it
+        opens follows the segmented control above it, so the button never has
+        to name a kind the pressed segment already names."""
         row = formgen.file_widget(self.WRAPPED, "file_or_folder")
 
-        controls = row.container.layout.widgets[0]
-        self.assertIn(row.local.buttons, controls.layout.widgets)
+        controls = row.container.layout.widgets[1]
+        self.assertIn(row.local.selectButton, controls.layout.widgets)
+        self.assertEqual(row.local.selectButton.text, formgen.SELECT_LABEL)
 
 
 class NameVocabularyTest(unittest.TestCase):
@@ -523,10 +554,13 @@ class NameVocabularyTest(unittest.TestCase):
         for name in ("scans", "cbct", "t1_masks", "masks"):
             self.assertEqual(self._kinds(name), ("volume",), name)
 
-    def test_a_landmark_argument_offers_markups(self):
+    def test_a_landmark_argument_offers_nothing(self):
+        """And the rule that answers it is FIRST in the table: `cbct_landmarks`
+        holds `cbct`, so falling through would offer it the scene's volumes --
+        the one answer that is certainly wrong."""
         for name in ("landmarks", "cbct_landmarks", "ios_landmarks",
                      "mgl_landmarks"):
-            self.assertEqual(self._kinds(name), ("markups",), name)
+            self.assertEqual(self._kinds(name), (), name)
 
     def test_a_surface_argument_offers_models(self):
         for name in ("meshes", "surfaces", "ios"):
@@ -538,7 +572,7 @@ class NameVocabularyTest(unittest.TestCase):
         the honest answer -- what the user picks is what they meant."""
         self.assertEqual(self._kinds("t1"), ("volume", "model"))
         self.assertEqual(self._kinds("t2"), ("volume", "model"))
-        self.assertEqual(formgen.scene_label_for(self._kinds("t1")), "Scene")
+        self.assertEqual(formgen.scene_label_for(self._kinds("t1")), "Scan")
 
     def test_a_transform_or_a_table_offers_nothing(self):
         """No counterpart in a scene, and guessing one wrong is worse than
@@ -554,15 +588,14 @@ class NameVocabularyTest(unittest.TestCase):
 
         self.assertEqual(formgen.scene_kinds_for(spec, "scans"), ())
 
-    def test_every_scan_and_landmark_argument_in_the_extension_is_covered(self):
-        """The ask, stated as a test: every argument that takes a scan or a set
-        of landmarks can be filled from the scene -- not ALI's alone."""
+    def test_every_scan_argument_in_the_extension_is_covered(self):
+        """The ask, stated as a test: every argument that takes a scan can be
+        filled from the scene -- not ALI's alone. Landmark arguments are
+        deliberately absent from this list; see ScenePermissionTest."""
         covered = {
             "scans": ("volume",), "cbct": ("volume",), "masks": ("volume",),
             "t1_masks": ("volume",), "meshes": ("model",),
             "surfaces": ("model",), "ios": ("model",),
-            "landmarks": ("markups",), "cbct_landmarks": ("markups",),
-            "ios_landmarks": ("markups",), "mgl_landmarks": ("markups",),
         }
         for name, kinds in covered.items():
             self.assertEqual(self._kinds(name), kinds, name)
@@ -714,3 +747,42 @@ class ARoiIsItsOwnKindTest(unittest.TestCase):
         """The file format is the same as a fiducial list's -- only the node
         class differs -- so a picked box uploads as `.mrk.json`."""
         self.assertEqual(formgen.SCENE_NODE_KINDS["roi"][1], ".mrk.json")
+
+
+class PickingFromTheSceneReEvaluatesApplyTest(unittest.TestCase):
+    """An imported scan leaves NO local path behind -- it is exported at
+    upload time -- so the only thing that can announce it is the scene list
+    itself. It was the one source `connect_changed` did not listen to, and
+    Apply stayed grey over a row the user had just filled."""
+
+    def _row(self):
+        """A row switched to its scene source, the way a click on the segment
+        leaves it."""
+        row = formgen.file_widget(SCAN, "single_file", "scans")
+        row.setSceneSupported(True)
+        row.setVolumeChoices(["CBCT_patient1"])
+        row.sourceButtons[formgen.ServerFileInput.SOURCE_SCENE].click()
+        return row
+
+    def test_choosing_one_announces_itself(self):
+        row = self._row()
+        seen = []
+        formgen.connect_changed(row, lambda *args: seen.append(1))
+
+        row.sceneCombo.setCurrentIndex(1)
+
+        self.assertEqual(row.volume_name(), "CBCT_patient1")
+        self.assertTrue(seen, "the row was filled and nothing was told")
+
+    def test_switching_source_away_from_it_announces_that_too(self):
+        """Switching source empties the row, which is exactly the moment Apply
+        has to go back to grey."""
+        row = self._row()
+        row.sceneCombo.setCurrentIndex(1)
+        seen = []
+        formgen.connect_changed(row, lambda *args: seen.append(1))
+
+        row.sourceButtons[formgen.ServerFileInput.SOURCE_FILE].click()
+
+        self.assertEqual(row.volume_name(), "")
+        self.assertTrue(seen, "the row was emptied and nothing was told")
