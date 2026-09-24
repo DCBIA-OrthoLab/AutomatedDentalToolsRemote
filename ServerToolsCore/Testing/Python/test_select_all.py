@@ -112,18 +112,24 @@ class TheyLookLikeControlsNotLinksTest(unittest.TestCase):
         for button in self._buttons():
             self.assertNotIn("text-decoration: underline", button._stylesheet)
 
-    def test_each_one_is_outlined_so_it_reads_as_a_button(self):
+    def test_each_one_is_a_filled_pill_so_it_reads_as_a_button(self):
+        """Not an outline any more: nothing on this panel is outlined, and a
+        control that said it was one by being the only stroked thing on the
+        form would have stopped reading as a control the day the strokes
+        went."""
         for button in self._buttons():
-            self.assertIn("border: 1px solid", button._stylesheet)
+            self.assertIn("border: none", button._stylesheet)
             self.assertIn("border-radius", button._stylesheet)
+            self.assertIn(design.tokens()["FIELD"], button._stylesheet)
 
     def test_neither_one_is_filled_like_apply(self):
         """A filled blue slab a few rows above Apply competes with the one
         button that starts a run. That is why these are not primary buttons,
         and the tabbed layout's full-width pair is."""
         for button in self._buttons():
-            self.assertIn("background: transparent", button._stylesheet)
             self.assertNotIn("qlineargradient", button._stylesheet)
+            self.assertNotIn("background-color: " + design.tokens()["PRIMARY"],
+                             button._stylesheet)
 
     def test_the_text_is_the_panels_own_size(self):
         """Shrunk to 8pt they were the smallest thing on the panel and in the

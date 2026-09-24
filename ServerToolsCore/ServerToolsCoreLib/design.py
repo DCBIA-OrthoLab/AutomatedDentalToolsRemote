@@ -14,75 +14,101 @@ SPACING_SM = 6
 SPACING_MD = 8
 SPACING_LG = 12
 
-# Two levels of edge, and the distinction is what makes a control read as one.
-# `BORDER` is a HAIRLINE around something that groups (a collapsible box, a
-# frame); `BORDER_STRONG` is the edge of something a clinician OPERATES -- a
-# dropdown, a spin box, the box a scan is chosen in. Both were the same value
-# once, and at 1px of #e0e6ed on a #f8f9fa ground a combo box had no visible
-# outline at all: the panel read as a column of text with a few blue buttons in
-# it, and nothing said where a field began.
+# Corner radii, and they are tokens for the same reason the spacings are: with
+# the outlines gone it is the SHAPE of a fill that says what kind of thing
+# something is, and three radii used consistently are a vocabulary where a
+# dozen improvised ones are noise.
+RADIUS_SM = 6    # a control: a field, a dropdown, a small button
+RADIUS_MD = 8    # a tab, a chip, a grouped block
+RADIUS_LG = 12   # a card: a section, an input row, a table
+
+# **Nothing on this panel is outlined.** The structure is carried by four
+# stacked SURFACES and by the accent, which is how a screen built this decade
+# reads: a ground, a card raised on it, a slot sunk into the card, and the
+# accent for the one thing that is chosen or in progress. A stroked box around
+# every control is the older idiom, and drawn around a form of eight rows it
+# turns the panel into a stack of cells with the content incidental.
 #
-# `BACKGROUND` moved off near-white with it. A raised surface needs a ground to
-# be raised ABOVE, and #f8f9fa against #ffffff is a difference of three counts
-# that no screen reproduces reliably.
+#   BACKGROUND  the panel's own ground -- nothing is painted on it directly
+#   SURFACE     a card standing on the ground: a collapsible section
+#   FIELD       a slot sunk INTO a card: every control you type in or open
+#   SURFACE_TABLE  a card holding a catalogue: a tab pane, an arch of teeth
+#
+# The two accent tints are the state, and they are the only saturated colour on
+# a panel at rest: ACCENT_SOFT fills what is chosen, PRIMARY draws what is
+# focused. Both have to be legible against SURFACE and against FIELD, which is
+# what stops the soft tint from drifting any closer to the neutrals.
+#
+# BORDER survives for exactly two things, and both FLOAT above the panel rather
+# than sit on it -- a tooltip and an open dropdown list. A surface with nothing
+# behind it needs an edge; a surface on a card does not.
 _LIGHT = {
-    "PRIMARY": "#3498db",
-    "PRIMARY_HOVER": "#2980b9",
-    "PRIMARY_PRESSED": "#1f618d",
-    "DANGER": "#e74c3c",
-    "DANGER_HOVER": "#c0392b",
-    "DANGER_PRESSED": "#922b21",
-    "SUCCESS": "#27ae60",
-    "TEXT": "#2c3e50",
-    "TEXT_MUTED": "#34495e",
+    "PRIMARY": "#2b7fd4",
+    "PRIMARY_HOVER": "#2168b0",
+    "PRIMARY_PRESSED": "#17538f",
+    "DANGER": "#e05252",
+    "DANGER_HOVER": "#c33d3d",
+    "DANGER_PRESSED": "#9c2c2c",
+    "SUCCESS": "#1f9d57",
+    "TEXT": "#1b2733",
+    "TEXT_MUTED": "#5b6b7c",
     "BORDER": "#d3dce6",
-    "BORDER_STRONG": "#a9b9ca",
-    "BACKGROUND": "#eceff4",
+    "BACKGROUND": "#e8ecf2",
     "SURFACE": "#ffffff",
-    "SURFACE_HOVER": "#f3f8fd",
+    "SURFACE_HOVER": "#f4f7fb",
     "SURFACE_TABLE": "#ffffff",
-    "ACCENT_SOFT": "#e7f1fb",
-    "DISABLED_BG": "#bdc3c7",
-    "DISABLED_TEXT": "#95a5a6",
+    "FIELD": "#e7ebf1",
+    "FIELD_HOVER": "#dbe2ea",
+    "ACCENT_SOFT": "#d5e8fa",
+    "DISABLED_BG": "#dfe4ea",
+    "DISABLED_TEXT": "#9aa7b4",
 }
 
 _DARK = {
     "PRIMARY": "#4ba3ff",
-    "PRIMARY_HOVER": "#3498db",
-    "PRIMARY_PRESSED": "#2980b9",
-    "DANGER": "#e74c3c",
-    "DANGER_HOVER": "#ec7063",
-    "DANGER_PRESSED": "#a93226",
-    "SUCCESS": "#2ecc71",
-    "TEXT": "#e0e0e0",
-    "TEXT_MUTED": "#b0b0b0",
-    "BORDER": "#454b53",
-    "BORDER_STRONG": "#616b78",
-    "BACKGROUND": "#26292e",
-    "SURFACE": "#343a41",
-    "SURFACE_HOVER": "#3d444c",
-    "SURFACE_TABLE": "#31363d",
-    "ACCENT_SOFT": "#233748",
-    "DISABLED_BG": "#555555",
-    "DISABLED_TEXT": "#888888",
+    "PRIMARY_HOVER": "#6cb6ff",
+    "PRIMARY_PRESSED": "#2b7fd4",
+    "DANGER": "#f0655f",
+    "DANGER_HOVER": "#f4837e",
+    "DANGER_PRESSED": "#c54a45",
+    "SUCCESS": "#3ddc84",
+    "TEXT": "#e6eaef",
+    "TEXT_MUTED": "#99a5b3",
+    "BORDER": "#3d444d",
+    "BACKGROUND": "#1c1f24",
+    "SURFACE": "#262b31",
+    "SURFACE_HOVER": "#2f353d",
+    "SURFACE_TABLE": "#22262c",
+    "FIELD": "#333942",
+    "FIELD_HOVER": "#3d444e",
+    "ACCENT_SOFT": "#1d3d5c",
+    "DISABLED_BG": "#2b3037",
+    "DISABLED_TEXT": "#6b7682",
 }
 
-# (top, bottom) gradient stops per button role and state. The vertical
-# qlineargradient is the SlicerAutomatedDentalTools button: every .ui of the
-# original extension paints QPushButton with exactly it, and the flat fill
-# that shipped here first read as a different product next to those modules.
-# Dark accents follow the original's applyDarkModeStyles (#5dade2 family).
-_BUTTON_STOPS_LIGHT = {
-    "primary":   {"base": ("#4ba3ff", "#3498db"), "hover": ("#5cb3ff", "#2980b9"), "pressed": ("#2980b9", "#1f618d")},
-    "danger":    {"base": ("#ec7063", "#e74c3c"), "hover": ("#f1948a", "#c0392b"), "pressed": ("#c0392b", "#922b21")},
-    "success":   {"base": ("#66bb6a", "#4caf50"), "hover": ("#81c784", "#43a047"), "pressed": ("#43a047", "#2e7d32")},
-    "secondary": {"base": ("#78909c", "#607d8b"), "hover": ("#90a4ae", "#546e7a"), "pressed": ("#546e7a", "#455a64")},
+# One FLAT fill per button role and state. It was a vertical `qlineargradient`
+# until 2026-09-24, inherited from the original SlicerAutomatedDentalTools
+# `.ui` files so that a converted module would not read as a different product
+# sitting next to an unconverted one -- and the unconverted five still paint
+# theirs that way. The inheritance is dropped deliberately: a top-lit gradient
+# on a button is the one detail that dates a panel at a glance, and the rest of
+# this file now says what it has to say with flat surfaces.
+#
+# Three states rather than two shades of one: `hover` and `pressed` are steps
+# along the same hue, so the button answers a pointer by getting lighter and a
+# click by getting darker, which is the direction every surface on a screen
+# moves.
+_BUTTON_FILLS_LIGHT = {
+    "primary":   {"base": "#2b7fd4", "hover": "#3a90e6", "pressed": "#1f66ad"},
+    "danger":    {"base": "#e05252", "hover": "#ea6666", "pressed": "#bd3c3c"},
+    "success":   {"base": "#1f9d57", "hover": "#27b165", "pressed": "#177f45"},
+    "secondary": {"base": "#64748b", "hover": "#76879e", "pressed": "#4f5d72"},
 }
-_BUTTON_STOPS_DARK = {
-    "primary":   {"base": ("#5dade2", "#3498db"), "hover": ("#7bbcef", "#5dade2"), "pressed": ("#3498db", "#2980b9")},
-    "danger":    {"base": ("#ec7063", "#e74c3c"), "hover": ("#f1948a", "#ec7063"), "pressed": ("#c0392b", "#a93226")},
-    "success":   {"base": ("#58d68d", "#2ecc71"), "hover": ("#82e0aa", "#58d68d"), "pressed": ("#2ecc71", "#28b463")},
-    "secondary": {"base": ("#90a4ae", "#78909c"), "hover": ("#b0bec5", "#90a4ae"), "pressed": ("#78909c", "#607d8b")},
+_BUTTON_FILLS_DARK = {
+    "primary":   {"base": "#3d8fe0", "hover": "#4ba3ff", "pressed": "#2f74b8"},
+    "danger":    {"base": "#d9534f", "hover": "#e86b67", "pressed": "#b4403d"},
+    "success":   {"base": "#2fa367", "hover": "#3cb878", "pressed": "#248352"},
+    "secondary": {"base": "#5b6875", "hover": "#6d7b8a", "pressed": "#49545f"},
 }
 
 # The two colors of a checkable on/off button (see toggle_button). Fixed
@@ -160,67 +186,76 @@ def tokens() -> dict:
 
 
 def _base_stylesheet(t: dict) -> str:
+    """The whole panel, painted in surfaces.
+
+    Two rules run through all of it. **Nothing is outlined**: a control is a
+    slot sunk into its card, and what it does is said by the fill changing, not
+    by a line appearing around it. And **no rule changes a widget's geometry
+    between states** -- the focus ring is a border that was always there and
+    transparent, so a field cannot shift by a pixel under the pointer, and no
+    selected tab can grow wider than the slot Qt laid out for it.
+    """
     return f"""
     qMRMLWidget {{ background-color: {t['BACKGROUND']}; }}
+    /* A card standing on the ground, and the fill is the whole of what raises
+       it. The hairline it used to carry was the loudest line on the panel,
+       repeated once per section. */
     ctkCollapsibleButton {{
       background-color: {t['SURFACE']};
-      border: 1px solid {t['BORDER']};
-      border-radius: 6px;
+      border: none;
+      border-radius: {RADIUS_LG}px;
       margin-bottom: {SPACING_MD}px;
       font-weight: 600;
-      padding: {SPACING_SM}px 10px;
+      padding: {SPACING_MD}px {SPACING_LG}px;
       color: {t['TEXT']};
     }}
-    ctkCollapsibleButton:hover {{
-      border: 1px solid {t['PRIMARY']};
-      background-color: {t['SURFACE_HOVER']};
-    }}
+    ctkCollapsibleButton:hover {{ background-color: {t['SURFACE_HOVER']}; }}
     QLabel {{
       color: {t['TEXT']};
       font-weight: 500;
+      background: transparent;
     }}
-    /* Every control a clinician OPERATES carries the strong edge, and a
-       2px one at that: on a form of eight rows the outline is the only thing
-       that says where a field starts and the label beside it stops. The width
-       never changes with state -- only the COLOUR does -- because Qt lays a
-       row out from the border box, and a 1px-to-2px focus border used to move
-       the text inside the field by a pixel every time it was clicked. */
-    QLineEdit, QTextEdit {{
-      background-color: {t['SURFACE']};
-      border: 2px solid {t['BORDER_STRONG']};
-      border-radius: 5px;
-      padding: {SPACING_SM}px;
+    /* Every control you type in or open: a slot SUNK into the card, filled and
+       unstroked. The border is 2px of nothing, kept so the focus ring can
+       appear without moving the text inside by a pixel -- Qt paints a widget's
+       background under its border, so a transparent one simply shows the
+       fill. */
+    QLineEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
+      background-color: {t['FIELD']};
+      border: 2px solid transparent;
+      border-radius: {RADIUS_SM}px;
       color: {t['TEXT']};
       selection-background-color: {t['PRIMARY']};
+      selection-color: white;
     }}
-    QLineEdit:hover, QTextEdit:hover {{ border-color: {t['PRIMARY']}; }}
-    QLineEdit:focus, QTextEdit:focus {{
+    QLineEdit, QTextEdit {{ padding: {SPACING_SM}px {SPACING_MD}px; }}
+    QComboBox, QSpinBox, QDoubleSpinBox {{ padding: {SPACING_SM}px {SPACING_MD}px; }}
+    QLineEdit:hover, QTextEdit:hover, QComboBox:hover,
+    QSpinBox:hover, QDoubleSpinBox:hover {{ background-color: {t['FIELD_HOVER']}; }}
+    /* Focused: the slot lifts to the card's own colour and the accent ring
+       comes up around it. Two changes rather than one, because on a dense
+       panel a ring alone is a thin line among many rows. */
+    QLineEdit:focus, QTextEdit:focus, QComboBox:focus,
+    QSpinBox:focus, QDoubleSpinBox:focus {{
+      background-color: {t['SURFACE']};
       border-color: {t['PRIMARY']};
     }}
-    /* A dropdown has to LOOK like one. It had a 1px hairline and Qt's default
-       arrow, which on Slicer's own palette is a grey triangle a few pixels
-       across -- next to a spin box of the same size and the same outline, the
-       only difference between "type a number here" and "there is a list behind
-       this" was that triangle. The right edge is a tinted zone of its own with
-       a chevron in it, and the chevron turns over while the list is down. */
-    QComboBox {{
-      background-color: {t['SURFACE']};
-      border: 2px solid {t['BORDER_STRONG']};
-      border-radius: 5px;
-      /* Right padding clears the arrow zone, so a long entry is elided before
-         it runs under the chevron rather than behind it. */
-      padding: {SPACING_XS}px {DROPDOWN_ARROW_WIDTH + SPACING_SM}px {SPACING_XS}px {SPACING_SM}px;
-      color: {t['TEXT']};
+    QLineEdit:disabled, QTextEdit:disabled, QComboBox:disabled,
+    QSpinBox:disabled, QDoubleSpinBox:disabled {{
+      background-color: {t['DISABLED_BG']};
+      color: {t['DISABLED_TEXT']};
     }}
-    QComboBox:hover {{ border-color: {t['PRIMARY']}; }}
-    QComboBox:focus {{ border-color: {t['PRIMARY']}; }}
+    /* The right of a dropdown is tinted, so the one control on the panel that
+       hides something behind it is the one control that is two colours. The
+       chevron turns over while the list is down. */
+    QComboBox {{ padding-right: {DROPDOWN_ARROW_WIDTH + SPACING_MD}px; }}
     QComboBox::drop-down {{
       subcontrol-origin: padding;
       subcontrol-position: top right;
       width: {DROPDOWN_ARROW_WIDTH}px;
-      border-left: 1px solid {t['BORDER']};
-      border-top-right-radius: 3px;
-      border-bottom-right-radius: 3px;
+      border: none;
+      border-top-right-radius: {RADIUS_SM - 2}px;
+      border-bottom-right-radius: {RADIUS_SM - 2}px;
       background-color: {t['ACCENT_SOFT']};
     }}
     QComboBox::down-arrow {{
@@ -228,156 +263,149 @@ def _base_stylesheet(t: dict) -> str:
       height: {_CHEVRON_SIDE}px;
       image: url("{_chevron_svg(t['PRIMARY'])}");
     }}
-    /* The list is down: the chevron points back at the box it came out of. */
     QComboBox::down-arrow:on {{ image: url("{_chevron_svg(t['PRIMARY'], up=True)}"); }}
-    /* The zone does NOT repaint on hover, and that is a decision rather than
-       an omission. Qt decides a sub-control's own :hover from the mouse being
-       inside THAT sub-control's rect, and the arrow's rect is strictly inside
-       the zone's -- so a rule filling the zone with the accent would fire a
-       few pixels before the rule that turns the chevron white, and the arrow
-       would vanish into its own background on the way in. The border already
-       answers a hover; this stays legible in every state instead. */
-    QComboBox:disabled {{ color: {t['DISABLED_TEXT']}; border-color: {t['BORDER']}; }}
     QComboBox::drop-down:disabled {{ background-color: transparent; }}
+    /* The open list FLOATS above the panel, so it is one of the two things
+       here with nothing behind it -- and the only two that keep an edge. */
     QComboBox QAbstractItemView {{
       background-color: {t['SURFACE']};
       color: {t['TEXT']};
       selection-background-color: {t['PRIMARY']};
-      border: 1px solid {t['BORDER_STRONG']};
-      /* Air around each entry: the popup is where a hosted test file is
-         actually read, and eleven entries packed at Qt's default line height
-         are a wall of text. */
+      selection-color: white;
+      border: 1px solid {t['BORDER']};
+      border-radius: {RADIUS_SM}px;
       padding: {SPACING_XS}px;
+      outline: none;
     }}
-    QSpinBox, QDoubleSpinBox {{
-      background-color: {t['SURFACE']};
-      border: 2px solid {t['BORDER_STRONG']};
-      border-radius: 5px;
+    QComboBox QAbstractItemView::item {{
       padding: {SPACING_XS}px {SPACING_SM}px;
-      color: {t['TEXT']};
+      border-radius: {RADIUS_SM - 2}px;
     }}
-    QSpinBox:hover, QDoubleSpinBox:hover {{ border-color: {t['PRIMARY']}; }}
-    QSpinBox:focus, QDoubleSpinBox:focus {{ border-color: {t['PRIMARY']}; }}
+    /* A catalogue, on a card of its own. The fill is what separates it from
+       the panel; it needs no line to say where it ends. */
     QTabWidget::pane {{
-      /* A FILLED, strongly-bordered surface: this is the panel's table, and a
-         table has to be an object you look into rather than a region of the
-         same ground with a hairline drawn round it. It shipped transparent
-         with a 1px border on the reasoning that a filled card reads as pasted
-         in from another application -- true of a card floating on the panel,
-         false of a hundred and thirty landmarks that a reader has to scan row
-         by row. The fill is what separates the options from the panel; the
-         2px edge is what says the tab bar above belongs to it. */
       background-color: {t['SURFACE_TABLE']};
-      border: 2px solid {t['BORDER_STRONG']};
-      border-radius: 6px;
-      /* Lifted by the border's own width so the selected tab's open bottom
-         edge meets the pane instead of leaving a seam across it. */
-      top: -2px;
+      /* The fill's own colour, and not `none`: a QSS rule with no border at
+         all leaves Qt free to draw the pane with the native style, and this
+         guarantees the surface is painted and still shows no edge. */
+      border: 1px solid {t['SURFACE_TABLE']};
+      border-radius: {RADIUS_LG}px;
+      top: 0px;
     }}
+    /* A segmented control, not a row of folder tabs: pills that fill when
+       chosen. Only the background and the text colour move between states --
+       Qt sizes a tab from what it holds when the bar is laid out, so a border
+       or a weight that changed with the selection would make the open tab
+       wider than its own slot and clip its label. */
+    QTabBar {{ background: transparent; }}
     QTabBar::tab {{
       background-color: transparent;
       color: {t['TEXT_MUTED']};
-      /* The same 2px as the pane, on EVERY state. Qt lays the bar out from the
-         tab it is drawing, so a selected tab given a thicker border than its
-         neighbours grows by the difference and clips its own label -- the same
-         trap the font-weight note below records. */
-      border: 2px solid {t['BORDER_STRONG']};
-      border-bottom: none;
-      border-top-left-radius: 6px;
-      border-top-right-radius: 6px;
-      padding: {SPACING_XS}px {SPACING_MD}px;
-      margin-right: 2px;
+      border: none;
+      border-radius: {RADIUS_MD}px;
+      padding: {SPACING_SM}px {SPACING_MD}px;
+      margin-right: {SPACING_XS}px;
+      margin-bottom: {SPACING_XS}px;
       font-weight: 500;
     }}
-    QTabBar::tab:!selected {{
-      /* Sunk into the ground: an unselected tab is a door, not a surface. */
-      background-color: {t['BACKGROUND']};
-      border-color: {t['BORDER']};
-      /* Pushed down so the open tab stands proud of the closed ones by the
-         two pixels its border is worth, rather than by nothing at all. */
-      margin-top: 2px;
-    }}
+    QTabBar::tab:hover:!selected {{ background-color: {t['FIELD']}; }}
     QTabBar::tab:selected {{
-      /* The open tab is a continuation of the table under it: the same fill,
-         the same edge, and no line between the two. */
-      background-color: {t['SURFACE_TABLE']};
+      background-color: {t['ACCENT_SOFT']};
       color: {t['PRIMARY']};
-      /* Same weight as an unselected tab, deliberately. Qt sizes a tab from the
-         text it has when the bar is laid out, so bolding the selected one made
-         it wider than its own slot: "Cranial base" rendered as "ranial bas",
-         clipped at both ends. The surface and the accent colour carry the
-         selection instead, and nothing moves. */
     }}
-    QTabBar::tab:hover:!selected {{ background-color: {t['SURFACE_HOVER']}; }}
-    /* The pane already draws the frame; a scroll area inside one would draw a
+    /* The pane already IS the surface; a scroll area inside one would draw a
        second, squarer box just inside the rounded one. */
     QScrollArea {{ border: none; background-color: transparent; }}
+    QScrollBar:vertical {{
+      background: transparent; width: 10px; margin: 0px;
+    }}
+    QScrollBar:horizontal {{
+      background: transparent; height: 10px; margin: 0px;
+    }}
+    QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
+      background-color: {t['FIELD_HOVER']};
+      border-radius: 5px;
+      min-height: 24px;
+      min-width: 24px;
+    }}
+    QScrollBar::handle:hover {{ background-color: {t['PRIMARY']}; }}
+    QScrollBar::add-line, QScrollBar::sub-line {{ height: 0px; width: 0px; }}
+    QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
     QCheckBox {{
       color: {t['TEXT']};
       font-weight: 500;
       spacing: {SPACING_SM}px;
+      background: transparent;
     }}
+    /* A filled slot, like every other control, at the size of one. */
     QCheckBox::indicator {{
       width: 18px;
       height: 18px;
-      border: 1px solid {t['BORDER']};
-      border-radius: 3px;
-      background-color: {t['SURFACE']};
+      border: none;
+      border-radius: {RADIUS_SM - 1}px;
+      background-color: {t['FIELD']};
     }}
-    QCheckBox::indicator:hover {{
-      border: 1px solid {t['PRIMARY']};
-      background-color: {t['SURFACE_HOVER']};
-    }}
+    QCheckBox::indicator:hover {{ background-color: {t['FIELD_HOVER']}; }}
     QCheckBox::indicator:checked {{
       background-color: {t['PRIMARY']};
-      border: 1px solid {t['PRIMARY']};
       image: url("{_CHECKMARK_SVG}");
     }}
     QSlider::groove:horizontal {{
-      border: 1px solid {t['BORDER']};
-      height: 8px;
-      background-color: {t['SURFACE']};
-      border-radius: 4px;
+      border: none;
+      height: 6px;
+      background-color: {t['FIELD']};
+      border-radius: 3px;
     }}
-    QSlider::handle:horizontal {{
-      background-color: {t['PRIMARY']};
-      border: 1px solid {t['PRIMARY']};
-      width: 16px;
-      margin: -4px 0;
-      border-radius: 8px;
-    }}
-    QSlider::handle:horizontal:hover {{
-      background-color: {t['PRIMARY_HOVER']};
-      border: 1px solid {t['PRIMARY_HOVER']};
-    }}
-    QProgressBar {{
-      border: 1px solid {t['BORDER']};
-      border-radius: 4px;
-      background-color: {t['SURFACE']};
-      padding: 2px;
-      color: {t['TEXT']};
-    }}
-    QProgressBar::chunk {{
+    QSlider::sub-page:horizontal {{
       background-color: {t['PRIMARY']};
       border-radius: 3px;
     }}
-      QToolTip {{
-        background-color: {t['SURFACE']};
-        color: {t['TEXT']};
-        border: 1px solid {t['BORDER']};
-        border-radius: 4px;
-        padding: 6px 8px;
-      }}
+    QSlider::handle:horizontal {{
+      background-color: {t['PRIMARY']};
+      border: none;
+      width: 16px;
+      margin: -5px 0;
+      border-radius: 8px;
+    }}
+    QSlider::handle:horizontal:hover {{ background-color: {t['PRIMARY_HOVER']}; }}
+    QProgressBar {{
+      border: none;
+      border-radius: {RADIUS_SM}px;
+      background-color: {t['FIELD']};
+      color: {t['TEXT']};
+      text-align: center;
+    }}
+    QProgressBar::chunk {{
+      background-color: {t['PRIMARY']};
+      border-radius: {RADIUS_SM}px;
+    }}
+    /* Floats above the panel: the second of the two things that keep an edge. */
+    QToolTip {{
+      background-color: {t['SURFACE']};
+      color: {t['TEXT']};
+      border: 1px solid {t['BORDER']};
+      border-radius: {RADIUS_SM}px;
+      padding: {SPACING_SM}px {SPACING_MD}px;
+    }}
     {_button_stylesheet("primary", t)}
     """
 
 
-def _gradient(top: str, bottom: str) -> str:
-    return f"qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {top}, stop:1 {bottom})"
+def _fills_for(t: dict) -> dict:
+    """The button fills belonging to the palette `t`.
+
+    Taken FROM the palette rather than from `is_dark_mode()`, which is what
+    `_button_stylesheet` used to do: it accepts a theme and then asked the
+    application which theme it was, so a caller handing it one palette got the
+    buttons of the other. Harmless in production, where `apply` passes
+    `tokens()` and the two agree -- and exactly the kind of agreement that
+    holds until someone renders a sheet for a theme that is not the live one.
+    """
+    return _BUTTON_FILLS_DARK if t is _DARK else _BUTTON_FILLS_LIGHT
 
 
-def _button_stops() -> dict:
-    return _BUTTON_STOPS_DARK if is_dark_mode() else _BUTTON_STOPS_LIGHT
+def _button_fills() -> dict:
+    return _fills_for(tokens())
 
 
 def _button_stylesheet(role: str, t: dict) -> str:
@@ -385,20 +413,20 @@ def _button_stylesheet(role: str, t: dict) -> str:
     bare-QPushButton rule (role "primary"), so a plain button someone adds
     (formgen's File.../Folder... browse buttons) comes out looking like the
     original's Search buttons rather than falling back to Slicer's default."""
-    stops = _button_stops()[role]
+    stops = _fills_for(t)[role]
     return f"""
     QPushButton {{
-      background-color: {_gradient(*stops['base'])};
+      background-color: {stops['base']};
       color: white;
       border: none;
-      border-radius: 6px;
+      border-radius: {RADIUS_MD}px;
       font-weight: 600;
       font-size: 10pt;
       padding: {SPACING_MD}px;
       margin-top: {SPACING_XS}px;
     }}
-    QPushButton:hover:!pressed {{ background-color: {_gradient(*stops['hover'])}; }}
-    QPushButton:pressed {{ background-color: {_gradient(*stops['pressed'])}; }}
+    QPushButton:hover:!pressed {{ background-color: {stops['hover']}; }}
+    QPushButton:pressed {{ background-color: {stops['pressed']}; }}
     QPushButton:disabled {{ background-color: {t['DISABLED_BG']}; color: {t['DISABLED_TEXT']}; }}
     """
 
@@ -439,14 +467,14 @@ def secondary_button(text: str) -> qt.QPushButton:
 
 def _compact_button(text: str, role: str) -> qt.QPushButton:
     t = tokens()
-    stops = _button_stops()[role]
+    stops = _button_fills()[role]
     button = qt.QPushButton(text)
     button.setStyleSheet(
-        f"QPushButton {{ background-color: {_gradient(*stops['base'])}; color: white;"
-        f" border: none; border-radius: 4px; font-weight: 600;"
+        f"QPushButton {{ background-color: {stops['base']}; color: white;"
+        f" border: none; border-radius: {RADIUS_SM}px; font-weight: 600;"
         f" padding: {SPACING_XS}px {SPACING_MD}px; margin: 0px; }}"
-        f"QPushButton:hover:!pressed {{ background-color: {_gradient(*stops['hover'])}; }}"
-        f"QPushButton:pressed {{ background-color: {_gradient(*stops['pressed'])}; }}"
+        f"QPushButton:hover:!pressed {{ background-color: {stops['hover']}; }}"
+        f"QPushButton:pressed {{ background-color: {stops['pressed']}; }}"
         f"QPushButton:disabled {{ background-color: {t['DISABLED_BG']}; color: {t['DISABLED_TEXT']}; }}"
     )
     return button
@@ -476,15 +504,15 @@ def nav_button(text: str) -> qt.QPushButton:
     gradient keeps them quiet while the height keeps them findable.
     """
     t = tokens()
-    stops = _button_stops()["secondary"]
+    stops = _button_fills()["secondary"]
     button = qt.QPushButton(text)
     button.setMinimumHeight(NAV_BUTTON_HEIGHT)
     button.setStyleSheet(
-        f"QPushButton {{ background-color: {_gradient(*stops['base'])}; color: white;"
-        f" border: none; border-radius: 6px; font-weight: 700;"
+        f"QPushButton {{ background-color: {stops['base']}; color: white;"
+        f" border: none; border-radius: {RADIUS_MD}px; font-weight: 700;"
         f" font-size: {NAV_GLYPH_POINT_SIZE}pt; padding: 0px; margin: 0px; }}"
-        f"QPushButton:hover:!pressed {{ background-color: {_gradient(*stops['hover'])}; }}"
-        f"QPushButton:pressed {{ background-color: {_gradient(*stops['pressed'])}; }}"
+        f"QPushButton:hover:!pressed {{ background-color: {stops['hover']}; }}"
+        f"QPushButton:pressed {{ background-color: {stops['pressed']}; }}"
         f"QPushButton:disabled {{ background-color: {t['DISABLED_BG']}; color: {t['DISABLED_TEXT']}; }}"
     )
     return button
@@ -518,29 +546,32 @@ def option_chip(text: str) -> qt.QPushButton:
     exactly as it read a check box, and the keyboard reaches it. Nothing about
     the wire changes.
 
-    Quiet on purpose. Slicer is the application around this panel, and the brief
-    for this layer is to stay consistent with its native look: an outline that
-    fills with the accent, no gradient, no shadow. `toggle_button` is the
-    opposite case -- two saturated states where the COLOUR is the information --
-    and the two must not be confused.
+    Two FILLS, not an outline that tints. Unchecked it is the same slot every
+    other control on the panel is -- a chip is a control, and reading as one
+    without being stroked is exactly what the rest of the panel does now.
+    Checked it takes the accent whole. Over a hundred and nineteen landmarks
+    the difference between filled and unfilled reads across the whole grid at
+    once, where a hundred and nineteen outlines read as a mesh.
+
+    `toggle_button` is the opposite case -- two saturated states where the
+    COLOUR is the information -- and the two must not be confused.
     """
     t = tokens()
     button = qt.QPushButton(text)
     button.setCheckable(True)
     button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
     button.setStyleSheet(
-        f"QPushButton {{ background-color: {t['SURFACE']}; color: {t['TEXT']};"
-        f" border: 1px solid {t['BORDER']}; border-radius: 10px;"
+        f"QPushButton {{ background-color: {t['FIELD']}; color: {t['TEXT']};"
+        f" border: none; border-radius: {RADIUS_MD}px;"
         f" padding: {SPACING_XS}px {SPACING_MD}px; font-weight: 500; text-align: center; }}"
-        f"QPushButton:hover {{ border: 1px solid {t['PRIMARY']}; }}"
+        f"QPushButton:hover {{ background-color: {t['FIELD_HOVER']}; }}"
         # Same weight as an unselected chip, deliberately. Qt sizes a button
         # from the text it has when the grid is laid out, so bolding the checked
         # state made the label wider than its own chip: "LPo" rendered "LPc".
         # The fill carries the selection; nothing moves.
-        f"QPushButton:checked {{ background-color: {t['PRIMARY']}; color: white;"
-        f" border: 1px solid {t['PRIMARY']}; }}"
+        f"QPushButton:checked {{ background-color: {t['PRIMARY']}; color: white; }}"
         f"QPushButton:disabled {{ background-color: {t['DISABLED_BG']};"
-        f" color: {t['DISABLED_TEXT']}; border: 1px solid {t['BORDER']}; }}"
+        f" color: {t['DISABLED_TEXT']}; }}"
     )
     return button
 
@@ -555,7 +586,7 @@ def toggle_button(text: str) -> qt.QPushButton:
     button.setCheckable(True)
     button.setStyleSheet(
         f"QPushButton {{ background-color: {_TOGGLE_OFF}; color: white; border: none;"
-        f" border-radius: 4px; font-weight: 600; padding: {SPACING_SM}px; }}"
+        f" border-radius: {RADIUS_SM}px; font-weight: 600; padding: {SPACING_SM}px; }}"
         f"QPushButton:checked {{ background-color: {_TOGGLE_ON}; }}"
         f"QPushButton:disabled {{ background-color: {t['DISABLED_BG']}; color: {t['DISABLED_TEXT']}; }}"
     )
@@ -582,7 +613,7 @@ def section_title(text: str, explained: bool = False) -> qt.QLabel:
     """
     t = tokens()
     label = qt.QLabel(text)
-    hint = (f" border-bottom: 1px dotted {t['BORDER_STRONG']};"
+    hint = (f" border-bottom: 1px dotted {t['TEXT_MUTED']};"
             f" padding-bottom: 1px;" if explained else "")
     label.setStyleSheet(f"color: {t['TEXT_MUTED']}; font-weight: 600;{hint}")
     return label
@@ -607,12 +638,17 @@ def group_heading(text: str) -> qt.QLabel:
     """The name of one GROUP inside a field: AMASSS's Bones, Soft tissue and
     Masks, each over its own row of chips.
 
-    Not `section_title`, and the difference is entirely the air. Those three
-    headings sat at the column's own 4px option spacing, so the last chip of
-    Bones and the heading of Soft tissue were as close as two chips of the same
-    group -- three groups drawn as one run of twenty. This puts a gap above the
-    heading and a hairline under it, which is the cheapest thing that says
-    "a new group starts here" without a frame around each.
+    **Small, bold, muted, and TIGHT against the chips under it.** A heading and
+    the options it names are one block, and the whole point of the grouping is
+    that Bones, Soft tissue and Masks can be compared in one look -- so every
+    pixel spent separating a heading from its own chips is a pixel that pushes
+    the third group off the eye's first pass. The air goes above the heading,
+    where it separates one group from the NEXT, and nowhere else.
+
+    It first shipped with the air on both sides and a rule underneath. The rule
+    is gone with every other line on this panel, and it is not missed: at two
+    sizes and two weights below a chip, the heading is already a different kind
+    of thing.
 
     The gap is a MARGIN and not a spacer widget: `MultiChoiceGroup.rebuild`
     empties its column by reparenting the widgets in it, and a spacer item is
@@ -622,9 +658,9 @@ def group_heading(text: str) -> qt.QLabel:
     t = tokens()
     label = qt.QLabel(text)
     label.setStyleSheet(
-        f"color: {t['TEXT_MUTED']}; font-weight: 600;"
-        f" border-bottom: 1px solid {t['BORDER']};"
-        f" margin-top: {SPACING_MD}px; padding-bottom: {SPACING_XS}px;"
+        f"color: {t['TEXT_MUTED']}; font-weight: 700; font-size: 8pt;"
+        f" background: transparent; border: none;"
+        f" margin-top: {SPACING_SM}px; padding: 0px;"
     )
     return label
 
@@ -640,15 +676,14 @@ def table_frame():
     off its children. A bare QWidget is the shape that looks right and does
     not paint: Qt draws a style sheet's background and border for it only once
     `WA_StyledBackground` is set, and a QFrame carries that already -- while
-    its own frame, left at the default `NoFrame`, draws nothing to collide
-    with the border here.
+    its own frame, left at the default `NoFrame`, draws nothing of its own.
     """
     t = tokens()
     frame = qt.QFrame()
     frame.setObjectName("tableFrame")
     frame.setStyleSheet(
         f"#tableFrame {{ background-color: {t['SURFACE_TABLE']};"
-        f" border: 2px solid {t['BORDER_STRONG']}; border-radius: 6px; }}"
+        f" border: none; border-radius: {RADIUS_LG}px; }}"
     )
     return frame
 
@@ -722,24 +757,25 @@ def _paint_selection(label, filled: bool) -> None:
 # and the question a clinician actually has ("have I given this tool its scan
 # yet?") was answered only by a line of 12pt text among all of it.
 #
-# The card is the answer: ONE outlined box per input, holding every way of
-# filling it, and the box itself carries the state. Empty it is a neutral
-# outline waiting to be filled; filled it takes the accent, border and ground
-# together, so a panel of four inputs says at a glance which are done.
+# The card is the answer: ONE block per input, holding every way of filling it,
+# and the block itself carries the state. It is a FILL and never an outline,
+# like everything else here -- empty it is the same neutral slot a field is,
+# filled it turns the accent tint, so a panel of four inputs says at a glance
+# which are done without drawing four boxes to do it.
 #
-# The border width never changes between the two states. It is the outermost
-# thing on the row, and a 2px-to-3px change on fill would move every control
-# inside it by a pixel the moment a file was chosen.
-INPUT_CARD_BORDER = 2
+# The two fills are far enough apart to read at a glance and both quiet enough
+# to sit under a form: a neutral grey-blue against a light accent blue. That
+# distance is why FIELD is kept NEUTRAL in the token table -- drift it towards
+# the accent and this row stops being able to say anything.
 
 
 def input_card():
-    """The box one file argument is chosen in. See the note above.
+    """The block one file argument is chosen in. See the note above.
 
     A QFrame with an id selector: the frame is what makes Qt paint a style
-    sheet's background and border at all (see `table_frame`), and the id is
-    what keeps that rule off the controls inside, which must keep the styling
-    the panel's own sheet gives them.
+    sheet's background at all (see `table_frame`), and the id is what keeps
+    that rule off the controls inside, which must keep the styling the panel's
+    own sheet gives them.
     """
     card = qt.QFrame()
     card.setObjectName("inputCard")
@@ -751,17 +787,16 @@ def set_input_filled(card, caption, filled: bool) -> None:
     """Repaint an input row for whether it now holds something.
 
     Takes the caption too, and paints both from one call, because they are one
-    statement: the box says THAT the row is satisfied and the line inside it
+    statement: the block says THAT the row is satisfied and the line inside it
     says WITH WHAT, and a panel where those two disagreed would be worse than
     either alone. `caption` may be None for a card built before its label.
     """
     t = tokens()
-    edge = t["PRIMARY"] if filled else t["BORDER_STRONG"]
-    ground = t["ACCENT_SOFT"] if filled else "transparent"
+    ground = t["ACCENT_SOFT"] if filled else t["FIELD"]
     card.setStyleSheet(
-        f"#inputCard {{ background-color: {ground};"
-        f" border: {INPUT_CARD_BORDER}px solid {edge}; border-radius: 8px;"
-        f" padding: {SPACING_SM}px; }}"
+        f"#inputCard {{ background-color: {ground}; border: none;"
+        f" border-radius: {RADIUS_LG}px;"
+        f" padding: {SPACING_MD}px {SPACING_MD}px {SPACING_XS}px {SPACING_MD}px; }}"
     )
     if caption is not None:
         _paint_selection(caption, filled)
@@ -798,22 +833,22 @@ def ghost_button(text: str) -> qt.QPushButton:
     slab sitting a few rows above Apply competes with the one button that starts
     a run.
 
-    An outline says "a control, and a quiet one", which is exactly what this is.
-    Sized to its text, not stretched: it commands the group, it is not part of
-    it.
+    A soft filled pill says "a control, and a quiet one", which is exactly what
+    this is -- and it is the panel's own way of saying it, every control here
+    being a fill rather than a stroke. Sized to its text, not stretched: it
+    commands the group, it is not part of it.
     """
     t = tokens()
     button = qt.QPushButton(text)
     button.setStyleSheet(
-        f"QPushButton {{ background: transparent; border: 1px solid {t['BORDER']};"
-        f" border-radius: 4px; color: {t['TEXT_MUTED']}; font-weight: 600;"
+        f"QPushButton {{ background-color: {t['FIELD']}; border: none;"
+        f" border-radius: {RADIUS_MD}px; color: {t['TEXT_MUTED']}; font-weight: 600;"
         # Padding, never a fixed height: the text is the panel's own size (no
         # font-size override at all) so it reads at a glance, and the button is
         # kept compact by hugging it rather than by shrinking it.
         f" padding: {SPACING_XS}px {SPACING_MD}px; }}"
-        f"QPushButton:hover {{ border-color: {t['PRIMARY']}; color: {t['PRIMARY']};"
-        f" background-color: {t['SURFACE_HOVER']}; }}"
-        f"QPushButton:pressed {{ background-color: {t['SURFACE']};"
+        f"QPushButton:hover {{ background-color: {t['ACCENT_SOFT']}; color: {t['PRIMARY']}; }}"
+        f"QPushButton:pressed {{ background-color: {t['FIELD_HOVER']};"
         f" color: {t['PRIMARY_PRESSED']}; }}"
     )
     button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
@@ -974,21 +1009,23 @@ def progress_label() -> qt.QLabel:
 def cohort_frame() -> qt.QFrame:
     """The box a whole cohort's progress lives in.
 
-    **A hairline border and no fill at all**, so the box takes the panel's own
-    colour whatever Slicer's palette is. It first shipped painted `SURFACE`,
-    which is white in the light theme -- a white card on Slicer's grey panel
-    read as something pasted in from another application. A border is already
-    the whole of what this needs to say: these things belong together.
+    A soft FILL and no line, like every other block on this panel. It shipped
+    as a hairline with no fill, on the reasoning that a filled card reads as
+    something pasted in from another application -- which was true of the pure
+    white it had been painted before that, and is not true of the slot colour
+    every control here already uses.
 
-    That also makes it the one widget here that cannot mismatch a theme,
-    including the themes this file's two token dicts do not describe.
+    The fill also says something the hairline could not: this box appears only
+    while a cohort is in flight, and a tinted block arriving mid-panel reads as
+    something happening, where an outline arriving reads as a field.
     """
     t = tokens()
     frame = qt.QFrame()
+    frame.setObjectName("cohortFrame")
     frame.setStyleSheet(
-        f"QFrame {{ background-color: transparent;"
-        f" border: 1px solid {t['BORDER']}; border-radius: 4px;"
-        f" padding: {SPACING_SM}px; }}"
+        f"#cohortFrame {{ background-color: {t['FIELD']};"
+        f" border: none; border-radius: {RADIUS_LG}px;"
+        f" padding: {SPACING_MD}px; }}"
     )
     frame.setVisible(False)
     return frame

@@ -1032,7 +1032,8 @@ class MultiChoiceLayoutTest(unittest.TestCase):
         frame = group.container.layout.widgets[-1]
 
         self.assertIn("tableFrame", frame._stylesheet)
-        self.assertIn(design.tokens()["BORDER_STRONG"], frame._stylesheet)
+        self.assertIn(design.tokens()["SURFACE_TABLE"], frame._stylesheet)
+        self.assertIn("border: none", frame._stylesheet)
 
     @staticmethod
     def _chart_grid(group):
@@ -2019,7 +2020,7 @@ class ToolTipStyleTest(unittest.TestCase):
         disappears in dark, which is the theme nobody tests in. Each colour the
         rule resolves to has to be a value the token table actually holds."""
         for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
-            rule = re.search(r"QToolTip \{(.*?)\n      \}",
+            rule = re.search(r"QToolTip \{(.*?)\n    \}",
                              design._base_stylesheet(theme), re.S).group(1)
             colours = re.findall(r"#[0-9a-fA-F]{3,8}", rule)
             self.assertTrue(colours, name)
@@ -2029,9 +2030,9 @@ class ToolTipStyleTest(unittest.TestCase):
     def test_the_two_themes_do_not_resolve_to_the_same_bubble(self):
         """A rule that renders identically in both is one that took its colours
         from somewhere other than the palette."""
-        light = re.search(r"QToolTip \{(.*?)\n      \}",
+        light = re.search(r"QToolTip \{(.*?)\n    \}",
                           design._base_stylesheet(design._LIGHT), re.S).group(1)
-        dark = re.search(r"QToolTip \{(.*?)\n      \}",
+        dark = re.search(r"QToolTip \{(.*?)\n    \}",
                          design._base_stylesheet(design._DARK), re.S).group(1)
         self.assertNotEqual(light, dark)
 
@@ -2472,12 +2473,21 @@ class ThemeSymmetryTest(unittest.TestCase):
                   and name not in ("DANGER",)]
         self.assertEqual(shared, [], "carried over rather than chosen")
 
-    def test_an_operated_control_has_a_stronger_edge_than_a_grouping(self):
-        """The whole reason `BORDER_STRONG` exists: at one hairline for both,
-        a combo box on the panel's ground had no visible outline, and nothing
-        said where a field began."""
+    def test_the_four_surfaces_are_four_different_colours(self):
+        """Nothing here is outlined, so the whole structure of the panel rests
+        on these four being distinguishable: the ground, the card standing on
+        it, the slot sunk into the card, and the card a catalogue sits on. Two
+        of them equal is a control that disappears into what holds it."""
         for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
-            self.assertNotEqual(theme["BORDER"], theme["BORDER_STRONG"], name)
+            surfaces = [theme[key] for key in
+                        ("BACKGROUND", "SURFACE", "FIELD")]
+            self.assertEqual(len(set(surfaces)), len(surfaces), name)
+
+    def test_a_chosen_slot_cannot_be_mistaken_for_an_empty_one(self):
+        """`FIELD` and `ACCENT_SOFT` are the two states of an input row, and
+        the only thing that tells them apart now that neither is outlined."""
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            self.assertNotEqual(theme["FIELD"], theme["ACCENT_SOFT"], name)
 
 
 class DropdownArrowTest(unittest.TestCase):
@@ -2514,29 +2524,39 @@ class DropdownArrowTest(unittest.TestCase):
         """Without the right padding a long hosted entry runs under the
         chevron rather than being elided before it."""
         sheet = design._base_stylesheet(design._LIGHT)
-        rule = re.search(r"QComboBox \{(.*?)\n    \}", sheet, re.S).group(1)
-        self.assertIn("{}px".format(design.DROPDOWN_ARROW_WIDTH + design.SPACING_SM), rule)
+        self.assertIn(
+            "padding-right: {}px".format(
+                design.DROPDOWN_ARROW_WIDTH + design.SPACING_MD),
+            sheet)
 
 
 class TableSurfaceTest(unittest.TestCase):
     """ASO's landmark chooser is a table, and a table is an object you look
     into -- not a region of the panel's own ground with a hairline round it."""
 
-    def test_the_pane_is_filled_and_strongly_edged_in_both_themes(self):
+    def test_the_pane_is_a_surface_with_no_visible_edge(self):
+        """The fill is what separates the table from the panel. The border is
+        declared in the fill's own colour rather than as `none`: a rule with no
+        border leaves Qt free to draw the pane with the native style, and this
+        guarantees the surface is painted while showing no edge."""
         for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
             rule = re.search(r"QTabWidget::pane \{(.*?)\n    \}",
                              design._base_stylesheet(theme), re.S).group(1)
-            self.assertIn(theme["SURFACE_TABLE"], rule, name)
-            self.assertIn("2px solid {}".format(theme["BORDER_STRONG"]), rule, name)
+            self.assertIn("background-color: {}".format(theme["SURFACE_TABLE"]),
+                          rule, name)
+            self.assertIn("border: 1px solid {}".format(theme["SURFACE_TABLE"]),
+                          rule, name)
 
-    def test_every_tab_carries_the_same_border_width(self):
-        """Qt lays the bar out from the tab it is drawing, so a selected tab
-        given a thicker border than its neighbours grows by the difference and
-        clips its own label -- `Cranial base` rendered as `ranial bas`. The
-        colour is free to change; the width is not."""
+    def test_a_tab_changes_nothing_but_its_colours_when_chosen(self):
+        """Qt sizes a tab from what it holds when the bar is laid out, so
+        anything that changed its box with the selection would make the open
+        tab wider than its own slot and clip its label -- `Cranial base`
+        rendered as `ranial bas`. Only fills and text colours move."""
         sheet = design._base_stylesheet(design._LIGHT)
-        widths = set(re.findall(r"QTabBar::tab[^{]*\{[^}]*?border:\s*(\d+)px", sheet, re.S))
-        self.assertEqual(widths, {"2"})
+        selected = re.search(r"QTabBar::tab:selected \{(.*?)\n    \}",
+                             sheet, re.S).group(1)
+        for property_name in ("border", "padding", "margin", "font"):
+            self.assertNotIn(property_name + ":", selected)
 
     def test_a_table_frame_styles_itself_and_not_its_children(self):
         """An id selector, because every child of it holds a control that has
@@ -2564,10 +2584,15 @@ class ChipGroupSpacingTest(unittest.TestCase):
         self.assertEqual([w.text for w in self._headings()],
                          ["Bones", "Soft tissue"])
 
-    def test_a_heading_carries_air_above_it_and_a_rule_under_it(self):
+    def test_a_heading_carries_its_air_above_it_and_none_below(self):
+        """The heading and the chips it names are ONE block: every pixel spent
+        separating them is a pixel that pushes the third group out of the eye's
+        first pass, and comparing the three at a glance is the whole point of
+        grouping them."""
         for heading in self._headings():
             self.assertIn("margin-top", heading._stylesheet)
-            self.assertIn("border-bottom", heading._stylesheet)
+            self.assertIn("padding: 0px", heading._stylesheet)
+            self.assertNotIn("border-bottom", heading._stylesheet)
 
     def test_it_is_not_the_plain_section_title_it_used_to_be(self):
         self.assertNotEqual(design.group_heading("Bones")._stylesheet,
@@ -2619,17 +2644,17 @@ class InputCardTest(unittest.TestCase):
         with open(self.scan, "wb") as handle:
             handle.write(b"0" * 32)
 
-    def test_an_untouched_row_is_a_neutral_outline(self):
+    def test_an_untouched_row_is_the_same_neutral_slot_a_field_is(self):
         row = formgen.FileOrFolderInput()
-        self.assertIn(design.tokens()["BORDER_STRONG"], row.container._stylesheet)
-        self.assertIn("transparent", row.container._stylesheet)
+        self.assertIn(design.tokens()["FIELD"], row.container._stylesheet)
+        self.assertIn("border: none", row.container._stylesheet)
 
     def test_a_filled_row_takes_the_accent(self):
         row = formgen.FileOrFolderInput()
         row.setCurrentPath(self.scan)
 
-        self.assertIn(design.tokens()["PRIMARY"], row.container._stylesheet)
         self.assertIn(design.tokens()["ACCENT_SOFT"], row.container._stylesheet)
+        self.assertNotIn(design.tokens()["FIELD"] + ";", row.container._stylesheet)
 
     def test_emptying_it_again_takes_the_accent_back(self):
         row = formgen.FileOrFolderInput()
@@ -2638,16 +2663,17 @@ class InputCardTest(unittest.TestCase):
 
         self.assertNotIn(design.tokens()["ACCENT_SOFT"], row.container._stylesheet)
 
-    def test_the_border_never_changes_width_with_the_state(self):
-        """It is the outermost thing on the row: a 2px-to-3px change on fill
+    def test_only_the_colour_changes_with_the_state(self):
+        """It is the outermost thing on the row: anything that changed its box
         would move every control inside it by a pixel the moment a file was
         chosen."""
         row = formgen.FileOrFolderInput()
-        empty = re.search(r"border:\s*(\d+)px", row.container._stylesheet).group(1)
+        empty = row.container._stylesheet
         row.setCurrentPath(self.scan)
-        filled = re.search(r"border:\s*(\d+)px", row.container._stylesheet).group(1)
+        filled = row.container._stylesheet
 
-        self.assertEqual(empty, filled)
+        strip = lambda sheet: re.sub(r"background-color:[^;]*;", "", sheet)
+        self.assertEqual(strip(empty), strip(filled))
 
     def test_it_styles_itself_and_not_the_controls_inside_it(self):
         """Every child of the card holds a control that has to keep the
@@ -2685,3 +2711,88 @@ class InputCardTest(unittest.TestCase):
 
         self.assertIn("patient1.nii.gz", row.caption.text)
         self.assertIn("font-weight: 600", row.caption._stylesheet)
+
+
+class NothingIsOutlinedTest(unittest.TestCase):
+    """The panel's structure is four stacked surfaces and one accent, not a
+    stroke around every control.
+
+    A form of eight rows, each row a box, reads as a grid of cells with the
+    content incidental -- and that is how this panel read before the outlines
+    came off.
+    """
+
+    # The two things that FLOAT above the panel rather than sit on it. A
+    # surface with nothing behind it needs an edge; a surface on a card does
+    # not.
+    FLOATING = ("QToolTip", "QAbstractItemView")
+
+    def _visible_borders(self, theme):
+        """Every `border: Npx solid <colour>` that is not the fill's own
+        colour, outside the two floating surfaces."""
+        sheet = re.sub(r"/\*.*?\*/", "", design._base_stylesheet(theme), flags=re.S)
+        found = []
+        for block in re.findall(r"([^{}]+)\{([^{}]*)\}", sheet):
+            selector, body = block[0].strip(), block[1]
+            if any(name in selector for name in self.FLOATING):
+                continue
+            for width, colour in re.findall(r"border:\s*(\d+)px solid ([^;]+);", body):
+                fill = re.search(r"background-color:\s*([^;]+);", body)
+                if colour.strip() in ("transparent",):
+                    continue
+                if fill and fill.group(1).strip() == colour.strip():
+                    continue  # declared in the fill's colour: painted, not drawn
+                found.append((selector, width, colour))
+        return found
+
+    def test_no_control_on_the_panel_carries_a_visible_outline(self):
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            self.assertEqual(self._visible_borders(theme), [], name)
+
+    def test_a_focus_ring_is_a_border_that_was_always_there(self):
+        """Declared transparent at rest and coloured on focus, so the ring can
+        appear without the text inside the field moving by a pixel. Qt paints a
+        widget's background under its border, so a transparent one simply shows
+        the fill."""
+        sheet = design._base_stylesheet(design._LIGHT)
+        self.assertIn("border: 2px solid transparent", sheet)
+        self.assertIn("border-color: {}".format(design._LIGHT["PRIMARY"]), sheet)
+
+
+class EveryColourComesFromTheTablesTest(unittest.TestCase):
+    """The trap: a hard-coded hex survives light mode and disappears in dark,
+    which is the theme nobody tests in. Checked over the WHOLE sheet rather
+    than one rule at a time -- the tooltip-only version of this test was
+    passing while six other rules carried their own colours."""
+
+    def _sources(self, theme, fills):
+        known = set(theme.values())
+        known |= {colour for role in fills.values() for colour in role.values()}
+        known |= {design._TOGGLE_OFF, design._TOGGLE_ON}
+        return known
+
+    def test_no_rule_invents_a_colour(self):
+        for name, theme, fills in (
+                ("light", design._LIGHT, design._BUTTON_FILLS_LIGHT),
+                ("dark", design._DARK, design._BUTTON_FILLS_DARK)):
+            known = self._sources(theme, fills)
+            body = re.sub(r"/\*.*?\*/", "", design._base_stylesheet(theme), flags=re.S)
+            loose = {found for found in re.findall(r"#[0-9a-fA-F]{6}", body)
+                     if found not in known}
+            self.assertEqual(loose, set(), name)
+
+    def test_the_chevron_is_drawn_in_the_accent_of_its_own_theme(self):
+        """It is an inline SVG, so its colour is baked into a string -- the one
+        place a theme colour could be frozen without anyone noticing."""
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            sheet = design._base_stylesheet(theme)
+            self.assertIn(design._rgb(theme["PRIMARY"]), sheet, name)
+
+    def test_a_sheet_rendered_for_one_theme_holds_that_themes_buttons(self):
+        """`_button_stylesheet` took a palette and then asked the application
+        which theme it was, so a caller handing it one got the buttons of the
+        other. Harmless while only `apply` calls it -- and exactly the kind of
+        agreement that holds until it does not."""
+        dark = design._base_stylesheet(design._DARK)
+        self.assertIn(design._BUTTON_FILLS_DARK["primary"]["base"], dark)
+        self.assertNotIn(design._BUTTON_FILLS_LIGHT["primary"]["base"], dark)
