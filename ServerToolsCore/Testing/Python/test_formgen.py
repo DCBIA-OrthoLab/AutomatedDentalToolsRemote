@@ -514,14 +514,12 @@ class FileOrFolderInputTest(unittest.TestCase):
     """The `input` argument: `types` = ["csv_file", "folder"] - one row taking
     either, with the client working out which it got.
 
-    **There is nothing to type a path into any more.** The row used to carry an
-    editable path field beside its browse buttons, and that field answered the
-    question the caption under the row already answers - badly: truncated to
-    the width left over from two dropdowns and two buttons, it showed a
-    fragment of a temporary directory where the caption reads
-    `MG_test_scan.nii.gz - NIfTI volume, 94 MB`. The two browse dialogs and
-    `set_local_path` are the only writers now; `currentPath` is what the rest
-    of the panel reads, and the full path is one hover away on the container.
+    **There is nothing to type a path into.** The row shows what it holds in a
+    READ-ONLY box on the left and a `Select` button on the right -- the
+    ordinary file-picker shape -- and an editable field there would be a box a
+    clinician can type a path into which is then ignored, since the dialog and
+    `set_local_path` are the only writers. `currentPath` is what the rest of
+    the panel reads, and the full path is one hover away on the container.
     """
 
     def setUp(self):
@@ -535,46 +533,49 @@ class FileOrFolderInputTest(unittest.TestCase):
         self.folder = os.path.join(self.work, "cohort")
         os.makedirs(self.folder)
 
-    def test_folder_in_types_gives_one_row_offering_both(self):
-        """An argument taking a file OR a folder is one row with both browse
-        buttons - not two rows, and not a kind selector the user has to set
-        correctly before picking."""
+    def test_folder_in_types_gives_one_row_accepting_both(self):
+        """An argument taking a file OR a folder is ONE row with ONE button -
+        not two rows, and not a kind selector the user has to set correctly
+        before picking. Which dialog the button opens follows the segmented
+        control above it."""
         self.assertIsInstance(self.field, formgen.FileOrFolderInput)
-        self.assertIsNotNone(self.field.fileButton)
-        self.assertIsNotNone(self.field.folderButton)
+        self.assertEqual(self.field.modes, ("file", "folder"))
+        self.assertEqual(self.field.selectButton.text, formgen.SELECT_LABEL)
 
-    def test_a_single_file_argument_offers_no_folder_button(self):
-        """A button whose result the server is going to refuse is worse than no
-        button at all: the folder is zipped and uploaded first, and the run
+    def test_a_single_file_argument_accepts_no_folder(self):
+        """A source whose result the server is going to refuse is worse than no
+        source at all: the folder is zipped and uploaded first, and the run
         fails after the bytes have travelled."""
         field = formgen.file_widget({"type": "csv_file", "types": ["csv_file"]})
 
-        self.assertIsNotNone(field.fileButton)
-        self.assertIsNone(field.folderButton)
+        self.assertEqual(field.modes, ("file",))
 
-    def test_a_folder_argument_offers_no_file_button(self):
+    def test_a_folder_argument_accepts_no_file(self):
         """The mirror image: an argument taking a whole folder (zipped on the
-        way out) must not invite a single file it cannot use."""
+        way out) must not invite a single file it cannot use -- and its one
+        button must open the folder dialog without being told."""
         field = formgen.file_widget({"type": "folder", "types": ["folder"]})
 
-        self.assertIsNone(field.fileButton)
-        self.assertIsNotNone(field.folderButton)
+        self.assertEqual(field.modes, ("folder",))
+        qt.QFileDialog.next_directory = self.folder
+        self.addCleanup(setattr, qt.QFileDialog, "next_directory", "")
+        field.selectButton.clicked.emit()
+        self.assertEqual(field.currentPath, self.folder)
 
     def test_there_is_nothing_to_type_a_path_into(self):
-        """The only writers are the two browse dialogs and `set_local_path`.
+        """The dialog and `set_local_path` are the only writers.
 
-        Pinned rather than left to the class docstring: a text field added back
-        onto this row would look harmless and would put two answers to "which
-        file is loaded" side by side again, the shorter one truncated.
+        Pinned rather than left to the class docstring: the box on the left IS
+        a QLineEdit now, and one that accepted typing would take a path the row
+        then ignores.
         """
         self.assertFalse(hasattr(self.field, "pathEdit"))
-        for widget in self.field.container.layout.widgets:
-            self.assertNotIsInstance(widget, qt.QLineEdit)
+        self.assertTrue(self.field.caption.isReadOnly())
 
     def test_the_file_dialog_is_restricted_to_the_declared_extensions(self):
         # The extensions still come from `types` - that is the whole point of
         # driving the dialog here rather than letting ctkPathLineEdit do it.
-        self.field.fileButton.clicked.emit()
+        self.field.selectButton.clicked.emit()
 
         self.assertIn("*.csv", qt.QFileDialog.last_open_file_args[3])
 
@@ -588,7 +589,7 @@ class FileOrFolderInputTest(unittest.TestCase):
         """
         field = formgen.file_widget({"type": "file", "types": ["file"]})
 
-        field.fileButton.clicked.emit()
+        field.selectButton.clicked.emit()
 
         self.assertEqual(field._extensions, ())
         self.assertEqual(qt.QFileDialog.last_open_file_args[3], "")
@@ -635,27 +636,39 @@ class FileOrFolderInputTest(unittest.TestCase):
 
         self.assertFalse(self.field.is_folder())
 
-    def test_each_browse_button_fills_the_same_selection(self):
+    def test_the_one_button_opens_whichever_dialog_the_mode_asks_for(self):
         qt.QFileDialog.next_directory = self.folder
         qt.QFileDialog.next_file = self.csv
         self.addCleanup(setattr, qt.QFileDialog, "next_directory", "")
         self.addCleanup(setattr, qt.QFileDialog, "next_file", "")
 
-        self.field.folderButton.clicked.emit()
+        self.field.setBrowseMode("folder")
+        self.field.selectButton.clicked.emit()
         self.assertEqual(self.field.currentPath, self.folder)
         self.assertTrue(self.field.is_folder())
 
-        self.field.fileButton.clicked.emit()
+        self.field.setBrowseMode("file")
+        self.field.selectButton.clicked.emit()
         self.assertEqual(self.field.currentPath, self.csv)
         self.assertFalse(self.field.is_folder())
+
+    def test_a_mode_it_does_not_know_leaves_the_button_alone(self):
+        """It is set from a source key, and a key this row never offered must
+        not silently turn a file picker into a folder picker."""
+        self.field.setBrowseMode("file")
+        self.field.setBrowseMode("scene")
+
+        self.assertEqual(self.field._mode, "file")
 
     def test_a_cancelled_dialog_keeps_the_current_selection(self):
         self.field.setCurrentPath(self.csv)
         qt.QFileDialog.next_directory = ""  # what Qt returns when cancelled
         qt.QFileDialog.next_file = ""
 
-        self.field.folderButton.clicked.emit()
-        self.field.fileButton.clicked.emit()
+        self.field.setBrowseMode("folder")
+        self.field.selectButton.clicked.emit()
+        self.field.setBrowseMode("file")
+        self.field.selectButton.clicked.emit()
 
         self.assertEqual(self.field.currentPath, self.csv)
 
@@ -671,7 +684,8 @@ class FileOrFolderInputTest(unittest.TestCase):
         self.addCleanup(setattr, qt.QFileDialog, "next_directory", "")
 
         self.field.setCurrentPath(self.csv)
-        self.field.folderButton.clicked.emit()
+        self.field.setBrowseMode("folder")
+        self.field.selectButton.clicked.emit()
         self.field.setCurrentPath(os.path.join(self.work, "other.xlsx"))
 
         self.assertEqual(len(calls), 3)
@@ -692,12 +706,12 @@ class FileOrFolderInputTest(unittest.TestCase):
     def test_an_explicit_mode_overrides_the_schema_rule(self):
         # SurgMovPred's "input" is typed zip_file and the module still wants a
         # folder picker (it zips it): a declared mode wins over the derived one,
-        # and decides which browse buttons the row gets.
+        # and decides which source the row accepts at all.
         field = formgen.file_widget({"type": "zip_file", "types": ["zip_file"]}, "folder_zip")
 
         self.assertIsInstance(field, formgen.FileOrFolderInput)
-        self.assertIsNone(field.fileButton)
-        self.assertIsNotNone(field.folderButton)
+        self.assertEqual(field.modes, ("folder",))
+        self.assertEqual(field._mode, "folder")
 
     def test_a_volume_argument_gets_the_sources_dropdown_around_its_picker(self):
         field = formgen.file_widget({"type": "nifti_file", "types": ["nifti_file"]})
@@ -706,11 +720,11 @@ class FileOrFolderInputTest(unittest.TestCase):
         # in the scene, so its picker comes wrapped in the sources dropdown.
         self.assertIsInstance(field, formgen.ServerFileInput)
         self.assertIsInstance(field.local, formgen.FileOrFolderInput)
-        self.assertIsNone(field.local.folderButton)
+        self.assertEqual(field.local.modes, ("file",))
 
         # Wrapping it changes nothing about what the local half offers: the
         # declared extensions still reach the dialog.
-        field.local.fileButton.clicked.emit()
+        field.local.selectButton.clicked.emit()
 
         self.assertIn("Supported files (*.nii *.nii.gz)",
                       qt.QFileDialog.last_open_file_args[3])
@@ -2399,61 +2413,66 @@ class DescribeFolderTest(unittest.TestCase):
                       formgen.describe_file(os.path.join(self.dir, "scan.nii.gz")))
 
 
-class SelectionLabelTest(unittest.TestCase):
-    """The row's second line is feedback, not a footnote.
+class ValueFieldTest(unittest.TestCase):
+    """The box on the LEFT of an input row, saying what the row holds.
 
-    There is no path field any more and a dropdown returns to its prompt as
-    soon as it is picked, so this line is the ONLY thing saying a choice
-    registered. Rendered as a hint -- muted, 8pt -- it read as explanatory text
-    a reader may skip, and a clinician who had just chosen a scan could not
-    tell whether the panel had taken it.
+    It replaced a wrapped label on a line of its own under the controls --
+    three lines per input, on a panel where ASO has four of them. The row is
+    the ordinary file-picker shape now: the value on the left, the button that
+    changes it on the right.
     """
+
+    def test_it_is_read_only_and_says_so_to_Qt(self):
+        """There IS no typing path into a row, so a box a clinician can type a
+        path into which is then ignored is worse than no box. Enforced rather
+        than implied."""
+        self.assertTrue(design.value_field("Nothing selected").isReadOnly())
+
+    def test_it_shows_its_text_from_the_start(self):
+        """A path is longest on its left and a file name is what a reader is
+        looking for, so a box scrolled to the end shows the one part that means
+        nothing."""
+        self.assertEqual(design.value_field("/very/long/path/scan.nii.gz").cursorPosition, 0)
 
     def test_it_is_the_largest_text_on_the_row(self):
         """Raised twice before it read as feedback: 8pt muted was a footnote,
         10pt was still close enough to the surrounding text to be scanned
-        past. Everything above this line is a control offering a choice; this
+        past. Everything else on the row is a control offering a choice; this
         is the answer, and it should be the thing the eye lands on."""
-        selection = design.selection_label("Folder: /data/cohort")
+        value = design.value_field("Folder: /data/cohort")
         hint = design.hint_label("CBCT only: ignored for intraoral scans")
 
-        self.assertIn("font-size: 12pt", selection._stylesheet)
+        self.assertIn("font-size: 12pt", value._stylesheet)
         self.assertIn("font-size: 8pt", hint._stylesheet)
 
     def test_it_only_shouts_once_the_row_holds_something(self):
-        """Empty, this line is the prompt "Nothing selected" -- a prompt in
-        full-strength semi-bold is a panel of four inputs all demanding
-        attention. The weight and the colour are what change when a scan
-        actually lands."""
-        label = design.selection_label("Nothing selected")
-        empty = label._stylesheet
+        """Empty it reads "Nothing selected" -- a prompt in full-strength
+        semi-bold is a panel of four inputs all demanding attention. The weight
+        and the colour are what change when a scan actually lands."""
+        field = design.value_field("Nothing selected")
+        empty = field._stylesheet
 
-        design.set_input_filled(design.input_card(), label, True)
+        design.set_input_filled(design.input_card(), field, True)
 
         self.assertIn("font-weight: 500", empty)
-        self.assertIn("font-weight: 600", label._stylesheet)
+        self.assertIn("font-weight: 600", field._stylesheet)
 
-    def test_it_is_still_a_statement_and_not_a_control(self):
-        """No border, no fill: a filled block here would read as a third thing
-        to click, beside two dropdowns and two buttons."""
-        style = design.selection_label("Folder: /data/cohort")._stylesheet
+    def test_it_is_not_a_second_slot_inside_the_first(self):
+        """It sits INSIDE the input card, which is itself a filled slot: a box
+        in a box, in the same colour, is to say invisible. Both declarations
+        are explicit because the panel's own QLineEdit rule would otherwise
+        fill and round it like a field to type in."""
+        style = design.value_field("Folder: /data/cohort")._stylesheet
 
-        self.assertNotIn("border", style)
-        self.assertNotIn("background", style)
+        self.assertIn("background: transparent", style)
+        self.assertIn("border: none", style)
 
     def test_a_filled_row_uses_the_body_colour_not_the_muted_one(self):
-        selection = design.selection_label("Folder: /data/cohort")
-        design.set_input_filled(design.input_card(), selection, True)
+        field = design.value_field("Folder: /data/cohort")
+        design.set_input_filled(design.input_card(), field, True)
 
-        self.assertIn(design.tokens()["TEXT"], selection._stylesheet)
-        self.assertNotIn(design.tokens()["TEXT_MUTED"], selection._stylesheet)
-
-    def test_it_wraps_rather_than_eliding(self):
-        """A full path is long, and the whole reason this line replaced the
-        field is that a field could only show a fragment of one."""
-        selection = design.selection_label("Folder: " + "/very/long/path" * 8)
-
-        self.assertTrue(selection.wordWrap)
+        self.assertIn(design.tokens()["TEXT"], field._stylesheet)
+        self.assertNotIn(design.tokens()["TEXT_MUTED"], field._stylesheet)
 
     def test_both_themes_define_what_it_needs(self):
         """A colour defined in one theme and not the other is a KeyError in
@@ -2856,19 +2875,41 @@ class OneSourceAtATimeTest(unittest.TestCase):
                        if button.isChecked()]
             self.assertEqual(pressed, [key])
 
-    def test_exactly_one_control_is_on_the_row(self):
-        """The four controls all live on the same line; which one is SHOWN is
-        the whole answer to "where is this input coming from"."""
+    def test_exactly_one_control_is_on_the_right_of_the_row(self):
+        """Three controls share the right-hand slot -- the `Select` button
+        serving both local sources, and the two lists -- and which one is SHOWN
+        is the whole answer to "where is this input coming from"."""
         controls = {
-            self.SOURCES.SOURCE_HOSTED: self.widget.combo,
-            self.SOURCES.SOURCE_SCENE: self.widget.sceneCombo,
-            self.SOURCES.SOURCE_FILE: self.widget.local.fileButton,
-            self.SOURCES.SOURCE_FOLDER: self.widget.local.folderButton,
+            "select": self.widget.local.selectButton,
+            "hosted": self.widget.combo,
+            "scene": self.widget.sceneCombo,
+        }
+        expected = {
+            self.SOURCES.SOURCE_FILE: "select",
+            self.SOURCES.SOURCE_FOLDER: "select",
+            self.SOURCES.SOURCE_HOSTED: "hosted",
+            self.SOURCES.SOURCE_SCENE: "scene",
         }
         for key in list(self.widget.sourceButtons):
             self.widget.sourceButtons[key].click()
             shown = [name for name, widget in controls.items() if widget.isVisible()]
-            self.assertEqual(shown, [key])
+            self.assertEqual(shown, [expected[key]], key)
+
+    def test_the_value_field_is_never_the_one_that_hides(self):
+        """Every source fills the same row, and what it holds is the one thing
+        that does not depend on where it came from."""
+        for key in list(self.widget.sourceButtons):
+            self.widget.sourceButtons[key].click()
+            self.assertTrue(self.widget.caption.isVisible(), key)
+
+    def test_the_button_opens_the_dialog_the_chosen_source_asks_for(self):
+        """Which is why it can say `Select` rather than naming a kind the
+        pressed segment already names."""
+        self.widget.sourceButtons[self.SOURCES.SOURCE_FOLDER].click()
+        self.assertEqual(self.widget.local._mode, "folder")
+
+        self.widget.sourceButtons[self.SOURCES.SOURCE_FILE].click()
+        self.assertEqual(self.widget.local._mode, "file")
 
     def test_switching_source_empties_the_row(self):
         """Emptying is the point rather than a side effect: a row that kept its
@@ -2921,7 +2962,7 @@ class OneSourceAtATimeTest(unittest.TestCase):
 
         self.assertNotIn(self.SOURCES.SOURCE_HOSTED, self.widget.sourceButtons)
         self.assertEqual(self.widget._source, self.SOURCES.SOURCE_FILE)
-        self.assertTrue(self.widget.local.fileButton.isVisible())
+        self.assertTrue(self.widget.local.selectButton.isVisible())
 
     def test_a_hosted_model_calls_its_segment_what_it_is(self):
         """A model is never fetched -- the weights stay on the server and the
@@ -3086,3 +3127,25 @@ class DesignVariantsTest(unittest.TestCase):
 
     def test_the_default_is_one_of_them(self):
         self.assertIn(design.DEFAULT_VARIANT, design.variants())
+
+    def test_at_least_one_treatment_changes_the_structure_and_not_the_palette(self):
+        """The first four were a card look and three recolourings of it, which
+        is not a choice between designs. `flat` takes the container away
+        entirely: no card behind a section, and air where the card edge was."""
+        design.set_variant("flat")
+        sheet = design._base_stylesheet(design.tokens(), design.shape())
+        section = re.search(r"ctkCollapsibleButton \{(.*?)\n    \}", sheet, re.S).group(1)
+
+        self.assertIn("background-color: transparent", section)
+        self.assertGreater(design.shape()["section_gap"],
+                           design._SHAPE_CARDS["section_gap"])
+
+    def test_a_carded_treatment_still_paints_its_card(self):
+        for name in design.variants():
+            design.set_variant(name)
+            if not design.shape()["card_fill"]:
+                continue
+            sheet = design._base_stylesheet(design.tokens(), design.shape())
+            section = re.search(r"ctkCollapsibleButton \{(.*?)\n    \}", sheet, re.S).group(1)
+            self.assertIn("background-color: {}".format(design.tokens()["SURFACE"]),
+                          section, name)

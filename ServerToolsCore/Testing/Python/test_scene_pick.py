@@ -400,13 +400,17 @@ class CaptionNamesItsSourceTest(unittest.TestCase):
         self.assertTrue(self.row.caption.text.startswith("File: "),
                         self.row.caption.text)
 
-    def test_a_browsed_file_shows_its_whole_path(self):
-        """Not just its name: confirming you picked the right one means seeing
-        WHERE it is, and the caption wraps rather than eliding."""
+    def test_a_browsed_file_shows_its_name_and_keeps_the_path_one_hover_away(self):
+        """It showed the whole path, back when it had a line of its own and
+        wrapped. The box is half a row wide now, and a path elided into it is
+        the one part of itself that means nothing: `/tmp/tmpgt7qr_f5/pati...`
+        where a reader is looking for `scan.nii.gz`."""
         path = self._file("scan.nii.gz")
         formgen.set_local_path(self.row, path)
 
-        self.assertIn(path, self.row.caption.text)
+        self.assertIn("scan.nii.gz", self.row.caption.text)
+        self.assertNotIn(self.dir, self.row.caption.text)
+        self.assertEqual(self.row.local.container.toolTip(), path)
 
     def test_a_browsed_folder_is_labelled_Folder_and_says_what_it_holds(self):
         self._file("a.vtk")
@@ -485,25 +489,26 @@ class ScenePermissionTest(unittest.TestCase):
             self.assertEqual(formgen.scene_kinds_for(spec), ())
 
 
-class CaptionSpansTheRowTest(unittest.TestCase):
-    """The second line starts at the row's left edge, under everything.
+class ValueFieldLeadsTheRowTest(unittest.TestCase):
+    """What the row holds is the FIRST thing on the control line, and the one
+    control that changes it is the last.
 
-    It shipped nested inside the picker's own container, which sits after the
-    two dropdowns -- so it began where the browse buttons do, indented past
-    them, and read as a caption for the buttons rather than for the row. No
-    test looked at WHERE it was, which is why that shipped.
+    It began life on a line of its own underneath, and before that nested
+    inside the picker's own container -- where it started where the browse
+    buttons did, indented past the dropdowns, reading as a caption for the
+    buttons rather than for the row. No test looked at WHERE it was, which is
+    why both of those shipped.
     """
 
     WRAPPED = dict(ALI, server_selectable="testfile")
 
-    def test_a_wrapped_row_puts_it_under_the_dropdowns_too(self):
+    def test_a_wrapped_row_leads_its_control_line_with_it(self):
         row = formgen.file_widget(self.WRAPPED, "file_or_folder")
 
-        column = row.container.layout
-        self.assertIs(column.widgets[-1], row.caption,
-                      "the caption is not the row's own last line")
-        controls = column.widgets[0]
-        self.assertNotIn(row.caption, getattr(controls.layout, "widgets", []))
+        controls = row.container.layout.widgets[1]
+        self.assertIs(controls.layout.widgets[0], row.caption,
+                      "the value is not the first thing on the control line")
+        self.assertNotIn(row.caption, row.container.layout.widgets)
 
     def test_the_picker_no_longer_holds_it(self):
         """Two layouts both believing they hold one widget is how a caption
@@ -513,21 +518,21 @@ class CaptionSpansTheRowTest(unittest.TestCase):
         self.assertNotIn(row.caption,
                          getattr(row.local.container.layout, "widgets", []))
 
-    def test_an_unwrapped_row_keeps_it_on_its_own_column(self):
-        """There are no dropdowns to span, so it is already at the left edge."""
+    def test_an_unwrapped_row_keeps_it_on_its_own_line(self):
+        """There is nothing to wrap it in, so it is already at the left edge."""
         plain = formgen.file_widget(TABLE, "single_file")
 
-        self.assertIn(plain.caption, plain.container.layout.widgets)
+        self.assertIs(plain.container.layout.widgets[0], plain.caption)
 
-    def test_the_browse_buttons_are_on_the_control_line(self):
-        """One per SOURCE, and taken out of the pair the picker packs them
-        into: `File...` and `Folder...` are two different sources here, and
-        only one of them is ever on the row."""
+    def test_the_one_button_closes_the_control_line(self):
+        """`Select`, on the right, whatever the row accepts: which dialog it
+        opens follows the segmented control above it, so the button never has
+        to name a kind the pressed segment already names."""
         row = formgen.file_widget(self.WRAPPED, "file_or_folder")
 
         controls = row.container.layout.widgets[1]
-        self.assertIn(row.local.fileButton, controls.layout.widgets)
-        self.assertIn(row.local.folderButton, controls.layout.widgets)
+        self.assertIn(row.local.selectButton, controls.layout.widgets)
+        self.assertEqual(row.local.selectButton.text, formgen.SELECT_LABEL)
 
 
 class NameVocabularyTest(unittest.TestCase):

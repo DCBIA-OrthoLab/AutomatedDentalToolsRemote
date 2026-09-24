@@ -395,6 +395,20 @@ class QLineEdit(QObject):
     def setPlaceholderText(self, text):
         self.placeholderText = text
 
+    def setReadOnly(self, read_only):
+        """A value field is a QLineEdit you cannot type into: it shows what the
+        row holds and the button beside it is what changes that. Recorded, so a
+        test can tell it from a field a user is meant to fill."""
+        self.readOnly = bool(read_only)
+
+    def isReadOnly(self):
+        return getattr(self, "readOnly", False)
+
+    def setCursorPosition(self, position):
+        """Where the visible text starts when it is longer than the box. A path
+        shown from its END is a path whose file name is off screen."""
+        self.cursorPosition = position
+
     @property
     def text(self):
         return self._text

@@ -203,6 +203,7 @@ _SHAPE_CARDS = {
     "field_edge": None,         # ... and carries no edge at all
     "card_fill": True,          # a section is a card standing on the ground
     "section_rail": False,      # ... with no accent bar down its left side
+    "section_gap": SPACING_MD,  # and this much air under each one
 }
 
 _SHAPE_RAIL = dict(_SHAPE_CARDS, radius_sm=6, radius_md=8, radius_lg=10,
@@ -216,6 +217,15 @@ _SHAPE_OUTLINE = dict(_SHAPE_CARDS, radius_sm=4, radius_md=4, radius_lg=6,
                       field_fill="SURFACE", field_edge="BORDER")
 
 _SHAPE_CONTRAST = dict(_SHAPE_CARDS, radius_sm=6, radius_md=8, radius_lg=10)
+
+# No cards at all: every section sits on the one ground, and what separates
+# them is AIR. The only treatment here whose structure differs rather than its
+# palette -- and the one that shows what a panel looks like when the last
+# container is taken away too. The slots stay slots: with no card behind them
+# they are the only shape left, which is why they are the one thing this
+# treatment does not flatten.
+_SHAPE_FLAT = dict(_SHAPE_CARDS, radius_sm=6, radius_md=8, radius_lg=8,
+                   card_fill=False, section_gap=SPACING_LG * 2)
 
 # Indigo rather than blue, so the rail reads as a different product decision
 # and not as the same panel with a stripe added.
@@ -252,8 +262,19 @@ _CONTRAST_DARK = dict(_DARK, BACKGROUND="#0c0f13", SURFACE="#1d232b",
                       PRIMARY_PRESSED="#4ba3ff", TEXT="#f4f8fc",
                       TEXT_MUTED="#adbccb", BORDER="#4a5563")
 
+# A ground a section can sit DIRECTLY on, so it has to be comfortable under
+# text rather than merely behind a card. Lighter than the carded treatments'
+# for that reason, and the slots are pushed the other way to compensate.
+_FLAT_LIGHT = dict(_LIGHT, BACKGROUND="#f2f4f8", SURFACE="#f2f4f8",
+                   SURFACE_HOVER="#e8ecf3", FIELD="#dfe6f0",
+                   FIELD_HOVER="#cdd8e7", SURFACE_TABLE="#e9edf4")
+_FLAT_DARK = dict(_DARK, BACKGROUND="#1a1e24", SURFACE="#1a1e24",
+                  SURFACE_HOVER="#232830", FIELD="#39414d",
+                  FIELD_HOVER="#46505e", SURFACE_TABLE="#222831")
+
 _VARIANTS = {
     "cards": {"light": _LIGHT, "dark": _DARK, "shape": _SHAPE_CARDS},
+    "flat": {"light": _FLAT_LIGHT, "dark": _FLAT_DARK, "shape": _SHAPE_FLAT},
     "rail": {"light": _RAIL_LIGHT, "dark": _RAIL_DARK, "shape": _SHAPE_RAIL},
     "outline": {"light": _OUTLINE_LIGHT, "dark": _OUTLINE_DARK,
                 "shape": _SHAPE_OUTLINE},
@@ -264,12 +285,14 @@ _VARIANTS = {
 #: What each treatment is called in the settings panel, and what it is.
 VARIANT_LABELS = {
     "cards": "Cards",
+    "flat": "Flat",
     "rail": "Accent rail",
     "outline": "Outlined",
     "contrast": "High contrast",
 }
 VARIANT_HINTS = {
     "cards": "White cards on a grey ground, controls sunk into them, no lines",
+    "flat": "No cards at all: every section on one ground, separated by air",
     "rail": "The same cards, each with an accent bar down its left edge",
     "outline": "The classic instrument look: white controls, a hairline round each",
     "contrast": "Every step pushed, for a mediocre screen in a bright room",
@@ -370,7 +393,7 @@ def _base_stylesheet(t: dict, s: dict = None) -> str:
          panel three pixels to the right. */
       border-left: 3px solid {card_rail};
       border-radius: {radius_lg}px;
-      margin-bottom: {SPACING_MD}px;
+      margin-bottom: {s['section_gap']}px;
       font-weight: 600;
       padding: {SPACING_MD}px {SPACING_LG}px;
       color: {t['TEXT']};
@@ -922,47 +945,55 @@ def hint_label(text: str) -> qt.QLabel:
     return label
 
 
-def selection_label(text: str) -> qt.QLabel:
-    """The line under an input row saying WHAT it currently holds.
+def value_field(text: str):
+    """The box on the LEFT of an input row, saying what the row holds.
 
-    Deliberately not `hint_label`, and that distinction is the point. A hint is
-    explanatory text a reader may skip; this is the only feedback that a choice
-    registered at all -- there is no path field any more, and a dropdown
-    returns to its prompt as soon as it is picked. Muted and 8pt, it read as a
-    footnote, and a clinician who had just chosen a scan could not tell whether
-    the panel had taken it.
+    It replaces a wrapped label that sat on a line of its OWN under the
+    controls -- three lines per input, on a panel where ASO has four of them.
+    The row is the ordinary file-picker shape now: what you have on the left,
+    the button that changes it on the right, one line.
 
-    Raised twice before it read as feedback. 8pt muted was a footnote; 10pt
-    was still close enough to the surrounding text to be scanned past. It is
-    12pt now -- the largest text on the row, which is what it should be:
-    everything above it is a control offering a choice, and this is the
-    answer.
+    A read-only QLineEdit and not a label, for two reasons that are the same
+    reason. It is the shape a reader already knows for "this is the value" --
+    a label floating at the left of a button reads as a caption FOR the button
+    -- and a QLineEdit scrolls its text instead of clipping it, so a long
+    description is reachable rather than cut. The path itself is on the
+    container's tooltip, and the text here can be selected and copied.
 
-    It has TWO states, painted by `_paint_selection` and never set here: muted
-    and medium while the row holds nothing, full-strength and semi-bold once
-    it does. The weight is the whole difference -- "Nothing selected" is a
-    prompt and should not shout, and the file name that replaces it should.
-    `set_input_filled` paints it together with the card around it, so the box
-    and the line inside it can never disagree about whether the row is
-    satisfied.
-
-    It stays a plain wrapped label all the same. It is a statement of fact,
-    not a control, so it gets no border and no fill of its own: a filled block
-    here would read as a third thing to click, beside two dropdowns and two
-    buttons.
+    Read-only is enforced, never merely implied: there IS no typing path into
+    this row (see `FileOrFolderInput`), and a box a clinician can type a path
+    into which is then ignored is worse than no box.
     """
-    label = qt.QLabel(text)
-    label.setWordWrap(True)
-    _paint_selection(label, filled=False)
-    return label
-
-
-def _paint_selection(label, filled: bool) -> None:
     t = tokens()
-    label.setStyleSheet(
-        f"color: {t['TEXT'] if filled else t['TEXT_MUTED']};"
-        f" font-size: 12pt; font-weight: {600 if filled else 500};"
-        f" padding-top: {SPACING_XS}px; padding-bottom: {SPACING_SM}px;"
+    field = qt.QLineEdit(text)
+    field.setReadOnly(True)
+    # Shown from the START: a path is longest on its left and a file name is
+    # what a reader is looking for, so a box scrolled to the end shows the one
+    # part that means nothing.
+    field.setCursorPosition(0)
+    _paint_selection(field, filled=False)
+    return field
+
+
+def _paint_selection(field, filled: bool) -> None:
+    """The value field, in one of its two states.
+
+    **Transparent, and stripped of every edge.** It sits INSIDE the input card,
+    which is itself a filled slot -- a second slot nested in the first would be
+    a box inside a box, and in the same colour, which is to say invisible. The
+    card is the slot; this is the text in it. The declarations are explicit
+    rather than omitted because the panel's own `QLineEdit` rule would
+    otherwise fill and round it like a field a clinician may type into.
+
+    Muted and medium while the row holds nothing, full-strength and semi-bold
+    once it does. The weight is the whole difference: "Nothing selected" is a
+    prompt and should not shout, and the file name that replaces it should.
+    """
+    t = tokens()
+    field.setStyleSheet(
+        f"QLineEdit {{ background: transparent; border: none; padding: 0px;"
+        f" color: {t['TEXT'] if filled else t['TEXT_MUTED']};"
+        f" font-size: 12pt; font-weight: {600 if filled else 500}; }}"
     )
 
 
@@ -1215,7 +1246,7 @@ def progress_label() -> qt.QLabel:
 #
 #   * one frame, so the cohort is one object on the panel. Not a card per
 #     batch: a border around each would be five objects again.
-#   * one headline count, in the size `selection_label` uses, because both
+#   * one headline count, in the size `value_field` uses, because both
 #     answer the same kind of question ("what have I actually got") and a
 #     second size here would invent a vocabulary the panel does not have.
 #   * bars WITHOUT their percentage. The exact figure is written underneath in
@@ -1263,7 +1294,7 @@ def cohort_total_label(text: str) -> qt.QLabel:
     """"8 of 20 scans" -- the one number the user actually asked for.
 
     The largest text in the box, and deliberately the same 12pt semi-bold as
-    `selection_label`: that one says what an input row holds, this says what a
+    `value_field`: that one says what an input row holds, this says what a
     run has finished, and both are the answer rather than the offer. Counted in
     SCANS and not in batches, because a batch is an implementation detail of
     the transfer and nobody has twenty batches of work to do.

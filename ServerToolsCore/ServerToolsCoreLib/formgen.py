@@ -109,8 +109,13 @@ AUTOMATIC_OPTION = "(automatic — the server chooses)"
 
 # The two browse buttons of an argument accepting a file or a folder. Which of
 # the two the user ends up giving is read back from the path, not from these.
-BROWSE_FILE_LABEL = "File..."
-BROWSE_FOLDER_LABEL = "Folder..."
+# What the ONE browse button says, and what the dialog it opens is titled.
+# The button no longer names the kind it picks -- the segmented control above
+# the row does that, and a button reading `File...` under a pressed `File`
+# segment was the same word twice, the larger of the two saying the less.
+SELECT_LABEL = "Select"
+BROWSE_FILE_LABEL = "Select a file"
+BROWSE_FOLDER_LABEL = "Select a folder"
 PATH_PLACEHOLDER = "Select a file or a folder"
 
 # What the caption says when the argument holds nothing. The path field's
@@ -1180,54 +1185,49 @@ class FileOrFolderInput:
 
     def __init__(self, extensions=(), modes=("file", "folder")):
         self._extensions = tuple(extensions)
+        # Which KINDS this argument accepts. Published rather than consumed and
+        # forgotten: the sources wrapper turns them into segments, and it can
+        # no longer read them off a pair of buttons that no longer exists.
+        self.modes = tuple(modes)
         self._path = ""
         # Plain Python callbacks, not a Qt signal: this class is an ordinary
         # object, and the field that used to carry the signal is gone.
         self._listeners = []
 
-        # Two lines: the buttons, then what they chose. The caption lives HERE
-        # rather than on the sources wrapper so that every input row has one --
-        # a `.csv` argument has no dropdowns to be wrapped in, and used to show
-        # nothing at all once the path field went.
+        # ONE line: what the row holds on the left, the button that changes it
+        # on the right. It was two -- a full-width `File...` slab, and a
+        # sentence under it saying what that button had produced -- which is
+        # three lines per input once the source bar is counted, on a panel
+        # where ASO has four of them. The slab was also the loudest thing on
+        # the row while being the least informative: it said `File` under a
+        # pressed `File` segment.
         #
         # A CARD, not a bare container: the box is what says at a glance
         # whether this input has been given anything (see design.input_card).
         # When a `ServerFileInput` wraps this picker it is that wrapper's card
-        # the panel shows, and this one is never added to a layout -- the
-        # caption is shared between them, so both are painted all the same.
+        # the panel shows, and this one is never added to a layout -- the value
+        # field is shared between them, so both are painted all the same.
         self.container = design.input_card()
-        column = qt.QVBoxLayout(self.container)
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(0)
-        buttons = qt.QWidget()
-        row_layout = qt.QHBoxLayout(buttons)
+        row_layout = qt.QHBoxLayout(self.container)
         row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(design.SPACING_XS)
+        row_layout.setSpacing(design.SPACING_SM)
 
-        self.fileButton = None
-        self.folderButton = None
-        if "file" in modes:
-            self.fileButton = design.compact_button(BROWSE_FILE_LABEL)
-            self.fileButton.clicked.connect(self._onBrowseFile)
-            row_layout.addWidget(self.fileButton)
-        if "folder" in modes:
-            self.folderButton = design.compact_button(BROWSE_FOLDER_LABEL)
-            self.folderButton.clicked.connect(self._onBrowseFolder)
-            row_layout.addWidget(self.folderButton)
-        # The buttons sit at the left of the space the row gives them rather
-        # than spreading across it: they are two short actions, not a field.
-        row_layout.addStretch(1)
-        self._buttonRow = row_layout
-        column.addWidget(buttons)
-        # Kept as its own widget so the sources wrapper can put the BUTTONS on
-        # its line and the caption under the whole row. Nested inside this
-        # container instead, the second line started where the buttons do --
-        # indented past the dropdowns, describing them rather than the row.
-        self.buttons = buttons
+        # `caption` rather than `valueField`, because it is what every caller
+        # and every test already calls the thing that says what the row holds.
+        # What changed is its SHAPE, not its job.
+        self.caption = design.value_field(NOTHING_CHOSEN)
+        row_layout.addWidget(self.caption, 1)
 
-        self.caption = design.selection_label(NOTHING_CHOSEN)
-        column.addWidget(self.caption)
-        self._column = column
+        # ONE button, whatever the row accepts. Which dialog it opens follows
+        # the source the segmented control has chosen (`setBrowseMode`), so a
+        # row taking both a file and a folder no longer needs two of them --
+        # and the button can say what it DOES rather than which of two kinds it
+        # happens to be at this moment.
+        self._mode = "folder" if "folder" in modes and "file" not in modes else "file"
+        self.selectButton = design.compact_button(SELECT_LABEL)
+        self.selectButton.clicked.connect(self._onSelect)
+        row_layout.addWidget(self.selectButton, 0)
+        self._row = row_layout
 
     @property
     def currentPath(self) -> str:
@@ -1250,41 +1250,28 @@ class FileOrFolderInput:
         for listener in list(self._listeners):
             listener()
 
-    def detachButtons(self):
-        """Hand the browse buttons over, taking them out of this row.
+    def setBrowseMode(self, mode: str) -> None:
+        """Which dialog the one button opens: "file" or "folder".
 
-        The wrapper shows ONE source's control at a time, so it needs the two
-        buttons as separate widgets rather than as the pair this class packs
-        them into -- `File...` and `Folder...` are two different sources, not
-        two halves of one.
+        Set by the wrapper from the segmented control, so the button never has
+        to name the kind it picks -- the pressed segment already does, and it
+        does it in a place a reader is looking before they reach for the
+        button.
         """
-        buttons = [self.fileButton, self.folderButton]
-        while self._buttonRow.count():
-            self._buttonRow.takeAt(0)
-        return [button for button in buttons if button is not None]
+        if mode in ("file", "folder"):
+            self._mode = mode
 
-    def detachCaption(self):
-        """Hand the caption over, taking it out of this row's own column.
+    def detachRow(self):
+        """Hand this row's two widgets over, and empty the layout holding them.
 
-        The sources wrapper puts it under the WHOLE row -- dropdowns included
-        -- and a caption still held by this column would start where the
-        buttons do, indented past them, describing them rather than the row.
-        Removed explicitly rather than left to Qt's re-parenting, so the two
-        layouts never both believe they hold it.
+        The wrapper lays out FOUR sources on one line and shows one, so it
+        needs the value field and the button as widgets rather than as the row
+        this class packs them into. Emptied explicitly rather than left to Qt's
+        re-parenting, so the two layouts never both believe they hold them.
         """
-        # Emptied and refilled rather than indexed: `takeAt` shifts every
-        # index after the one it removes, and walking a range over a shrinking
-        # layout skips half of it -- which left the caption in place and put
-        # the buttons back in the wrong order.
-        kept = []
-        while self._column.count():
-            item = self._column.takeAt(0)
-            widget = item.widget() if hasattr(item, "widget") else None
-            if widget is not self.caption:
-                kept.append(widget)
-        for widget in kept:
-            self._column.addWidget(widget)
-        return self.caption
+        while self._row.count():
+            self._row.takeAt(0)
+        return self.caption, self.selectButton
 
     def describe(self, text: str = None) -> None:
         """Say what this row holds, on its second line.
@@ -1298,9 +1285,14 @@ class FileOrFolderInput:
             if not path:
                 text = NOTHING_CHOSEN
             elif os.path.isdir(path):
-                text = "Folder: {}".format(describe_folder(path, name_only=False))
+                text = "Folder: {}".format(describe_folder(path))
             else:
-                text = "File: {}".format(describe_file(path, name_only=False))
+                text = "File: {}".format(describe_file(path))
+            # The NAME, not the path. The box is half a row wide now, and a
+            # full path elided into it is the one part of itself that means
+            # nothing -- `/tmp/tmpgt7qr_f5/pati...` where a reader is looking
+            # for `patient1.nii.gz`. The whole path is on the row's tooltip.
+            self.container.setToolTip(path)
         self.caption.setText(text)
         # The card and the line inside it are one statement, so they are
         # painted together and can never disagree about whether the row is
@@ -1317,17 +1309,17 @@ class FileOrFolderInput:
         path = self.currentPath
         return bool(path) and os.path.isdir(path)
 
-    def _onBrowseFile(self) -> None:
-        path = qt.QFileDialog.getOpenFileName(
-            self.container, BROWSE_FILE_LABEL, self.currentPath, ";;".join(name_filters(self._extensions))
-        )
-        if path:
-            self.setCurrentPath(path)
-
-    def _onBrowseFolder(self) -> None:
-        folder = qt.QFileDialog.getExistingDirectory(self.container, BROWSE_FOLDER_LABEL, self.currentPath)
-        if folder:
-            self.setCurrentPath(folder)
+    def _onSelect(self) -> None:
+        """Open the dialog the current source asks for."""
+        if self._mode == "folder":
+            chosen = qt.QFileDialog.getExistingDirectory(
+                self.container, BROWSE_FOLDER_LABEL, self.currentPath)
+        else:
+            chosen = qt.QFileDialog.getOpenFileName(
+                self.container, BROWSE_FILE_LABEL, self.currentPath,
+                ";;".join(name_filters(self._extensions)))
+        if chosen:
+            self.setCurrentPath(chosen)
 
     # -- the slice of the QWidget API build()/base_widget use on a field ----
 
@@ -1514,43 +1506,39 @@ class ServerFileInput:
         # that can only disappoint, and most rows never get one.
         self.sceneCombo.setVisible(False)
 
-        # The picker's browse buttons, one per source, taken out of the pair it
-        # packs them into: `File...` and `Folder...` are two different sources
-        # here, and only one of them is ever on the row.
-        detach = getattr(local, "detachButtons", None)
-        self._localButtons = {}
+        # The row is the same shape whatever the source: WHAT IT HOLDS on the
+        # left, and on the right the one control that changes it -- a `Select`
+        # button for a file or a folder, the list itself for the other two.
+        #
+        # The value field is shared with the picker inside, which owns the
+        # words: a row with dropdowns and a row without then say the same thing
+        # about the same file, in the same place.
+        # What the picker inside accepts. A bare Qt field declares nothing and
+        # is treated as a plain file input, which is what it is.
+        self._localModes = tuple(getattr(local, "modes", ("file",)))
+        detach = getattr(local, "detachRow", None)
+        self._selectButton = None
         if detach:
-            for button in detach():
-                key = (self.SOURCE_FOLDER if button is local.folderButton
-                       else self.SOURCE_FILE)
-                self._localButtons[key] = button
+            self.caption, self._selectButton = detach()
         else:
-            # A bare Qt field, which only a test builds now. It has no sources
-            # of its own to choose between, so it simply IS the file source.
-            self._localButtons[self.SOURCE_FILE] = row_widget(local)
+            # A bare Qt field, which only a test builds now. It has no value
+            # field of its own, so the wrapper makes one.
+            self.caption = design.value_field(NOTHING_CHOSEN)
+            self._selectButton = row_widget(local)
+        row.addWidget(self.caption, 1)
 
-        # Added in SOURCE_ORDER, the order the segments above are drawn in.
-        # Only one is ever visible, so this changes nothing on screen -- it
-        # keeps the code readable in the order the panel reads.
-        for key in self.SOURCE_ORDER:
-            control = self._localButtons.get(key)
-            if control is None:
-                control = {self.SOURCE_HOSTED: self.combo,
-                           self.SOURCE_SCENE: self.sceneCombo}.get(key)
-            if control is not None:
-                row.addWidget(control, 1)
+        # The right-hand controls, in SOURCE_ORDER. Only one is ever visible,
+        # so the order changes nothing on screen -- it keeps the code readable
+        # in the order the segments above are drawn.
+        self._pickers = {
+            self.SOURCE_FILE: self._selectButton,
+            self.SOURCE_FOLDER: self._selectButton,
+            self.SOURCE_HOSTED: self.combo,
+            self.SOURCE_SCENE: self.sceneCombo,
+        }
+        for control in (self._selectButton, self.combo, self.sceneCombo):
+            row.addWidget(control, 0)
         column.addWidget(controls)
-
-        # The picker carries the row's second line, so a row with dropdowns and
-        # one without look and behave the same. One that has none of its own --
-        # a bare Qt field, which only a test builds now -- gets one here rather
-        # than leaving the wrapper with nothing to say.
-        # Taken from the picker and put under the WHOLE row: it belongs to the
-        # picker, which owns what it says, but it describes the row and has to
-        # start at its left edge whether or not dropdowns sit in front.
-        detach = getattr(local, "detachCaption", None)
-        self.caption = detach() if detach else design.selection_label(NOTHING_CHOSEN)
-        column.addWidget(self.caption)
 
         self.combo.currentTextChanged.connect(self._onComboChoice)
         self.sceneCombo.currentTextChanged.connect(self._onSceneChoice)
@@ -1575,7 +1563,7 @@ class ServerFileInput:
         arrives with the schema, the scene list is refreshed on every enter().
         """
         available = [key for key in (self.SOURCE_FILE, self.SOURCE_FOLDER)
-                     if key in self._localButtons]
+                     if key in self._localModes]
         if self._hosted:
             available.append(self.SOURCE_HOSTED)
         if self._scene_supported:
@@ -1657,13 +1645,22 @@ class ServerFileInput:
         self._describe()
 
     def _showActive(self) -> None:
-        """One source's control on the row, and one pressed segment."""
+        """One source's control on the right of the row, one pressed segment.
+
+        The value field on the left is never hidden: every source fills the
+        same row, and what it holds is the one thing that does not depend on
+        where it came from.
+        """
         for key, button in self.sourceButtons.items():
             button.setChecked(key == self._source)
-        for key, widget in self._localButtons.items():
-            widget.setVisible(key == self._source)
-        self.combo.setVisible(self._source == self.SOURCE_HOSTED)
-        self.sceneCombo.setVisible(self._source == self.SOURCE_SCENE)
+        wanted = self._pickers.get(self._source)
+        for control in set(self._pickers.values()):
+            control.setVisible(control is wanted)
+        # The button opens whichever dialog the chosen source asks for, so it
+        # can say `Select` rather than naming a kind the segment already names.
+        setter = getattr(self.local, "setBrowseMode", None)
+        if setter and self._source in (self.SOURCE_FILE, self.SOURCE_FOLDER):
+            setter(self._source)
         # Greyed rather than hidden when the scene holds nothing of the right
         # kind: the segment is how a clinician learns the row can be filled
         # that way at all, and a control that vanishes teaches nobody.
