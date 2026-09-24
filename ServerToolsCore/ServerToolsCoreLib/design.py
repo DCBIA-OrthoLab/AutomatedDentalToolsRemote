@@ -6,6 +6,10 @@ module using these factories. `_isDarkMode` (here: is_dark_mode) exists in
 exactly one place in the whole extension.
 """
 
+import hashlib
+import os
+import tempfile
+
 import qt
 import slicer
 
@@ -122,11 +126,24 @@ _BUTTON_FILLS_DARK = {
 _TOGGLE_OFF = "#2196f3"
 _TOGGLE_ON = "#f44336"
 
-# White check mark drawn inside a checked QCheckBox indicator. An inline SVG
-# rather than a Qt resource (:/Icons/SmallCheckMark.png in the original .ui
-# files) so it needs no resource file compiled into the extension.
+# --- the two drawn icons, and why they are FILES ---------------------------
+#
+# A check mark inside a ticked box, and a chevron at the right of a dropdown.
+# Both shipped as `url("data:image/svg+xml,<svg .../>")` straight in the
+# stylesheet, and on this Slicer Qt that draws **nothing at all** -- no arrow,
+# no tick, and not a line in the log. It is the failure mode a data URI always
+# has here: the sheet parses, the rule applies, the image is simply never
+# resolved, so the only symptom is a light blue square at the end of a combo
+# box with no arrow in it.
+#
+# So they are written to real `.svg` files under the application's temporary
+# directory and referenced by path, which Qt has always resolved. The file is
+# named after a digest of its own contents, so a changed shape or a changed
+# colour is a different file and a stale one is never picked up; and a write
+# that fails answers "" and the rule is left out entirely, which falls back to
+# the platform's own arrow rather than to nothing.
 _CHECKMARK_SVG = (
-    "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
     "<path fill='white' d='M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0"
     "l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z'/></svg>"
 )
@@ -138,40 +155,63 @@ _CHECKMARK_SVG = (
 DROPDOWN_ARROW_WIDTH = 24
 _CHEVRON_SIDE = 10
 
-
-def _rgb(color: str) -> str:
-    """`#4ba3ff` as `rgb(75, 163, 255)`; anything else passed through, so a
-    keyword like `white` still reaches the SVG intact."""
-    value = color.strip()
-    if not (value.startswith("#") and len(value) == 7):
-        return value
-    red, green, blue = (int(value[index:index + 2], 16) for index in (1, 3, 5))
-    return "rgb({}, {}, {})".format(red, green, blue)
+_ICON_FILES = {}
 
 
 def _chevron_svg(color: str, up: bool = False) -> str:
-    """A chevron as an inline data URI, in whatever colour the theme wants.
+    """A chevron, as a FILLED path rather than a stroked line.
 
-    Parameterised where `_CHECKMARK_SVG` is a constant, because this one is
-    drawn on a light fill and has to take a real colour rather than white --
-    and the OPEN state points the other way, which is the only feedback a
-    collapsed combo box gives that its list is down.
-
-    The colour is rewritten as `rgb(r, g, b)` and NEVER reaches the URI as a
-    hex literal. `#` is a data URI's fragment marker: left as it is the SVG is
-    truncated at the fill, and percent-escaping it only moves the question to
-    whether Qt decodes the escape before handing the bytes to the SVG reader.
-    `rgb()` needs no character a URI reserves, so neither question arises --
-    and the failure both would have had is silent, the arrow simply not being
-    drawn with nothing logged.
+    Filled for the same reason the check mark is: Qt renders SVG Tiny, and a
+    fill is the one thing every renderer of that profile agrees on. A stroked
+    polyline needs `stroke`, `stroke-width`, `stroke-linecap` and
+    `stroke-linejoin` to all land, and when one of them does not the shape is
+    not wrong -- it is absent.
     """
-    tint = _rgb(color)
-    points = "4,10 8,6 12,10" if up else "4,6 8,10 12,6"
-    return (
-        "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
-        "<polyline points='{}' fill='none' stroke='{}' stroke-width='2'"
-        " stroke-linecap='round' stroke-linejoin='round'/></svg>"
-    ).format(points, tint)
+    points = ("M3 12.2 L8 7.2 L13 12.2 L15.2 10 L8 2.8 L0.8 10 Z" if up
+              else "M3 3.8 L8 8.8 L13 3.8 L15.2 6 L8 13.2 L0.8 6 Z")
+    return ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
+            "<path fill='{}' d='{}'/></svg>").format(color, points)
+
+
+def _icon_dir() -> str:
+    """Where the drawn icons are written: Slicer's own temporary path when
+    there is one, the system's otherwise (which is what a unit test gets)."""
+    try:
+        base = slicer.app.temporaryPath
+    except Exception:  # noqa: BLE001 - an icon must never take a panel down
+        base = tempfile.gettempdir()
+    return os.path.join(base, "SADT_icons")
+
+
+def _icon_url(svg: str) -> str:
+    """The path Qt should load `svg` from, or "" if it could not be written.
+
+    Forward slashes whatever the platform: a stylesheet `url()` is a URL, and
+    a Windows path pasted into one resolves to nothing.
+    """
+    digest = hashlib.md5(svg.encode("utf-8")).hexdigest()[:12]
+    if digest in _ICON_FILES:
+        return _ICON_FILES[digest]
+    path = ""
+    try:
+        folder = _icon_dir()
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+        written = os.path.join(folder, "sadt_%s.svg" % digest)
+        with open(written, "w") as handle:
+            handle.write(svg)
+        path = written.replace("\\", "/")
+    except Exception:  # noqa: BLE001 - see above; the rule is simply left out
+        path = ""
+    _ICON_FILES[digest] = path
+    return path
+
+
+def _image_rule(svg: str) -> str:
+    """`image: url(...);` for an icon, or nothing at all when it could not be
+    written -- which leaves the platform to draw its own."""
+    path = _icon_url(svg)
+    return 'image: url("%s");' % path if path else ""
 
 
 def is_dark_mode() -> bool:
@@ -275,9 +315,9 @@ def _base_stylesheet(t: dict) -> str:
     QComboBox::down-arrow {{
       width: {_CHEVRON_SIDE}px;
       height: {_CHEVRON_SIDE}px;
-      image: url("{_chevron_svg(t['PRIMARY'])}");
+      {_image_rule(_chevron_svg(t['PRIMARY']))}
     }}
-    QComboBox::down-arrow:on {{ image: url("{_chevron_svg(t['PRIMARY'], up=True)}"); }}
+    QComboBox::down-arrow:on {{ {_image_rule(_chevron_svg(t['PRIMARY'], up=True))} }}
     QComboBox::drop-down:disabled {{ background-color: transparent; }}
     /* The open list FLOATS above the panel, so it is one of the two things
        here with nothing behind it -- and the only two that keep an edge. */
@@ -364,7 +404,7 @@ def _base_stylesheet(t: dict) -> str:
     QCheckBox::indicator:checked {{
       background-color: {t['PRIMARY']};
       border-color: {t['PRIMARY']};
-      image: url("{_CHECKMARK_SVG}");
+      {_image_rule(_CHECKMARK_SVG)}
     }}
     QSlider::groove:horizontal {{
       border: {edge};

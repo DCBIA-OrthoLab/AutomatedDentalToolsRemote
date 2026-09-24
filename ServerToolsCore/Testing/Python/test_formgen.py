@@ -11,6 +11,7 @@ Usage:
 """
 
 import json
+import io
 import os
 import re
 import shutil
@@ -2516,32 +2517,70 @@ class ThemeSymmetryTest(unittest.TestCase):
 class DropdownArrowTest(unittest.TestCase):
     """A dropdown has to look like one. It had Qt's default arrow -- a grey
     triangle a few pixels across -- so next to a spin box of the same size and
-    the same outline, nothing said there was a list behind it."""
+    the same outline, nothing said there was a list behind it.
 
-    def test_the_chevron_carries_no_uri_fragment_marker(self):
-        """`#` ends a data URI at the fragment. Left in, Qt loads no image at
-        all and the arrow simply is not drawn, with nothing logged."""
-        self.assertNotIn("#", design._chevron_svg("#4ba3ff"))
+    **And then, for a while, it had no arrow at all.** The chevron shipped as
+    `url("data:image/svg+xml,<svg .../>")` and on this Slicer Qt that draws
+    nothing: the sheet parses, the rule applies, the image is never resolved,
+    and the only symptom is a light blue square at the end of the box. The
+    icons are written to real files now and referenced by path.
+    """
 
-    def test_a_hex_colour_becomes_an_rgb_triple(self):
-        self.assertEqual(design._rgb("#4ba3ff"), "rgb(75, 163, 255)")
+    def test_the_stylesheet_points_at_a_file_that_exists(self):
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            sheet = design._base_stylesheet(theme)
+            paths = re.findall(r'image: url\("([^"]+)"\)', sheet)
+            self.assertTrue(paths, name)
+            for path in paths:
+                self.assertTrue(os.path.exists(path), "{}: {}".format(name, path))
 
-    def test_a_colour_keyword_reaches_the_svg_intact(self):
-        """`white` needs no rewriting, and rewriting it would break it."""
-        self.assertEqual(design._rgb("white"), "white")
+    def test_it_is_never_a_data_uri(self):
+        """The whole reason the arrow was missing. Pinned so it cannot come
+        back looking like a tidy-up."""
+        self.assertNotIn("data:image", design._base_stylesheet(design._LIGHT))
+
+    def test_the_chevron_is_a_filled_path_and_not_a_stroked_line(self):
+        """Qt renders SVG Tiny, where a fill is the one thing every renderer
+        of that profile agrees on. A stroked polyline needs four properties to
+        all land, and when one does not the shape is not wrong -- it is
+        absent."""
+        svg = design._chevron_svg("#1f6fbf")
+
+        self.assertIn("fill='#1f6fbf'", svg)
+        self.assertNotIn("stroke", svg)
 
     def test_the_open_state_points_the_other_way(self):
         """The only feedback a collapsed combo box gives that its list is
         down."""
-        self.assertNotEqual(design._chevron_svg("#4ba3ff"),
-                            design._chevron_svg("#4ba3ff", up=True))
+        self.assertNotEqual(design._chevron_svg("#1f6fbf"),
+                            design._chevron_svg("#1f6fbf", up=True))
+
+    def test_each_theme_gets_a_file_of_its_own(self):
+        """The file is named after a digest of its contents, so a changed
+        colour is a different file and a stale one is never picked up."""
+        light = design._icon_url(design._chevron_svg(design._LIGHT["PRIMARY"]))
+        dark = design._icon_url(design._chevron_svg(design._DARK["PRIMARY"]))
+
+        self.assertNotEqual(light, dark)
+        self.assertIn(design._LIGHT["PRIMARY"], io.open(light).read())
+        self.assertIn(design._DARK["PRIMARY"], io.open(dark).read())
+
+    def test_an_icon_that_cannot_be_written_leaves_the_rule_out(self):
+        """Which falls back to the platform's own arrow. Drawing `url("")`
+        instead would be the missing-arrow bug again, by another route."""
+        design._ICON_FILES.clear()
+        self.addCleanup(design._ICON_FILES.clear)
+        original = design._icon_dir
+        design._icon_dir = lambda: "/proc/nowhere/sadt"
+        self.addCleanup(setattr, design, "_icon_dir", original)
+
+        self.assertEqual(design._image_rule("<svg/>"), "")
 
     def test_both_themes_draw_an_arrow_of_their_own(self):
         for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
             sheet = design._base_stylesheet(theme)
             self.assertIn("QComboBox::down-arrow", sheet, name)
             self.assertIn("QComboBox::drop-down", sheet, name)
-            self.assertIn(design._rgb(theme["PRIMARY"]), sheet, name)
 
     def test_the_text_clears_the_arrow_zone(self):
         """Without the right padding a long hosted entry runs under the
@@ -2826,11 +2865,11 @@ class EveryColourComesFromTheTablesTest(unittest.TestCase):
             self.assertEqual(loose, set(), name)
 
     def test_the_chevron_is_drawn_in_the_accent_of_its_own_theme(self):
-        """It is an inline SVG, so its colour is baked into a string -- the one
+        """It is a drawn icon, so its colour is baked into a file -- the one
         place a theme colour could be frozen without anyone noticing."""
         for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
-            sheet = design._base_stylesheet(theme)
-            self.assertIn(design._rgb(theme["PRIMARY"]), sheet, name)
+            drawn = design._icon_url(design._chevron_svg(theme["PRIMARY"]))
+            self.assertIn(theme["PRIMARY"], io.open(drawn).read(), name)
 
     def test_a_sheet_rendered_for_one_theme_holds_that_themes_buttons(self):
         """`_button_stylesheet` took a palette and then asked the application
