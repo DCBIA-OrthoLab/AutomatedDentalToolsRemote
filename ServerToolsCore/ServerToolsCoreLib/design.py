@@ -42,48 +42,58 @@ RADIUS_LG = 12   # a card: a section, an input row, a table
 # BORDER survives for exactly two things, and both FLOAT above the panel rather
 # than sit on it -- a tooltip and an open dropdown list. A surface with nothing
 # behind it needs an edge; a surface on a card does not.
+# **Every step between two surfaces is a step you can SEE.** The first
+# borderless pass put BACKGROUND at #e8ecf2 and FIELD at #e7ebf1 -- one count
+# apart, on the two surfaces whose difference is the entire reason the outlines
+# could come off. A slot that is the same colour as the ground it sits over is
+# a slot nobody can find, and the panel read as washed out because it was.
+#
+# So the ladder is spread: the ground is frankly grey, the card is white, the
+# slot is grey again but a DIFFERENT grey, and the accent tint is saturated
+# enough to be a colour rather than a suggestion. Each neighbouring pair is at
+# least eight counts apart in the light theme and ten in the dark.
 _LIGHT = {
-    "PRIMARY": "#2b7fd4",
-    "PRIMARY_HOVER": "#2168b0",
-    "PRIMARY_PRESSED": "#17538f",
-    "DANGER": "#e05252",
-    "DANGER_HOVER": "#c33d3d",
-    "DANGER_PRESSED": "#9c2c2c",
-    "SUCCESS": "#1f9d57",
-    "TEXT": "#1b2733",
-    "TEXT_MUTED": "#5b6b7c",
-    "BORDER": "#d3dce6",
-    "BACKGROUND": "#e8ecf2",
+    "PRIMARY": "#1f6fbf",
+    "PRIMARY_HOVER": "#1a5ea3",
+    "PRIMARY_PRESSED": "#144c85",
+    "DANGER": "#d13c3c",
+    "DANGER_HOVER": "#b32f2f",
+    "DANGER_PRESSED": "#8f2424",
+    "SUCCESS": "#17864a",
+    "TEXT": "#12202e",
+    "TEXT_MUTED": "#4a5b6d",
+    "BORDER": "#b3c1d2",
+    "BACKGROUND": "#dbe2ec",
     "SURFACE": "#ffffff",
-    "SURFACE_HOVER": "#f4f7fb",
-    "SURFACE_TABLE": "#ffffff",
-    "FIELD": "#e7ebf1",
-    "FIELD_HOVER": "#dbe2ea",
-    "ACCENT_SOFT": "#d5e8fa",
-    "DISABLED_BG": "#dfe4ea",
-    "DISABLED_TEXT": "#9aa7b4",
+    "SURFACE_HOVER": "#f0f4fa",
+    "SURFACE_TABLE": "#f2f5fa",
+    "FIELD": "#e4eaf3",
+    "FIELD_HOVER": "#d2dcea",
+    "ACCENT_SOFT": "#c2dcf7",
+    "DISABLED_BG": "#d7dde5",
+    "DISABLED_TEXT": "#8d9aa8",
 }
 
 _DARK = {
-    "PRIMARY": "#4ba3ff",
-    "PRIMARY_HOVER": "#6cb6ff",
-    "PRIMARY_PRESSED": "#2b7fd4",
+    "PRIMARY": "#5aaeff",
+    "PRIMARY_HOVER": "#7cc0ff",
+    "PRIMARY_PRESSED": "#3d8fe0",
     "DANGER": "#f0655f",
     "DANGER_HOVER": "#f4837e",
     "DANGER_PRESSED": "#c54a45",
     "SUCCESS": "#3ddc84",
-    "TEXT": "#e6eaef",
-    "TEXT_MUTED": "#99a5b3",
-    "BORDER": "#3d444d",
-    "BACKGROUND": "#1c1f24",
-    "SURFACE": "#262b31",
-    "SURFACE_HOVER": "#2f353d",
-    "SURFACE_TABLE": "#22262c",
-    "FIELD": "#333942",
-    "FIELD_HOVER": "#3d444e",
-    "ACCENT_SOFT": "#1d3d5c",
-    "DISABLED_BG": "#2b3037",
-    "DISABLED_TEXT": "#6b7682",
+    "TEXT": "#eef2f7",
+    "TEXT_MUTED": "#9dabbb",
+    "BORDER": "#3a434e",
+    "BACKGROUND": "#14171c",
+    "SURFACE": "#232830",
+    "SURFACE_HOVER": "#2d333c",
+    "SURFACE_TABLE": "#2a313a",
+    "FIELD": "#333b46",
+    "FIELD_HOVER": "#404a57",
+    "ACCENT_SOFT": "#1b5b93",
+    "DISABLED_BG": "#272c33",
+    "DISABLED_TEXT": "#68737f",
 }
 
 # One FLAT fill per button role and state. It was a vertical `qlineargradient`
@@ -569,6 +579,38 @@ def option_chip(text: str) -> qt.QPushButton:
         # from the text it has when the grid is laid out, so bolding the checked
         # state made the label wider than its own chip: "LPo" rendered "LPc".
         # The fill carries the selection; nothing moves.
+        f"QPushButton:checked {{ background-color: {t['PRIMARY']}; color: white; }}"
+        f"QPushButton:disabled {{ background-color: {t['DISABLED_BG']};"
+        f" color: {t['DISABLED_TEXT']}; }}"
+    )
+    return button
+
+
+def segment_button(text: str) -> qt.QPushButton:
+    """One choice in a segmented control: WHERE an input's data comes from.
+
+    A file argument can be satisfied four ways -- a file on this machine, a
+    folder, the test data the server hosts, a scan already open in Slicer --
+    and exactly one of them at a time. That rule was enforced invisibly: every
+    control sat on the row at once and picking in one silently emptied the
+    others. Here the rule IS the interface. One segment is pressed, one control
+    is on the row, and nothing has to be un-chosen.
+
+    Two fills and nothing else moves between them, for the reason a tab does
+    not change weight either: Qt sizes a button from what it holds when the row
+    is laid out, so a border or a weight arriving with the selection would make
+    the pressed segment wider than its own slot and clip its label.
+    """
+    t = tokens()
+    button = qt.QPushButton(text)
+    button.setCheckable(True)
+    button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+    button.setStyleSheet(
+        f"QPushButton {{ background-color: {t['FIELD']}; color: {t['TEXT_MUTED']};"
+        f" border: none; border-radius: {RADIUS_SM}px; font-weight: 600;"
+        f" padding: {SPACING_SM}px {SPACING_XS}px; margin: 0px; }}"
+        f"QPushButton:hover:!checked {{ background-color: {t['FIELD_HOVER']};"
+        f" color: {t['TEXT']}; }}"
         f"QPushButton:checked {{ background-color: {t['PRIMARY']}; color: white; }}"
         f"QPushButton:disabled {{ background-color: {t['DISABLED_BG']};"
         f" color: {t['DISABLED_TEXT']}; }}"

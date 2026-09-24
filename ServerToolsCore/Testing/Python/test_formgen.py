@@ -1387,19 +1387,22 @@ class InputSourcesTest(unittest.TestCase):
         self.temp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.temp, True)
 
-    def test_the_controls_are_one_line_with_the_caption_under_them(self):
-        """Two lines, and only two: the controls, then what they hold.
+    def test_the_row_is_three_lines_source_control_and_answer(self):
+        """The segmented control on top, the chosen source's own control under
+        it, and what came of it underneath.
 
-        The controls stayed on one line -- that was the point of the row and
-        still is. The caption is a line of its own because it is the only place
-        that can name the file and its kind without eliding one of them.
+        The control stayed on ONE line -- that was the point of the row and
+        still is. What changed is that only one control is on it: the four
+        sources used to sit side by side and be kept exclusive by a rule
+        nobody could see.
         """
         column = self.widget.container.layout
         self.assertIsInstance(column, qt.QVBoxLayout)
-        controls = column.widgets[0]
+        self.assertIs(column.widgets[0], self.widget.sourceBar)
+        controls = column.widgets[1]
         self.assertIsInstance(controls.layout, qt.QHBoxLayout)
-        self.assertIs(controls.layout.widgets[0], self.widget.combo)
-        # The second line lives on the PICKER now, so a row without dropdowns
+        self.assertIn(self.widget.combo, controls.layout.widgets)
+        # The last line lives on the PICKER, so a row without extra sources
         # has one too -- a `.csv` argument used to show nothing at all.
         self.assertIs(self.widget.caption, self.widget.local.caption)
 
@@ -1542,9 +1545,11 @@ class InputSourcesTest(unittest.TestCase):
         self.widget.setVolumeChoices([])
         self.assertEqual(self.widget.combo.itemText(0),
                          formgen.ServerFileInput.PROMPT_HOSTED)
-        # Shown but GREY: hidden, nobody learns the row can be filled that way
-        # at all -- which is exactly how the feature looked missing on every
-        # module but the one whose scene happened to hold the right kind.
+
+        # Offered but GREY: without the segment nobody learns the row can be
+        # filled that way at all -- which is exactly how the feature looked
+        # missing on every module but the one whose scene happened to match.
+        self.widget._chooseSource(formgen.ServerFileInput.SOURCE_SCENE)
         self.assertTrue(self.widget.sceneCombo.isVisible())
         self.assertFalse(self.widget.sceneCombo._enabled)
 
@@ -1553,6 +1558,7 @@ class InputSourcesTest(unittest.TestCase):
         self.assertEqual(self.widget.combo.itemText(0),
                          formgen.ServerFileInput.CHOOSE_OPTION)
         self.assertTrue(self.widget.sceneCombo.isVisible())
+        self.assertTrue(self.widget.sceneCombo._enabled)
 
     def test_an_empty_list_keeps_the_neutral_words(self):
         self.widget.setChoices([])
@@ -2803,3 +2809,174 @@ class EveryColourComesFromTheTablesTest(unittest.TestCase):
         dark = design._base_stylesheet(design._DARK)
         self.assertIn(design._BUTTON_FILLS_DARK["primary"]["base"], dark)
         self.assertNotIn(design._BUTTON_FILLS_LIGHT["primary"]["base"], dark)
+
+
+class OneSourceAtATimeTest(unittest.TestCase):
+    """A file argument can be satisfied four ways -- a file on this machine, a
+    folder, the test data the server hosts, a scan already open in Slicer --
+    and exactly one at a time.
+
+    That rule used to be enforced invisibly: all four controls sat on the row
+    at once and picking in one silently emptied the others. Now the rule IS the
+    interface -- one segment pressed, one control on the row.
+    """
+
+    SOURCES = formgen.ServerFileInput
+
+    def setUp(self):
+        self.temp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.temp, True)
+        self.widget = formgen.file_widget(_VOLUME_SPEC, "file_or_folder")
+        self.widget.setChoices([
+            {"name": "MG_test_scan.nii.gz", "kind": "file", "size": 94},
+        ])
+        self.widget.setSceneSupported(True)
+        self.widget.setVolumeChoices(["CBCT_patient1"])
+
+    def _file(self, name="patient1.nii.gz"):
+        path = os.path.join(self.temp, name)
+        with open(path, "wb") as handle:
+            handle.write(b"0" * 16)
+        return path
+
+    def test_all_four_sources_are_offered(self):
+        self.assertEqual(list(self.widget.sourceButtons),
+                         [self.SOURCES.SOURCE_FILE, self.SOURCES.SOURCE_FOLDER,
+                          self.SOURCES.SOURCE_HOSTED, self.SOURCES.SOURCE_SCENE])
+
+    def test_exactly_one_segment_is_pressed(self):
+        for key in list(self.widget.sourceButtons):
+            self.widget.sourceButtons[key].click()
+            pressed = [name for name, button in self.widget.sourceButtons.items()
+                       if button.isChecked()]
+            self.assertEqual(pressed, [key])
+
+    def test_exactly_one_control_is_on_the_row(self):
+        """The four controls all live on the same line; which one is SHOWN is
+        the whole answer to "where is this input coming from"."""
+        controls = {
+            self.SOURCES.SOURCE_HOSTED: self.widget.combo,
+            self.SOURCES.SOURCE_SCENE: self.widget.sceneCombo,
+            self.SOURCES.SOURCE_FILE: self.widget.local.fileButton,
+            self.SOURCES.SOURCE_FOLDER: self.widget.local.folderButton,
+        }
+        for key in list(self.widget.sourceButtons):
+            self.widget.sourceButtons[key].click()
+            shown = [name for name, widget in controls.items() if widget.isVisible()]
+            self.assertEqual(shown, [key])
+
+    def test_switching_source_empties_the_row(self):
+        """Emptying is the point rather than a side effect: a row that kept its
+        scan while showing the folder button would be saying two things at
+        once."""
+        self.widget.sourceButtons[self.SOURCES.SOURCE_FILE].click()
+        formgen.set_local_path(self.widget, self._file())
+        self.assertTrue(self.widget.currentPath)
+
+        self.widget.sourceButtons[self.SOURCES.SOURCE_SCENE].click()
+
+        self.assertEqual(self.widget.currentPath, "")
+        self.assertEqual(self.widget.caption.text, formgen.NOTHING_CHOSEN)
+
+    def test_a_row_with_one_source_shows_no_segments_at_all(self):
+        """A choice of one is not a choice, and a single pressed segment over
+        a lone control is a decoration that looks like a decision."""
+        alone = formgen.file_widget(dict(_VOLUME_SPEC, server_selectable=None),
+                                    "single_file")
+        self.assertEqual(alone.sourceButtons, {})
+        self.assertFalse(alone.sourceBar.isVisible())
+
+    def test_a_source_that_arrives_late_gets_its_segment(self):
+        """The hosted list arrives with the schema and the scene list is
+        refreshed on every enter(): what a row can be filled from moves under
+        the panel, so the bar is rebuilt rather than drawn once."""
+        late = formgen.file_widget(_VOLUME_SPEC, "single_file")
+        self.assertNotIn(self.SOURCES.SOURCE_HOSTED, late.sourceButtons)
+
+        late.setChoices([{"name": "MG_test_scan.nii.gz", "kind": "file", "size": 1}])
+
+        self.assertIn(self.SOURCES.SOURCE_HOSTED, late.sourceButtons)
+
+    def test_the_chosen_source_survives_a_refresh_that_still_offers_it(self):
+        """Both lists are refreshed on every enter(), and a refresh must not
+        silently move the row back to its first source."""
+        self.widget.sourceButtons[self.SOURCES.SOURCE_SCENE].click()
+
+        self.widget.setVolumeChoices(["CBCT_patient1", "CBCT_patient2"])
+
+        self.assertTrue(
+            self.widget.sourceButtons[self.SOURCES.SOURCE_SCENE].isChecked())
+
+    def test_a_source_that_goes_away_hands_the_row_to_another(self):
+        """A tool whose DATA/ folder was emptied between two runs, while the
+        row was sitting on its test data."""
+        self.widget.sourceButtons[self.SOURCES.SOURCE_HOSTED].click()
+
+        self.widget.setChoices([])
+
+        self.assertNotIn(self.SOURCES.SOURCE_HOSTED, self.widget.sourceButtons)
+        self.assertEqual(self.widget._source, self.SOURCES.SOURCE_FILE)
+        self.assertTrue(self.widget.local.fileButton.isVisible())
+
+    def test_a_hosted_model_calls_its_segment_what_it_is(self):
+        """A model is never fetched -- the weights stay on the server and the
+        run names them -- so `Test data` would be wrong twice over."""
+        row = formgen.file_widget(dict(_VOLUME_SPEC, server_selectable="model"),
+                                  "single_file")
+        row.setChoices([{"name": "AMASSS_models", "kind": "folder", "size": 1}])
+
+        self.assertEqual(row.sourceButtons[self.SOURCES.SOURCE_HOSTED].text,
+                         self.SOURCES.SOURCE_MODEL_LABEL)
+
+    def test_every_segment_says_what_it_means_on_hover(self):
+        """Four one-word labels on a narrow panel: `Imported` alone does not
+        say imported into WHAT."""
+        for button in self.widget.sourceButtons.values():
+            self.assertTrue(button.toolTip())
+
+
+class TheSurfacesAreTellingApartTest(unittest.TestCase):
+    """With no outlines anywhere, the only thing separating a control from what
+    holds it is how far apart their two fills are. The first borderless pass
+    put BACKGROUND at #e8ecf2 and FIELD at #e7ebf1 -- ONE count apart -- and
+    the panel read as washed out because it was."""
+
+    #: Perceived-brightness gap two neighbouring surfaces must clear. Eight is
+    #: about where a step stops being deniable on a mid-range clinical monitor
+    #: in a bright room, which is the screen this runs on.
+    STEP = 8
+
+    #: The pairs that actually touch on screen, with the pair each one is.
+    NEIGHBOURS = (
+        ("BACKGROUND", "SURFACE"),      # a section card on the panel's ground
+        ("SURFACE", "FIELD"),           # a slot sunk into that card
+        ("FIELD", "FIELD_HOVER"),       # the same slot under the pointer
+        ("FIELD", "ACCENT_SOFT"),       # empty against chosen
+        # A catalogue's own card, and the chips standing on it. It sits INSIDE
+        # a section, so the card is its neighbour and the panel's ground is
+        # not -- no multichoice is ever drawn outside one.
+        ("SURFACE", "SURFACE_TABLE"),
+        ("SURFACE_TABLE", "FIELD"),
+    )
+
+    @staticmethod
+    def _brightness(colour):
+        red, green, blue = (int(colour[index:index + 2], 16) for index in (1, 3, 5))
+        return 0.299 * red + 0.587 * green + 0.114 * blue
+
+    def test_every_pair_that_touches_is_a_step_you_can_see(self):
+        for theme_name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            for lower, upper in self.NEIGHBOURS:
+                gap = abs(self._brightness(theme[lower]) - self._brightness(theme[upper]))
+                self.assertGreaterEqual(
+                    gap, self.STEP,
+                    "{}: {} and {} are {:.0f} apart".format(theme_name, lower, upper, gap))
+
+    def test_text_stands_well_clear_of_the_surface_it_sits_on(self):
+        """The muted colour is the one at risk: it is the quieter of the two
+        and it carries every label on the panel."""
+        for theme_name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            for ground in ("SURFACE", "FIELD"):
+                gap = abs(self._brightness(theme["TEXT_MUTED"])
+                          - self._brightness(theme[ground]))
+                self.assertGreater(gap, 80, "{}: TEXT_MUTED on {}".format(theme_name, ground))

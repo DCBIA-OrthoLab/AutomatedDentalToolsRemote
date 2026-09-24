@@ -266,19 +266,21 @@ class TwoDropdownsTest(unittest.TestCase):
         nothing to learn from the control, so it is not there."""
         self.assertFalse(self.row.sceneCombo.isVisible())
 
-    def test_a_row_it_could_fill_shows_it_greyed_while_the_scene_is_empty(self):
-        """Hidden, the feature stays invisible until the day the scene happens
-        to hold the right kind -- and nobody discovers a control that is not
-        there. That is exactly how it looked missing on every module but the
-        one whose scene happened to match. Greyed, the row says it CAN be
-        filled this way, and says why it cannot right now."""
+    def test_a_row_it_could_fill_offers_the_source_while_the_scene_is_empty(self):
+        """Without the segment the feature stays invisible until the day the
+        scene happens to hold the right kind -- and nobody discovers a control
+        that is not there. That is exactly how it looked missing on every
+        module but the one whose scene happened to match. Offered and greyed,
+        the row says it CAN be filled this way, and why it cannot right now."""
         self.row.setSceneSupported(True)
+        self.row.sourceButtons[formgen.ServerFileInput.SOURCE_SCENE].click()
 
         self.assertTrue(self.row.sceneCombo.isVisible())
         self.assertFalse(self.row.sceneCombo._enabled)
 
     def test_it_comes_alive_once_the_scene_has_something_to_offer(self):
         self.row.setSceneSupported(True)
+        self.row.sourceButtons[formgen.ServerFileInput.SOURCE_SCENE].click()
         self.row.setVolumeChoices(["L01_T2_L"])
 
         self.assertTrue(self.row.sceneCombo.isVisible())
@@ -344,11 +346,15 @@ class EmptyListsTest(unittest.TestCase):
         self.assertFalse(row.combo.isVisible())
         self.assertFalse(row.sceneCombo.isVisible())
 
-    def test_the_hosted_list_appears_with_its_first_entry(self):
+    def test_the_hosted_source_appears_once_the_server_offers_one(self):
         row = formgen.file_widget(dict(SCAN, server_selectable="testfile"),
                                   "single_file")
+        self.assertNotIn(formgen.ServerFileInput.SOURCE_HOSTED, row.sourceButtons)
 
         row.setChoices([{"name": "MG_test_scan.nii.gz", "kind": "file", "size": 1}])
+
+        self.assertIn(formgen.ServerFileInput.SOURCE_HOSTED, row.sourceButtons)
+        row.sourceButtons[formgen.ServerFileInput.SOURCE_HOSTED].click()
         self.assertTrue(row.combo.isVisible())
 
     def test_it_goes_again_when_the_server_offers_nothing(self):
@@ -356,8 +362,11 @@ class EmptyListsTest(unittest.TestCase):
         row = formgen.file_widget(dict(SCAN, server_selectable="testfile"),
                                   "single_file")
         row.setChoices([{"name": "MG_test_scan.nii.gz", "kind": "file", "size": 1}])
+        row.sourceButtons[formgen.ServerFileInput.SOURCE_HOSTED].click()
 
         row.setChoices([])
+
+        self.assertNotIn(formgen.ServerFileInput.SOURCE_HOSTED, row.sourceButtons)
         self.assertFalse(row.combo.isVisible())
 
 
@@ -510,11 +519,15 @@ class CaptionSpansTheRowTest(unittest.TestCase):
 
         self.assertIn(plain.caption, plain.container.layout.widgets)
 
-    def test_the_buttons_stay_on_the_first_line(self):
+    def test_the_browse_buttons_are_on_the_control_line(self):
+        """One per SOURCE, and taken out of the pair the picker packs them
+        into: `File...` and `Folder...` are two different sources here, and
+        only one of them is ever on the row."""
         row = formgen.file_widget(self.WRAPPED, "file_or_folder")
 
-        controls = row.container.layout.widgets[0]
-        self.assertIn(row.local.buttons, controls.layout.widgets)
+        controls = row.container.layout.widgets[1]
+        self.assertIn(row.local.fileButton, controls.layout.widgets)
+        self.assertIn(row.local.folderButton, controls.layout.widgets)
 
 
 class NameVocabularyTest(unittest.TestCase):
@@ -729,3 +742,42 @@ class ARoiIsItsOwnKindTest(unittest.TestCase):
         """The file format is the same as a fiducial list's -- only the node
         class differs -- so a picked box uploads as `.mrk.json`."""
         self.assertEqual(formgen.SCENE_NODE_KINDS["roi"][1], ".mrk.json")
+
+
+class PickingFromTheSceneReEvaluatesApplyTest(unittest.TestCase):
+    """An imported scan leaves NO local path behind -- it is exported at
+    upload time -- so the only thing that can announce it is the scene list
+    itself. It was the one source `connect_changed` did not listen to, and
+    Apply stayed grey over a row the user had just filled."""
+
+    def _row(self):
+        """A row switched to its scene source, the way a click on the segment
+        leaves it."""
+        row = formgen.file_widget(SCAN, "single_file", "scans")
+        row.setSceneSupported(True)
+        row.setVolumeChoices(["CBCT_patient1"])
+        row.sourceButtons[formgen.ServerFileInput.SOURCE_SCENE].click()
+        return row
+
+    def test_choosing_one_announces_itself(self):
+        row = self._row()
+        seen = []
+        formgen.connect_changed(row, lambda *args: seen.append(1))
+
+        row.sceneCombo.setCurrentIndex(1)
+
+        self.assertEqual(row.volume_name(), "CBCT_patient1")
+        self.assertTrue(seen, "the row was filled and nothing was told")
+
+    def test_switching_source_away_from_it_announces_that_too(self):
+        """Switching source empties the row, which is exactly the moment Apply
+        has to go back to grey."""
+        row = self._row()
+        row.sceneCombo.setCurrentIndex(1)
+        seen = []
+        formgen.connect_changed(row, lambda *args: seen.append(1))
+
+        row.sourceButtons[formgen.ServerFileInput.SOURCE_FILE].click()
+
+        self.assertEqual(row.volume_name(), "")
+        self.assertTrue(seen, "the row was emptied and nothing was told")

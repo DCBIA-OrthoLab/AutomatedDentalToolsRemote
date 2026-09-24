@@ -528,6 +528,17 @@ class QComboBox(QObject):
         return self._index
 
     def setCurrentIndex(self, index):
+        """Emits only on a REAL change, as Qt does.
+
+        It emitted unconditionally, which is a stub lying in the direction of
+        "everything notifies" -- and it hid a live defect: picking a node in
+        the scene list re-evaluated Apply only because resetting the OTHER
+        list to an index it was already on fired a signal here. Against real
+        Qt it fired nothing, and the panel kept Apply greyed over a row the
+        user had just filled.
+        """
+        if index == self._index:
+            return
         self._index = index
         # Both, as Qt does. A panel that reacts to the SELECTION rather than to
         # the label has to connect currentIndexChanged — two entries can show

@@ -1217,6 +1217,7 @@ class FileOrFolderInput:
         # The buttons sit at the left of the space the row gives them rather
         # than spreading across it: they are two short actions, not a field.
         row_layout.addStretch(1)
+        self._buttonRow = row_layout
         column.addWidget(buttons)
         # Kept as its own widget so the sources wrapper can put the BUTTONS on
         # its line and the caption under the whole row. Nested inside this
@@ -1248,6 +1249,19 @@ class FileOrFolderInput:
         self.describe()
         for listener in list(self._listeners):
             listener()
+
+    def detachButtons(self):
+        """Hand the browse buttons over, taking them out of this row.
+
+        The wrapper shows ONE source's control at a time, so it needs the two
+        buttons as separate widgets rather than as the pair this class packs
+        them into -- `File...` and `Folder...` are two different sources, not
+        two halves of one.
+        """
+        buttons = [self.fileButton, self.folderButton]
+        while self._buttonRow.count():
+            self._buttonRow.takeAt(0)
+        return [button for button in buttons if button is not None]
 
     def detachCaption(self):
         """Hand the caption over, taking it out of this row's own column.
@@ -1388,9 +1402,33 @@ class ServerFileInput:
     PROMPT_HOSTED = "Test data..."
     PROMPT_MODEL = "Model on the server..."
 
+    # The four ways one file argument can be satisfied. Keys, not labels: the
+    # words are `SOURCE_LABELS` and change with the row (`Test data` is
+    # `Model` where the hosted entry is weights), the identity does not.
+    SOURCE_FILE = "file"
+    SOURCE_FOLDER = "folder"
+    SOURCE_HOSTED = "hosted"
+    SOURCE_SCENE = "scene"
+    SOURCE_ORDER = (SOURCE_FILE, SOURCE_FOLDER, SOURCE_HOSTED, SOURCE_SCENE)
+    SOURCE_LABELS = {
+        SOURCE_FILE: "File",
+        SOURCE_FOLDER: "Folder",
+        SOURCE_HOSTED: "Test data",
+        SOURCE_SCENE: "Imported",
+    }
+    SOURCE_MODEL_LABEL = "Model"
+    SOURCE_HINTS = {
+        SOURCE_FILE: "One file on this computer",
+        SOURCE_FOLDER: "A folder on this computer, sent as one archive",
+        SOURCE_HOSTED: "Data the server hosts for this tool",
+        SOURCE_SCENE: "Something already open in Slicer",
+    }
+    SOURCE_MODEL_HINT = "A model already on the server, used where it is"
+
     def __init__(self, local, hosted_downloads=True, on_hosted=None):
         self.local = local
         self._syncing = False
+        self._source = None
         self._hosted = []  # [{"name", "kind", "size"}], in server order
         # How a scene pick is named on the second line, and what its dropdown
         # calls itself. Set by base_widget from the kinds this argument
@@ -1423,6 +1461,18 @@ class ServerFileInput:
         column = qt.QVBoxLayout(self.container)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
+        # A segmented control over the row: which of the four sources this
+        # input is being filled from. Only the ones this argument can actually
+        # take are drawn, and it is hidden entirely when there is only one --
+        # a choice of one is not a choice.
+        self.sourceBar = qt.QWidget()
+        self._sourceRow = qt.QHBoxLayout(self.sourceBar)
+        self._sourceRow.setContentsMargins(0, 0, 0, design.SPACING_SM)
+        self._sourceRow.setSpacing(design.SPACING_XS)
+        self.sourceButtons = {}
+        self.sourceBar.setVisible(False)
+        column.addWidget(self.sourceBar)
+
         controls = qt.QWidget()
         row = qt.QHBoxLayout(controls)
         row.setContentsMargins(0, 0, 0, 0)
@@ -1448,7 +1498,6 @@ class ServerFileInput:
         # the same rule the scene list follows, applied from the start rather
         # than only on the first rebuild.
         self.combo.setVisible(False)
-        row.addWidget(self.combo)
 
         # A SECOND dropdown, not more entries in the first. The two answer
         # different questions -- "fetch the tool's sample data" and "use what is
@@ -1464,11 +1513,32 @@ class ServerFileInput:
         # Hidden until there is something in it: an empty dropdown is a control
         # that can only disappoint, and most rows never get one.
         self.sceneCombo.setVisible(False)
-        row.addWidget(self.sceneCombo)
 
-        # The picker's BUTTONS, not its whole container: its caption goes under
-        # the entire row below, spanning the dropdowns too.
-        row.addWidget(getattr(local, "buttons", None) or row_widget(local), 1)
+        # The picker's browse buttons, one per source, taken out of the pair it
+        # packs them into: `File...` and `Folder...` are two different sources
+        # here, and only one of them is ever on the row.
+        detach = getattr(local, "detachButtons", None)
+        self._localButtons = {}
+        if detach:
+            for button in detach():
+                key = (self.SOURCE_FOLDER if button is local.folderButton
+                       else self.SOURCE_FILE)
+                self._localButtons[key] = button
+        else:
+            # A bare Qt field, which only a test builds now. It has no sources
+            # of its own to choose between, so it simply IS the file source.
+            self._localButtons[self.SOURCE_FILE] = row_widget(local)
+
+        # Added in SOURCE_ORDER, the order the segments above are drawn in.
+        # Only one is ever visible, so this changes nothing on screen -- it
+        # keeps the code readable in the order the panel reads.
+        for key in self.SOURCE_ORDER:
+            control = self._localButtons.get(key)
+            if control is None:
+                control = {self.SOURCE_HOSTED: self.combo,
+                           self.SOURCE_SCENE: self.sceneCombo}.get(key)
+            if control is not None:
+                row.addWidget(control, 1)
         column.addWidget(controls)
 
         # The picker carries the row's second line, so a row with dropdowns and
@@ -1491,6 +1561,113 @@ class ServerFileInput:
         connect_changed(local, self._describe)
         self.combo.currentTextChanged.connect(self._describe)
         self.sceneCombo.currentTextChanged.connect(self._describe)
+
+        self._rebuildSources()
+
+    # -- which of the four sources this row is being filled from -----------
+
+    def _availableSources(self) -> list:
+        """The sources this argument can actually be filled from, right now.
+
+        Two of them are properties of the ARGUMENT and never change: whether it
+        takes a file, whether it takes a folder. Two are properties of the
+        SERVER and the SCENE and change under the panel -- the hosted list
+        arrives with the schema, the scene list is refreshed on every enter().
+        """
+        available = [key for key in (self.SOURCE_FILE, self.SOURCE_FOLDER)
+                     if key in self._localButtons]
+        if self._hosted:
+            available.append(self.SOURCE_HOSTED)
+        if self._scene_supported:
+            available.append(self.SOURCE_SCENE)
+        return [key for key in self.SOURCE_ORDER if key in available]
+
+    def _sourceLabel(self, key: str) -> str:
+        if key == self.SOURCE_HOSTED and not self.hosted_downloads:
+            return self.SOURCE_MODEL_LABEL
+        return self.SOURCE_LABELS[key]
+
+    def _sourceHint(self, key: str) -> str:
+        if key == self.SOURCE_HOSTED and not self.hosted_downloads:
+            return self.SOURCE_MODEL_HINT
+        if key == self.SOURCE_SCENE:
+            return "A {} already open in Slicer".format(self._scene_label.lower())
+        return self.SOURCE_HINTS[key]
+
+    def _rebuildSources(self) -> None:
+        """Redraw the segmented control, and keep the chosen source when it is
+        still offered.
+
+        Rebuilt rather than merely re-labelled because what is on offer moves:
+        a row has one source at `setup()` and three once the schema and the
+        scene have been read, and a bar built once would show the first state
+        for ever.
+        """
+        available = self._availableSources()
+        while self._sourceRow.count():
+            item = self._sourceRow.takeAt(0)
+            widget = item.widget() if hasattr(item, "widget") else None
+            if widget is not None:
+                widget.setParent(None)
+        self.sourceButtons = {}
+
+        # One source is not a choice: the control speaks for itself, and a
+        # single pressed segment over it would be a decoration that looks like
+        # a decision.
+        if len(available) > 1:
+            for key in available:
+                button = design.segment_button(self._sourceLabel(key))
+                button.setToolTip(self._sourceHint(key))
+                button.connect("clicked()", self._sourcePicker(key))
+                self.sourceButtons[key] = button
+                # Equal stretch: four sources of equal standing, and a bar that
+                # spans exactly the row it commands.
+                self._sourceRow.addWidget(button, 1)
+        self.sourceBar.setVisible(bool(self.sourceButtons))
+
+        if self._source not in available:
+            self._source = available[0] if available else None
+        self._showActive()
+
+    def _sourcePicker(self, key: str):
+        """A click on one segment, as a callable Qt can hold.
+
+        A closure rather than `functools.partial` on a bound method: PythonQt
+        keeps no reference to a partial's target, and the slot stops firing as
+        soon as it is collected.
+        """
+        def picked():
+            self._chooseSource(key)
+        return picked
+
+    def _chooseSource(self, key: str) -> None:
+        """Switch the row to `key`, and EMPTY it.
+
+        Emptying is the point rather than a side effect: one source at a time
+        is what the segments say, and a row that kept its scan while showing
+        the folder button would be saying two things at once. It is also the
+        only moment a clinician can lose a pick by accident, which is why the
+        caption underneath goes straight back to saying nothing was chosen.
+        """
+        if key == self._source:
+            return
+        self._source = key
+        self._clearOthers(keep=None)
+        self._showActive()
+        self._describe()
+
+    def _showActive(self) -> None:
+        """One source's control on the row, and one pressed segment."""
+        for key, button in self.sourceButtons.items():
+            button.setChecked(key == self._source)
+        for key, widget in self._localButtons.items():
+            widget.setVisible(key == self._source)
+        self.combo.setVisible(self._source == self.SOURCE_HOSTED)
+        self.sceneCombo.setVisible(self._source == self.SOURCE_SCENE)
+        # Greyed rather than hidden when the scene holds nothing of the right
+        # kind: the segment is how a clinician learns the row can be filled
+        # that way at all, and a control that vanishes teaches nobody.
+        self.sceneCombo.setEnabled(bool(self._volume_names))
 
     def setHostedCallback(self, callback) -> None:
         """What to do when the user picks a hosted test file: base_widget
@@ -1605,11 +1782,9 @@ class ServerFileInput:
             self.sceneCombo.setToolTip(entries[0])
         finally:
             self._syncing = False
-        # Shown whenever the argument could take one, greyed when the scene
-        # holds none: the control is how a clinician learns the row can be
-        # filled that way at all.
-        self.sceneCombo.setVisible(self._scene_supported)
-        self.sceneCombo.setEnabled(bool(self._volume_names))
+        # What is VISIBLE is the segmented control's business, not this
+        # method's: a list may be refreshed while another source is showing.
+        self._rebuildSources()
 
     def _rebuild(self) -> None:
         previous = self.combo.currentText
@@ -1627,10 +1802,10 @@ class ServerFileInput:
             self.combo.setToolTip(entries[0])
         finally:
             self._syncing = False
-        # Hidden when it holds only its own prompt, the way the scene list is.
-        # Most arguments host no test files, and a dropdown that can only ever
-        # offer nothing is a control a user opens once and stops trusting.
-        self.combo.setVisible(bool(self._hosted))
+        # Visibility belongs to the segmented control. What this decides is
+        # whether the source exists at all -- most arguments host no test files
+        # and never get the segment.
+        self._rebuildSources()
 
     def _widenPopup(self) -> None:
         """Let the dropdown LIST show a whole entry, however narrow the box is.
@@ -2651,9 +2826,17 @@ def connect_changed(widget, callback) -> None:
         for box in widget.boxes.values():
             box.toggled.connect(callback)
     elif isinstance(widget, ServerFileInput):
-        # Either half can satisfy the argument, so either half changing must
-        # re-evaluate whether Apply can be enabled.
+        # EVERY source can satisfy the argument, so every one of them changing
+        # must re-evaluate whether Apply can be enabled.
+        #
+        # The scene list was missing here, and the row it fills leaves no local
+        # path behind -- an imported scan is exported at upload time -- so
+        # picking one satisfied the argument and told nobody: Apply stayed grey
+        # over a row the user had just filled. It went unseen because the stub's
+        # combo box emitted on every `setCurrentIndex`, change or not, so the
+        # reset of the OTHER list fired a signal that real Qt does not.
         widget.combo.currentTextChanged.connect(callback)
+        widget.sceneCombo.currentTextChanged.connect(callback)
         connect_changed(widget.local, callback)
     elif isinstance(widget, FileOrFolderInput):
         # Its own callback list rather than a Qt signal: the field that used to
