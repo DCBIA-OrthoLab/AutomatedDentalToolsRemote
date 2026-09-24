@@ -826,15 +826,6 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self.flagButton.connect("clicked()", self.onFlagToggled)
         actions.addWidget(self.flagButton, 1)
 
-        # Only when there IS somewhere to go back to. A caller that opened
-        # VISU on a folder, or a run whose earlier steps can only be looked
-        # at, offers nothing here -- and an offer that leads nowhere is worse
-        # than no offer.
-        self.rewindButton = design.primary_button(_("Go back"))
-        self.rewindButton.connect("clicked()", self.onRewind)
-        self.rewindButton.setVisible(False)
-        actions.addWidget(self.rewindButton, 1)
-
         self.saveButton = design.primary_button(_("Save"))
         self.saveButton.toolTip = _(
             "Write what changed: the points that moved, and the scan's "
@@ -853,11 +844,16 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # once and ends the review. Two identical buttons side by side, one of
         # which hands the cohort back to a running job, is the pair that gets
         # pressed by mistake.
+        #
+        # ONE button, whose words change with what it is about to do: Continue
+        # while nothing is marked, and a step BACKWARDS the moment something
+        # is. Two buttons were tried first and are the worse shape -- a reader
+        # who has just marked three patients is offered "carry on" and "go
+        # back" side by side, which is a choice they have already made by
+        # marking them. It keeps the same green in both states on purpose:
+        # `Save` beside it is the blue one, and a second blue button here is
+        # the pair that gets pressed by mistake.
         self.continueButton = design.success_button(_("Continue"))
-        self.continueButton.toolTip = _(
-            "Give this back to the tool that opened it. What you corrected is "
-            "written first, then the run carries on from where it stopped."
-        )
         self.continueButton.connect("clicked()", self.onContinue)
         self.continueButton.setVisible(False)
         self.panel.addWidget(self.continueButton)
@@ -894,6 +890,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self.position = 0
         self._folder = folder
         self._flagged = review.load(folder) if folder else set()
+        self._syncHandBack()
         self._describeReview()
 
         self._filling = True
@@ -1045,12 +1042,21 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             .format(number=number, where=where) if number
             else _("Reviewing {where}. It is waiting for you.").format(where=where))
 
-    def _syncRewindControls(self) -> None:
-        """The flag's wording, and whether going back is offered at all.
+    def _goingBack(self) -> bool:
+        """Whether the hand-back button would go BACKWARDS if pressed now.
 
-        The words are the local module's, unchanged: a reader who used it
-        reads the same sentence here, and "mark this one" never said what
-        marking would DO.
+        Marking a patient is the whole decision: somebody who marked three
+        has said those three need an earlier step again, so the one button
+        they have left follows what they said rather than asking them again.
+        """
+        return bool(self._rewind and self._flagged)
+
+    def _syncHandBack(self) -> None:
+        """The flag's wording, and what the one button below says it will do.
+
+        The flag's words are the local module's, unchanged: a reader who used
+        it reads the same sentence here, and "mark this one" never said what
+        marking would DO. The button then says the rest of that sentence.
         """
         somewhere = bool(self._rewind)
         if somewhere and self.flagButton.isChecked():
@@ -1059,26 +1065,24 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             self.flagButton.setText(_("Go back and edit this patient"))
         else:
             self.flagButton.setText(_("Flag"))
-        self.rewindButton.setVisible(somewhere and bool(self._flagged))
-        if somewhere and self._flagged:
-            self.rewindButton.setText(
+
+        if self._goingBack():
+            self.continueButton.setText(
                 _("Go back to {step} for {count} patient(s)").format(
                     step=self._rewind.get("tool") or _("the previous step"),
                     count=len(self._flagged)))
-
-    def onRewind(self) -> None:
-        """Ask the caller to take the flagged patients back a step.
-
-        Saves first, exactly as Continue does: the point a reader dragged
-        before pressing this is part of what they are asking to be used.
-        """
-        if not (self._rewind and self._flagged and self._continue):
-            return
-        self._leaving()
-        handler, self._continue = self._continue, None
-        self.rewindButton.setVisible(False)
-        self.continueButton.setVisible(False)
-        handler(self.reviewed(rewind_to=self._rewind.get("slot")))
+            self.continueButton.toolTip = _(
+                "Write what you corrected, then take the marked patients "
+                "back to that step so they can be done again from there. "
+                "Everyone else keeps the result they already have."
+            )
+        else:
+            self.continueButton.setText(_("Continue"))
+            self.continueButton.toolTip = _(
+                "Give this back to the tool that opened it. What you "
+                "corrected is written first, then the run carries on from "
+                "where it stopped."
+            )
 
     def onFlagToggled(self) -> None:
         if not self.cases:
@@ -1089,7 +1093,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
             self._flagged.add(key)
         else:
             self._flagged.discard(key)
-        self._syncRewindControls()
+        self._syncHandBack()
         if self._folder and not review.save(self._folder, self._flagged):
             # Said once, where the list is, rather than in a dialog over a
             # scan. A hosted sample is unpacked into a temporary folder the
@@ -1120,6 +1124,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         if self._folder:
             review.save(self._folder, self._flagged)
         self._readFlag()
+        self._syncHandBack()
         self._describeReview()
         self._describePosition()
 
@@ -1636,6 +1641,7 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         self._rewind = rewind
         self._showOrigin(origin)
         self.continueButton.setVisible(on_continue is not None)
+        self._syncHandBack()
         # Reviewing this folder starts now, whatever an earlier pass over it
         # wrote: the caller wants what this reader changes, not the union.
         self._written = set()
@@ -1690,8 +1696,11 @@ class VISUWidget(ScriptedLoadableModuleWidget):
         # well come back through this panel, and a second Continue would
         # resume one run twice.
         handler, self._continue = self._continue, None
+        # Read BEFORE the button is hidden and while the flags are still
+        # standing: this is the one place the two destinations part company.
+        backwards = self._rewind.get("slot") if self._goingBack() else None
         self.continueButton.setVisible(False)
-        handler(self.reviewed())
+        handler(self.reviewed(rewind_to=backwards))
 
     # -- leaving -----------------------------------------------------------
 

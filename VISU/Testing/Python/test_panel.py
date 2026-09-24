@@ -219,7 +219,7 @@ slicer.i18n.tr = lambda text: text
 sys.modules["slicer.i18n"] = slicer.i18n
 
 import VISU  # noqa: E402
-from VISULib import index  # noqa: E402
+from VISULib import index, review  # noqa: E402
 
 
 OPENED = []
@@ -1210,6 +1210,82 @@ class HandingBackTest(unittest.TestCase):
         self.assertEqual(len(self.handed), 1)
         self.assertEqual(self.handed[0]["flagged"], {"p1"})
         self.assertEqual(self.handed[0]["folder"], folder)
+
+    # -- one button, two destinations --------------------------------------
+    #
+    # The reader has one control at the bottom of the panel and it says what
+    # it is about to do. Marking a patient is what changes it: somebody who
+    # marked three has already decided those three need an earlier step.
+
+    BACK = {"slot": "01_ALI_CBCT", "tool": "ALI_CBCT", "kind": "landmarks"}
+
+    def test_the_button_says_continue_while_nothing_is_marked(self):
+        self.widget.openForReview(
+            self.folder([f"results/p{n}_scan.nii.gz" for n in (1, 2)]),
+            self.handed.append, rewind=self.BACK)
+        self.assertEqual(self.widget.continueButton.text, "Continue")
+
+    def test_marking_a_patient_turns_the_button_into_the_way_back(self):
+        self.widget.openForReview(
+            self.folder([f"results/p{n}_scan.nii.gz" for n in (1, 2)]),
+            self.handed.append, rewind=self.BACK)
+        self.widget.flagButton.setChecked(True)
+        self.widget.onFlagToggled()
+        self.assertEqual(self.widget.continueButton.text,
+                         "Go back to ALI_CBCT for 1 patient(s)")
+
+    def test_pressing_it_asks_for_the_step_the_marked_patients_go_back_to(self):
+        self.widget.openForReview(
+            self.folder([f"results/p{n}_scan.nii.gz" for n in (1, 2)]),
+            self.handed.append, rewind=self.BACK)
+        self.widget.flagButton.setChecked(True)
+        self.widget.onFlagToggled()
+
+        self.widget.onContinue()
+
+        self.assertEqual(self.handed[0]["rewind_to"], "01_ALI_CBCT")
+        self.assertEqual(self.handed[0]["flagged"], {"p1"})
+
+    def test_with_nothing_marked_it_hands_back_no_step_at_all(self):
+        # The same button, the same press: what parts company is the mark.
+        self.widget.openForReview(
+            self.folder(["results/p1_scan.nii.gz"]),
+            self.handed.append, rewind=self.BACK)
+        self.widget.onContinue()
+        self.assertIsNone(self.handed[0]["rewind_to"])
+
+    def test_with_nowhere_to_go_back_marking_leaves_a_plain_continue(self):
+        # A run whose earlier steps can only be LOOKED at, or a reader who
+        # opened VISU themselves. An offer that leads nowhere is worse than
+        # no offer.
+        self.widget.openForReview(
+            self.folder(["results/p1_scan.nii.gz"]), self.handed.append)
+        self.widget.flagButton.setChecked(True)
+        self.widget.onFlagToggled()
+        self.assertEqual(self.widget.continueButton.text, "Continue")
+
+        self.widget.onContinue()
+        self.assertIsNone(self.handed[0]["rewind_to"])
+        self.assertEqual(self.handed[0]["flagged"], {"p1"},
+                         "the mark still travels, it just changes nothing here")
+
+    def test_clearing_the_marks_turns_it_back_into_continue(self):
+        self.widget.openForReview(
+            self.folder(["results/p1_scan.nii.gz"]),
+            self.handed.append, rewind=self.BACK)
+        self.widget.flagButton.setChecked(True)
+        self.widget.onFlagToggled()
+        self.widget.onClearFlags()
+        self.assertEqual(self.widget.continueButton.text, "Continue")
+
+    def test_a_folder_that_already_holds_marks_opens_on_the_way_back(self):
+        # The list is written beside the data, so a reader can come back
+        # tomorrow -- and the button has to know that before they touch it.
+        folder = self.folder([f"results/p{n}_scan.nii.gz" for n in (1, 2)])
+        review.save(folder, {"p1", "p2"})
+        self.widget.openForReview(folder, self.handed.append, rewind=self.BACK)
+        self.assertEqual(self.widget.continueButton.text,
+                         "Go back to ALI_CBCT for 2 patient(s)")
 
     def test_continue_writes_the_correction_before_handing_back(self):
         # The reader pressed Continue, not Save, and the point they just
