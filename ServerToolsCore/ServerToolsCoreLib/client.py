@@ -55,6 +55,16 @@ _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 # which is what makes this safe to send unconditionally.
 _RESULT_DELIVERY_HEADER = {"X-Result-Delivery": "reference"}
 
+# Opts one run out of the blocking contract: the POST answers 202 as soon as the
+# inputs are staged, and the result reference arrives on the terminal event of
+# the stream this client already watches.
+#
+# What it fixes is not hypothetical. The POST's read timeout is TIMEOUT seconds
+# (600 by default, an hour at the very most a user can dial in), while a cohort
+# legitimately runs for longer; and a dropped connection never stopped the run,
+# it only threw the answer away after the GPU had been spent on it.
+_RUN_DELIVERY_HEADER = {"X-Run-Delivery": "detached"}
+
 # Connections the pool keeps alive per host. Must exceed the transfer
 # parallelism, or the parallel parts queue up on each other inside urllib3 and
 # the whole point is lost.
@@ -65,6 +75,13 @@ _CONNECTION_POOL_SIZE = 16
 # _UPLOADS_FIELD; double-underscored so it can never collide with a tool's
 # argument name.
 _UPLOADS_FIELD = "__uploads__"
+
+# The argument the server injects on a tool whose chain can be interrupted: a
+# multichoice of the steps a run may stop after, every option off by default
+# (server-side `registry/schema_tool.STOP_AFTER_ARGUMENT`). This side only
+# ever READS it -- it is published in the schema like any other argument and
+# rendered like any other multichoice.
+STOP_AFTER_ARGUMENT = "stop_after"
 
 # ----------------------------------------------------------------------
 # Run progress and cancellation (see the wire contract shared with the
@@ -229,7 +246,7 @@ def normalise_run_event(payload) -> Optional[dict]:
     if not isinstance(message, str):
         message = str(message)
 
-    return {
+    event = {
         "seq": seq,
         "at": payload.get("at"),
         "state": payload.get("state") or "",
@@ -238,6 +255,13 @@ def normalise_run_event(payload) -> Optional[dict]:
         "message": message[:_RUN_MESSAGE_MAX_LEN],
         "depth": depth,
     }
+    # Only on a detached run's terminal event, and it is how the answer gets
+    # back at all: the response that used to carry it was a 202, sent before
+    # the tool had started. Kept exactly as the server sent it -- this side
+    # does not interpret it, it hands it to _download_reference.
+    if isinstance(payload.get("result"), dict):
+        event["result"] = payload["result"]
+    return event
 
 
 def _download_message(received: int, expected: Optional[int], label: str = "results") -> str:
@@ -436,6 +460,23 @@ def testfile_entries(data: dict) -> list:
     return entries
 
 
+def _asks_to_stop(args: dict) -> bool:
+    """Whether this request arms a quality-control checkpoint.
+
+    Read off the argument the caller is already sending rather than declared
+    anywhere: the panel renders `stop_after` like any other multichoice, so
+    the complete `{step: ticked}` dict arrives here and the only question is
+    whether anything in it is on. A comma-separated string and a list are
+    accepted too, those being the other two spellings the server takes.
+    """
+    wanted = (args or {}).get(STOP_AFTER_ARGUMENT)
+    if isinstance(wanted, dict):
+        return any(bool(on) for on in wanted.values())
+    if isinstance(wanted, (list, tuple, set)):
+        return any(str(step).strip() for step in wanted)
+    return bool(str(wanted or "").strip())
+
+
 def _pooled_session() -> requests.Session:
     """One Session for every call this client makes, instead of a fresh
     connection per request.
@@ -462,12 +503,37 @@ def _pooled_session() -> requests.Session:
 
 
 @dataclass
+class RunCheckpoint:
+    """A run that stopped where it was asked to, and can be told to carry on.
+
+    `produced` is the server's own folder names for the steps that ran, in
+    order -- `("01_ALI_CBCT",)`. They are not decoration: `resume_run` sends
+    one correction per step, named after exactly these, and the server refuses
+    a field named anything else.
+
+    `path` is the archive of what those steps produced, already on disk, or
+    None when the checkpoint collected nothing. Only outputs of SUPERVISED
+    calls are ever shipped from a stopped run, so a tool that stopped inside
+    its own work has a checkpoint with nothing to look at.
+    """
+
+    run_id: str
+    stopped_after: str
+    produced: tuple = ()
+    path: Optional[str] = None
+
+
+@dataclass
 class ToolResult:
     """Uniform result regardless of output_kind."""
 
-    kind: str  # "text" | "file"
+    kind: str  # "text" | "file" | "checkpoint"
     text: Optional[str] = None
     path: Optional[str] = None
+    # Set only for kind "checkpoint": the run has NOT finished and is waiting
+    # on `resume_run`. A caller that has never heard of this reads None and
+    # behaves exactly as it always did.
+    checkpoint: Optional[RunCheckpoint] = None
 
 
 class ToolServerClient:
@@ -480,6 +546,7 @@ class ToolServerClient:
         parallelism=transfer.DEFAULT_PARALLELISM,
         chunk_bytes=transfer.DEFAULT_CHUNK_BYTES,
         compress_uploads=True,
+        detached_runs=False,
     ):
         self._server_url = server_url.rstrip("/")
         self._token = token
@@ -488,6 +555,10 @@ class ToolServerClient:
         self._parallelism = parallelism
         self._chunk_bytes = chunk_bytes
         self._compress_uploads = compress_uploads
+        # Opt in to the detached contract. Off by default: it needs a server
+        # that knows the header, and a client that says nothing keeps the
+        # behaviour it always had, byte for byte.
+        self._detached_runs = detached_runs
         self._tools_cache = None
         # None until the first big upload tells us; False pins every later one
         # to the single-request path, so an old server costs one failed probe
@@ -803,11 +874,36 @@ class ToolServerClient:
 
         self._raise_if_cancelled(cancel_event, tool_name)
 
+        # Detaching needs an id to report through, so a caller that minted none
+        # keeps the blocking contract whatever the setting says. Decided BEFORE
+        # the uploads, because it changes which of them travel in the request.
+        #
+        # ...and a run that asked to stop at a checkpoint keeps it too. The
+        # server delivers the quality-control record -- what it produced, and
+        # the reference to fetch it by -- in the RESPONSE BODY and nowhere
+        # else: its detached path answers 202, writes a non-terminal `paused`
+        # event and drops the payload it had built. So a detached run of this
+        # kind would wait on a terminal event that never comes, then fail on
+        # the stream's idle timeout with a message about losing track of it.
+        # Blocking, the same run works, and the ceiling detaching exists to
+        # lift is not the binding one here: the wait is a person reading
+        # scans, and the POST is answered as soon as the run stops.
+        detached = bool(self._detached_runs and run_id) and not _asks_to_stop(args)
+
         # Anything big enough to be worth it goes up FIRST, in parallel parts,
         # and this request then only references it. What stays in `files` is
         # what is small enough that a second and third round trip would cost
         # more than the single-connection upload does.
-        files, upload_references = self._upload_large_inputs(files, progress_cb)
+        #
+        # ...unless the run is detached, in which case EVERY file goes up this
+        # way however small. The server answers 202 before the tool starts, so
+        # there is no point in the request at which it could stage a multipart
+        # body, and it refuses one -- correctly, and with a message naming
+        # POST /uploads. Sending an 80 kB landmark file on a detached run was a
+        # refusal, not a slow path: the size threshold and the delivery mode
+        # were decided independently of each other and could disagree.
+        files, upload_references = self._upload_large_inputs(
+            files, progress_cb, always=detached)
         if upload_references:
             data[_UPLOADS_FIELD] = json.dumps(upload_references)
 
@@ -817,6 +913,8 @@ class ToolServerClient:
             progress_cb(f"Sending '{tool_name}' request...")
 
         post_headers = {**headers, **_RESULT_DELIVERY_HEADER}
+        if detached:
+            post_headers.update(_RUN_DELIVERY_HEADER)
         if run_id:
             # A header, so a server that has never heard of it ignores an
             # unknown header and answers exactly as it always did. Sent even
@@ -847,7 +945,11 @@ class ToolServerClient:
         # outcome, a watcher left retrying against a run that has already
         # answered being a thread holding a connection open for no one.
         watch_stop = threading.Event()
-        watcher = self._start_watcher(run_id, event_cb, watch_stop, cancel_event)
+        # Not for a detached run: that one reads the same stream on this thread
+        # and would otherwise have two readers of one run, both delivering every
+        # event to the same callback.
+        watcher = (None if self._detached_runs and run_id
+                   else self._start_watcher(run_id, event_cb, watch_stop, cancel_event))
 
         try:
             file_handles = []
@@ -899,10 +1001,22 @@ class ToolServerClient:
             # side can still avoid doing.
             self._raise_if_cancelled(cancel_event, tool_name, response=response)
 
+            if detached:
+                # 202 and nothing else: the run has not started yet. Everything
+                # from here arrives on the stream, read on THIS thread -- the
+                # caller has nothing else to do, and reading it here is what
+                # makes the wait resumable, since watch_run reconnects and
+                # dedupes on `seq` where a dropped POST simply lost the answer.
+                return self._collect_detached(
+                    tool_name, run_id, response, schema, output_dir,
+                    progress_cb, event_cb, cancel_event,
+                )
+
             if progress_cb:
                 progress_cb("Processing response...")
 
-            return self._build_result(tool_name, response, schema, output_dir, progress_cb)
+            return self._build_result(tool_name, response, schema, output_dir,
+                                      progress_cb, run_id=run_id)
         finally:
             # Whatever happened - a result, a 499, a dropped connection - the
             # run this watcher was reading is over. Left running, it would keep
@@ -1124,11 +1238,115 @@ class ToolServerClient:
             logger.debug("Server refused to cancel a run: HTTP %d", response.status_code)
         return False
 
+    def resume_run(
+        self,
+        tool_name: str,
+        run_id: str,
+        corrections: Optional[dict] = None,
+        output_dir: Optional[str] = None,
+        progress_cb: Optional[Callable[[str], None]] = None,
+        rewind_to: Optional[str] = None,
+    ) -> ToolResult:
+        """Carry a stopped run on: POST /runs/{id}/resume.
+
+        `rewind_to` sends it BACKWARDS instead: the run is armed again at a
+        checkpoint it already cleared and stops there, with that step's
+        result untouched for a reader to correct. The same route otherwise --
+        one more field, one different path -- because what comes back is the
+        same thing either way: a finished run, or another checkpoint.
+
+        `corrections` is {step name: local path}, the step names being exactly
+        the `produced` entries of the checkpoint -- the server matches them
+        against the folders the run actually wrote and answers 400 for
+        anything else. An empty mapping is legal and means "carry on with what
+        you produced", which is what a reader who changed nothing asks for.
+
+        Blocking, and it has to be: the server offers no detached resume, and
+        it ignores `X-Result-Delivery` on this route, so the remaining work
+        happens inside this request and its answer streams back in the body.
+        The answer is whatever a finished run answers -- or ANOTHER checkpoint,
+        when a second one was armed and is reached, which is why this returns
+        the same ToolResult as `run` and is meant to be called again from it.
+        """
+        if not run_id:
+            raise ServerToolError("A run id is required to carry a stopped run on.")
+        schema = self.get_tool_schema(tool_name)
+        route = "rewind" if rewind_to else "resume"
+        url = f"{self._server_url}/runs/{quote(run_id, safe='')}/{route}"
+        headers = {"Authorization": f"Bearer {self._token}"}
+
+        if progress_cb:
+            progress_cb(
+                f"Taking '{tool_name}' back to {rewind_to}..." if rewind_to
+                else f"Sending your corrections to '{tool_name}'...")
+
+        # Straight multipart, with no /uploads staging: the server reads this
+        # body as a form and has no reference field for it. A correction is a
+        # zip of one step's folder, so the size is the reader's edit rather
+        # than the cohort, which is what makes that acceptable.
+        handles = []
+        try:
+            payload = {}
+            if rewind_to:
+                # A plain form field beside the file parts. The server reads
+                # the whole body as a form, so the two travel together and a
+                # rewind carrying corrections is one request.
+                payload["to"] = (None, rewind_to)
+            for slot, path in (corrections or {}).items():
+                handle = open(path, "rb")
+                handles.append(handle)
+                payload[slot] = (os.path.basename(path), handle)
+            try:
+                response = self._session.post(
+                    url,
+                    headers=headers,
+                    files=payload or None,
+                    timeout=self._timeout,
+                    verify=self._verify_tls,
+                    stream=True,
+                )
+            except requests.RequestException as exc:
+                raise ServerToolError(
+                    f"Network error while carrying '{tool_name}' on: {exc}") from exc
+        finally:
+            for handle in handles:
+                handle.close()
+
+        logger.info("POST %s -> %s (%d correction(s))",
+                    url, response.status_code, len(corrections or {}))
+        return self._build_result(tool_name, response, schema, output_dir,
+                                  progress_cb, run_id=run_id)
+
+    def _stopped_result(self, tool_name, payload, output_dir, progress_cb,
+                        run_id) -> ToolResult:
+        """The answer of a run that stopped at a quality-control checkpoint.
+
+        The archive is fetched here rather than left as a reference, because a
+        reference is single-use and the server releases it on the first
+        `DELETE` -- and what happens next is a person looking at scans, which
+        is not a wait to hold server-side storage through.
+        """
+        reference = payload.get("result_ref")
+        fetched = (self._download_reference(tool_name, reference, output_dir, progress_cb)
+                   if reference else None)
+        # `path` stays on the checkpoint and not on the ToolResult beside it:
+        # what came down is not the run's answer, and two fields holding one
+        # string is how they come to disagree.
+        return ToolResult(
+            kind="checkpoint",
+            checkpoint=RunCheckpoint(
+                run_id=run_id or "",
+                stopped_after=str(payload.get("stopped_after") or ""),
+                produced=tuple(str(name) for name in payload.get("produced") or ()),
+                path=fetched.path if fetched is not None else None,
+            ),
+        )
+
     # ------------------------------------------------------------------
     # Bulk transfer (see transfer.py for why it is not one request)
     # ------------------------------------------------------------------
 
-    def _upload_large_inputs(self, files: dict, progress_cb) -> tuple:
+    def _upload_large_inputs(self, files: dict, progress_cb, always=False) -> tuple:
         """Split `files` into what still travels inside the /run request and
         what has already been sent through the upload endpoints.
 
@@ -1137,14 +1355,22 @@ class ToolServerClient:
         this extension keeps working against a deployment that has not been
         updated, that fallback is the reason the return is a pair rather than
         an in-place mutation.
+
+        `always` sends every file this way whatever its size. A detached run
+        needs it: the request it would otherwise ride in is answered 202 before
+        the tool starts, and a server cannot stage a body it has already replied
+        to. The fallback still applies -- a server with no upload endpoints
+        cannot serve a detached run either, and the caller ends up on the
+        blocking path with its files in the request, which is what it wants.
         """
         if self._chunked_uploads is False:
             return files, {}
 
         remaining = dict(files)
         references = {}
+        minimum = 1 if always else max(self._chunk_bytes * 2, 1)
         for arg_name, path in files.items():
-            if not transfer.should_chunk(path, max(self._chunk_bytes * 2, 1)):
+            if not transfer.should_chunk(path, minimum):
                 continue
             try:
                 references[arg_name] = transfer.upload_file(
@@ -1170,6 +1396,70 @@ class ToolServerClient:
             self._chunked_uploads = True
             remaining.pop(arg_name)
         return remaining, references
+
+    def _collect_detached(self, tool_name, run_id, response, schema, output_dir,
+                          progress_cb, event_cb, cancel_event) -> ToolResult:
+        """Wait on the event stream for the verdict, then fetch what it names.
+
+        A server that does not know the header answers the ordinary 200 with
+        the ordinary body, and that is handled here rather than guarded against
+        -- which is what lets one client speak to both.
+        """
+        if response.status_code != 202:
+            return self._build_result(tool_name, response, schema, output_dir,
+                                      progress_cb, run_id=run_id)
+        response.close()
+
+        if progress_cb:
+            progress_cb(f"'{tool_name}' accepted; waiting for it to finish...")
+
+        terminal = self._await_terminal(run_id, event_cb, cancel_event)
+        if terminal is None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RunCancelled(f"'{tool_name}' was cancelled.", 499)
+            raise ServerToolError(
+                f"Lost track of '{tool_name}': the server accepted the run, but "
+                "its event stream ended without saying how it finished. The run "
+                f"id was {run_id}."
+            )
+
+        state = terminal.get("state")
+        if state == "cancelled":
+            raise RunCancelled(f"'{tool_name}' was cancelled.", 499)
+        if state != "done":
+            raise ServerToolError(
+                terminal.get("message") or f"'{tool_name}' failed on the server."
+            )
+
+        # The terminal event carries either a pointer to fetch, or a small
+        # answer inline for a tool whose output is text.
+        answer = terminal.get("result") or {}
+        reference = answer.get("result_ref")
+        if reference:
+            return self._download_reference(tool_name, reference, output_dir, progress_cb)
+        if "result" in answer:
+            return ToolResult(kind="text", text=answer["result"])
+        raise ServerToolError(
+            f"'{tool_name}' finished, but said nothing about where its result is."
+        )
+
+    def _await_terminal(self, run_id, event_cb, cancel_event):
+        """Read the stream to its end and hand back the event that ended it.
+
+        `watch_run` already reconnects on a dropped stream and dedupes on
+        `seq`, so this wait survives what a blocking POST could not: the
+        connection can go away and come back without losing the answer.
+        """
+        holder = {}
+
+        def capture(event):
+            if event.get("state") in TERMINAL_RUN_STATES:
+                holder["event"] = event
+            if event_cb is not None:
+                event_cb(event)
+
+        self.watch_run(run_id, capture, stop_event=cancel_event)
+        return holder.get("event")
 
     def _download_reference(
         self,
@@ -1258,6 +1548,7 @@ class ToolServerClient:
         schema: dict,
         output_dir: Optional[str],
         progress_cb: Optional[Callable[[str], None]] = None,
+        run_id: Optional[str] = None,
     ) -> ToolResult:
         # run() sends the request with stream=True, so the body has not been
         # read yet: .json()/.text below consume it for the small responses,
@@ -1273,6 +1564,13 @@ class ToolServerClient:
                     payload = response.json()
                 except ValueError as exc:
                     raise ServerToolError(f"Malformed response from the tool server: {exc}") from exc
+                # The run STOPPED rather than finished. Checked before the
+                # reference below, because a quality-control payload carries
+                # one too and downloading it as if it were the answer would
+                # lose the one thing that says the run is still alive.
+                if payload.get("quality_control"):
+                    return self._stopped_result(
+                        tool_name, payload, output_dir, progress_cb, run_id)
                 # A file result the server agreed to hand over by reference
                 # (see _RESULT_DELIVERY_HEADER): the bytes are still on the
                 # server and come down next, in parallel. Anything else is a

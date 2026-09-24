@@ -54,6 +54,7 @@ add_subdirectory(ServerToolsSettings)
 add_subdirectory(SlicerCloud)
 add_subdirectory(SurgMovPred)
 add_subdirectory(Crown_Seg)
+add_subdirectory(VISU)
 add_subdirectory(ExampleTool)
 ## NEXT_MODULE
 

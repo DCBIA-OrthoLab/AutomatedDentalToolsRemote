@@ -63,3 +63,17 @@ TRANSFER_COMPRESS = True
 # transfer layer never gzips a .zip, so this is the only place the choice is
 # made for a folder argument.
 ZIP_COMPRESS = None
+
+# Whether a run is detached from the request that asked for it.
+#
+# Off, the POST stays open for the whole run and the answer comes back in its
+# body -- which is what this client has always done, and what a server that has
+# never heard of the header will do anyway.
+#
+# On, the POST answers 202 as soon as the inputs are staged and the result
+# arrives on the event stream this client already watches. That removes the one
+# real ceiling left: TIMEOUT above is 600 s and a user can dial 3600 at most,
+# while a cohort legitimately runs for longer. It also makes the wait
+# resumable -- the event stream reconnects and dedupes, where a dropped POST
+# simply lost an answer the GPU had already been spent computing.
+DETACHED_RUNS = True

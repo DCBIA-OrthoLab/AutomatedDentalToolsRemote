@@ -131,26 +131,115 @@ def zip_folder(folder: str, dest_path: str, compress: Optional[bool] = None) -> 
     """
     if not os.path.isdir(folder):
         raise IOError(f"Not a folder: {folder}")
+    with _archive(dest_path, compress) as archive:
+        _add_tree(archive, folder, folder)
+    return dest_path
+
+
+def zip_subset(folder: str, entries, dest_path: str, compress: Optional[bool] = None) -> str:
+    """Pack SOME of a folder's top-level entries, named as if the whole folder.
+
+    This is how a cohort is sent in batches without costing a byte of local
+    disk: `split_cohort` decides which entries go together and this writes those
+    straight out of the user's own folder. Copying them into per-batch staging
+    folders first would duplicate the cohort on a laptop that was chosen to send
+    it in pieces precisely because it is large.
+
+    Member names stay relative to `folder`, so the server unpacks each batch
+    into the same tree shape the whole folder would have had -- which is what
+    lets a tool that mirrors its input tree keep working per batch.
+    """
+    if not os.path.isdir(folder):
+        raise IOError(f"Not a folder: {folder}")
+    with _archive(dest_path, compress) as archive:
+        for entry in entries:
+            _add_tree(archive, os.path.join(folder, entry), folder)
+    return dest_path
+
+
+def _archive(dest_path: str, compress: Optional[bool]):
     if compress is None:
         compress = config.ZIP_COMPRESS
     if compress is None:
         compress = not _link_is_fast(config.SERVER_URL)
     default_type = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
-    with zipfile.ZipFile(
-        dest_path, "w", default_type, compresslevel=_COMPRESS_LEVEL
-    ) as archive:
-        for root, _dirs, files in os.walk(folder):
-            for name in files:
-                full_path = os.path.join(root, name)
-                # compress_type=None defers to the archive's default (DEFLATED
-                # at _COMPRESS_LEVEL); already-compressed members opt out.
-                stored = name.lower().endswith(_STORED_EXTENSIONS)
-                archive.write(
-                    full_path,
-                    os.path.relpath(full_path, folder),
-                    compress_type=zipfile.ZIP_STORED if stored else None,
-                )
-    return dest_path
+    return zipfile.ZipFile(dest_path, "w", default_type, compresslevel=_COMPRESS_LEVEL)
+
+
+def _add_tree(archive, path: str, relative_to: str) -> None:
+    """Write `path` -- one file, or every file under one directory -- into `archive`."""
+    if os.path.isfile(path):
+        files = [path]
+    else:
+        files = [
+            os.path.join(root, name)
+            for root, _dirs, names in os.walk(path)
+            for name in names
+        ]
+    for full_path in files:
+        # compress_type=None defers to the archive's default (DEFLATED at
+        # _COMPRESS_LEVEL); already-compressed members opt out.
+        stored = os.path.basename(full_path).lower().endswith(_STORED_EXTENSIONS)
+        archive.write(
+            full_path,
+            os.path.relpath(full_path, relative_to),
+            compress_type=zipfile.ZIP_STORED if stored else None,
+        )
+
+
+def _entry_size(path: str) -> int:
+    """Bytes one cohort entry occupies, a whole subfolder included."""
+    if os.path.isfile(path):
+        return os.path.getsize(path)
+    total = 0
+    for root, _dirs, names in os.walk(path):
+        for name in names:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                # A file that vanished between the walk and the stat. Sizing is
+                # advisory -- it decides how big a batch is, not what is in it.
+                pass
+    return total
+
+
+def split_cohort(folder: str, max_mb: int, max_files: int) -> list:
+    """Divide a folder into batches, as lists of its top-level entry names.
+
+    **The unit is a TOP-LEVEL ENTRY, and that is the correctness rule of the
+    whole feature.** A file is one; a subfolder is one, whole and never opened.
+    A cohort is filed in subfolders -- one per patient -- and a DICOM series is
+    a folder of hundreds of slices that means nothing apart. Splitting inside
+    either would hand the tool half a patient and call it a batch.
+
+    So `max_files` counts entries, not leaf files: 25 DICOM folders are 25, the
+    same as 25 `.nii.gz`. Whichever cap binds first decides, and an entry larger
+    than `max_mb` on its own travels alone rather than being dropped or split.
+    A cap of 0 does not bind; with neither binding there is one batch.
+
+    Sorted by name, so the same cohort always divides the same way -- a rerun
+    after a failure resends the same batches, and two timepoints of one patient
+    stay adjacent.
+    """
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+
+    max_bytes = max_mb * 1024 * 1024 if max_mb > 0 else 0
+    batches, batch, batch_bytes = [], [], 0
+    for name in names:
+        size = _entry_size(os.path.join(folder, name))
+        too_many = max_files > 0 and len(batch) >= max_files
+        too_big = max_bytes > 0 and batch and batch_bytes + size > max_bytes
+        if too_many or too_big:
+            batches.append(batch)
+            batch, batch_bytes = [], 0
+        batch.append(name)
+        batch_bytes += size
+    if batch:
+        batches.append(batch)
+    return batches
 
 
 def unzip_folder(zip_path: str, dest_dir: str) -> list:

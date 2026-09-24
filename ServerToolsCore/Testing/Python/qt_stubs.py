@@ -42,6 +42,11 @@ class QObject:
     def setEnabled(self, enabled):
         self._enabled = bool(enabled)
 
+    def isEnabled(self):
+        """Enabled until something disables it, as Qt is. Read back so a panel
+        that greys a control can be tested on whether it greyed the right one."""
+        return getattr(self, "_enabled", True)
+
     def setProperty(self, name, value):
         self._properties[name] = value
 
@@ -127,6 +132,12 @@ class QLayout(QObject):
 
     def addWidget(self, widget, stretch=0):
         self.widgets.append(widget)
+
+    def addLayout(self, layout, stretch=0):
+        """A nested layout is an item of its own, and its widgets are still in
+        the tree. Recorded in `widgets` so a panel's contents can be walked
+        whether a row was built as one layout or two."""
+        self.widgets.append(layout)
 
     def addStretch(self, stretch=1):
         """Recorded, not discarded. WHERE the stretch sits is the difference
@@ -623,6 +634,25 @@ class QProgressBar(QObject):
 
     def setTextVisible(self, visible):
         self.textVisible = bool(visible)
+
+    def setMaximumHeight(self, height):
+        """The slim bar one batch of a cohort gets (design.batch_bar)."""
+        self.maximumHeight = height
+
+
+class QFrame(QWidget):
+    """The box a cohort's progress is drawn in (design.cohort_frame).
+
+    A QWidget that takes a stylesheet and nothing else: everything else about
+    it is the layout put inside it, which is modelled already.
+    """
+
+    def __init__(self, parent=None):
+        QWidget.__init__(self, parent)
+        self.styleSheet = ""
+
+    def setStyleSheet(self, sheet):
+        self.styleSheet = sheet
 
 
 class QPalette:

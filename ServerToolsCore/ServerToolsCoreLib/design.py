@@ -339,6 +339,37 @@ def compact_button(text: str) -> qt.QPushButton:
     return _compact_button(text, "primary")
 
 
+# How tall a navigation button is, and how big the glyph on it is. Large on
+# purpose: stepping through a cohort is the one action a reader repeats
+# hundreds of times in a sitting, and it is done while looking at the SCAN
+# rather than at the panel. A button found by peripheral vision has to be
+# bigger than a button read.
+NAV_BUTTON_HEIGHT = 44
+NAV_GLYPH_POINT_SIZE = 18
+
+
+def nav_button(text: str) -> qt.QPushButton:
+    """A large stepper for moving through a list: VISU's previous/next.
+
+    NOT `primary_button`: a panel's primary is the one action that commits
+    something, and these commit nothing -- they move the view. The secondary
+    gradient keeps them quiet while the height keeps them findable.
+    """
+    t = tokens()
+    stops = _button_stops()["secondary"]
+    button = qt.QPushButton(text)
+    button.setMinimumHeight(NAV_BUTTON_HEIGHT)
+    button.setStyleSheet(
+        f"QPushButton {{ background-color: {_gradient(*stops['base'])}; color: white;"
+        f" border: none; border-radius: 6px; font-weight: 700;"
+        f" font-size: {NAV_GLYPH_POINT_SIZE}pt; padding: 0px; margin: 0px; }}"
+        f"QPushButton:hover:!pressed {{ background-color: {_gradient(*stops['hover'])}; }}"
+        f"QPushButton:pressed {{ background-color: {_gradient(*stops['pressed'])}; }}"
+        f"QPushButton:disabled {{ background-color: {t['DISABLED_BG']}; color: {t['DISABLED_TEXT']}; }}"
+    )
+    return button
+
+
 def compact_danger_button(text: str) -> qt.QPushButton:
     """A small interrupting action attached to ONE line of a list: the Cancel
     that belongs to a single run, next to that run's own progress line.
@@ -655,4 +686,126 @@ def progress_label() -> qt.QLabel:
     label.setVisible(False)
     t = tokens()
     label.setStyleSheet(f"color: {t['TEXT_MUTED']}; padding: {SPACING_XS}px;")
+    return label
+
+
+# --- a cohort in flight ----------------------------------------------------
+#
+# One Apply can now be several runs (a folder of 20 scans sent in batches), and
+# the panel had nothing for that shape: it showed five lines of the same
+# sentence and five Cancel buttons, which reads as five unrelated jobs a user
+# started by accident. These four factories say the opposite -- ONE piece of
+# work, made of parts -- and the design follows from it:
+#
+#   * one frame, so the cohort is one object on the panel. Not a card per
+#     batch: a border around each would be five objects again.
+#   * one headline count, in the size `selection_label` uses, because both
+#     answer the same kind of question ("what have I actually got") and a
+#     second size here would invent a vocabulary the panel does not have.
+#   * bars WITHOUT their percentage. The exact figure is written underneath in
+#     words; a "%" painted on the bar is a second, vaguer answer to a question
+#     already answered precisely.
+#   * the batch bars slim and the cohort bar full height, which is the only
+#     hierarchy needed: what matters is the whole, what moves is a part.
+
+
+def cohort_frame() -> qt.QFrame:
+    """The box a whole cohort's progress lives in.
+
+    **A hairline border and no fill at all**, so the box takes the panel's own
+    colour whatever Slicer's palette is. It first shipped painted `SURFACE`,
+    which is white in the light theme -- a white card on Slicer's grey panel
+    read as something pasted in from another application. A border is already
+    the whole of what this needs to say: these things belong together.
+
+    That also makes it the one widget here that cannot mismatch a theme,
+    including the themes this file's two token dicts do not describe.
+    """
+    t = tokens()
+    frame = qt.QFrame()
+    frame.setStyleSheet(
+        f"QFrame {{ background-color: transparent;"
+        f" border: 1px solid {t['BORDER']}; border-radius: 4px;"
+        f" padding: {SPACING_SM}px; }}"
+    )
+    frame.setVisible(False)
+    return frame
+
+
+# How many batch lines the box shows before it stops listing them. Four fits
+# the shape the queue actually takes -- at most two runs in flight plus the
+# next couple waiting -- and a cohort of a hundred scans is twenty-five batches,
+# which listed in full would be the tallest thing on the panel by a wide margin
+# and would tell the reader nothing the headline count does not.
+MAX_BATCH_ROWS = 4
+
+
+def cohort_total_label(text: str) -> qt.QLabel:
+    """"8 of 20 scans" -- the one number the user actually asked for.
+
+    The largest text in the box, and deliberately the same 12pt semi-bold as
+    `selection_label`: that one says what an input row holds, this says what a
+    run has finished, and both are the answer rather than the offer. Counted in
+    SCANS and not in batches, because a batch is an implementation detail of
+    the transfer and nobody has twenty batches of work to do.
+    """
+    t = tokens()
+    label = qt.QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet(
+        f"color: {t['TEXT']}; font-size: 12pt; font-weight: 600;"
+        f" border: none; padding: 0px;"
+    )
+    return label
+
+
+def cohort_bar() -> qt.QProgressBar:
+    """The whole cohort's progress, in one bar.
+
+    Text off: the count underneath is exact and this is the impression. Unlike
+    `progress_bar` it is shown for as long as the cohort runs -- there is always
+    a real number behind it, because the number of scans in each batch is known
+    before anything is sent.
+    """
+    bar = qt.QProgressBar()
+    bar.setRange(0, 100)
+    bar.setValue(0)
+    bar.setTextVisible(False)
+    return bar
+
+
+def batch_bar() -> qt.QProgressBar:
+    """One batch's own progress, slim, under its line.
+
+    Slim because a batch is a part: given the same weight as the cohort's bar,
+    five of them would drown the one bar that answers the question. Shown only
+    for a batch actually running -- an empty bar on each of four queued batches
+    is four things that look stuck.
+    """
+    bar = qt.QProgressBar()
+    bar.setRange(0, 100)
+    bar.setValue(0)
+    bar.setTextVisible(False)
+    bar.setMaximumHeight(BATCH_BAR_HEIGHT)
+    return bar
+
+
+# Slim enough to read as a rule rather than a control, tall enough that its
+# rounded chunk is not clipped to a sliver by the 1px border and 2px padding
+# the base stylesheet gives every QProgressBar.
+BATCH_BAR_HEIGHT = 8
+
+
+def batch_label(text: str) -> qt.QLabel:
+    """One batch's line: which batch it is, and what it is doing.
+
+    Muted and small, the `hint_label` register: these are the detail under the
+    headline, and a reader who only wants to know how far along the run is
+    should be able to skip every one of them.
+    """
+    t = tokens()
+    label = qt.QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet(
+        f"color: {t['TEXT_MUTED']}; font-size: 9pt; border: none; padding: 0px;")
     return label

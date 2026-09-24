@@ -77,3 +77,24 @@ add_test(
   COMMAND ${Python3_EXECUTABLE} -m unittest test_worker
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
+
+# test_quality_control.py: a run that stops for a reader to correct it, and is
+# then carried on. Both halves -- the client recognising the record and posting
+# the corrections back, and the panel's loop around a stub reviewer -- run
+# under the same stand-ins as test_runs.py, so no Slicer interpreter and no
+# server are needed.
+add_test(
+  NAME ServerToolsCore_test_quality_control
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_quality_control
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+
+# test_digest.py: which files of a reviewed checkpoint travel back. Pure
+# stdlib against real files on a real disk, and it imports no qt/slicer stub
+# at all -- digest.py must stay free of both, and this failing to import is
+# what says it did not.
+add_test(
+  NAME ServerToolsCore_test_digest
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_digest
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )

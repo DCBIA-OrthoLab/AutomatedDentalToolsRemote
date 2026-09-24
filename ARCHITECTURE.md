@@ -35,6 +35,7 @@ SlicerAutomatedDentalTools/
 │       ├── client.py                       # ToolServerClient — the only class that speaks HTTP
 │       ├── transfer.py                     # parallel chunked upload / ranged download of big files
 │       ├── errors.py                       # ServerToolError + HTTP status → message mapping
+│       ├── digest.py                       # what a reviewer changed in a folder, by content not mtime
 │       ├── slicer_io.py                    # TempWorkspace, node export, zip/unzip, result loading
 │       ├── design.py                       # theme tokens, dark/light detection, styled-widget factories
 │       ├── formgen.py                      # /tools schema → Qt widgets, and back
@@ -90,9 +91,9 @@ in the repo uses.
 
 ## Dependency rule — enforced, not just documented
 
-> `client.py`, `transfer.py` and `errors.py` import neither `slicer` nor `qt`.
-> `base_widget.py`, `formgen.py`, `design.py`, `slicer_io.py`, `worker.py`
-> import neither `requests` nor anything HTTP.
+> `client.py`, `transfer.py`, `errors.py` and `digest.py` import neither
+> `slicer` nor `qt`. `base_widget.py`, `formgen.py`, `design.py`,
+> `slicer_io.py`, `worker.py` import neither `requests` nor anything HTTP.
 
 `ServerToolsCoreLib/__init__.py` only imports `client`, `errors` and `config`
 — none of which touch `slicer`/`qt`/`ctk`. That is what makes

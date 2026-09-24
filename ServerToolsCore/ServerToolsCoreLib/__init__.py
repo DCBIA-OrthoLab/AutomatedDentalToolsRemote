@@ -11,6 +11,7 @@ Slicer, e.g. `from ServerToolsCoreLib.base_widget import ServerToolWidgetBase`.
 
 from . import config
 from .client import (
+    RunCheckpoint,
     ToolResult,
     ToolServerClient,
     accepts_folder,
@@ -37,6 +38,7 @@ def get_client() -> ToolServerClient:
             parallelism=config.TRANSFER_PARALLELISM,
             chunk_bytes=config.TRANSFER_CHUNK_MB * 1024 * 1024,
             compress_uploads=config.TRANSFER_COMPRESS,
+            detached_runs=getattr(config, "DETACHED_RUNS", False),
         )
     return _client
 
@@ -45,6 +47,7 @@ __all__ = [
     "get_client",
     "ToolServerClient",
     "ToolResult",
+    "RunCheckpoint",
     "ServerToolError",
     "RunCancelled",
     "new_run_id",
