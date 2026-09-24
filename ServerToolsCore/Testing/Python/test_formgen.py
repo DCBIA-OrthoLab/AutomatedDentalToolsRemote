@@ -1047,7 +1047,8 @@ class MultiChoiceLayoutTest(unittest.TestCase):
 
         self.assertIn("tableFrame", frame._stylesheet)
         self.assertIn(design.tokens()["SURFACE_TABLE"], frame._stylesheet)
-        self.assertIn("border: none", frame._stylesheet)
+        self.assertIn("1px solid {}".format(design.tokens()["BORDER"]),
+                      frame._stylesheet)
 
     @staticmethod
     def _chart_grid(group):
@@ -2498,15 +2499,12 @@ class ThemeSymmetryTest(unittest.TestCase):
                   and name not in ("DANGER",)]
         self.assertEqual(shared, [], "carried over rather than chosen")
 
-    def test_the_four_surfaces_are_four_different_colours(self):
-        """Nothing here is outlined, so the whole structure of the panel rests
-        on these four being distinguishable: the ground, the card standing on
-        it, the slot sunk into the card, and the card a catalogue sits on. Two
-        of them equal is a control that disappears into what holds it."""
+    def test_the_ground_is_told_from_everything_standing_on_it(self):
+        """The one separation a line cannot make: the panel's ground has no
+        edge of its own, so a card standing on it has to differ in colour or
+        the panel is one flat sheet."""
         for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
-            surfaces = [theme[key] for key in
-                        ("BACKGROUND", "SURFACE", "FIELD")]
-            self.assertEqual(len(set(surfaces)), len(surfaces), name)
+            self.assertNotEqual(theme["BACKGROUND"], theme["SURFACE"], name)
 
     def test_a_chosen_slot_cannot_be_mistaken_for_an_empty_one(self):
         """`FIELD` and `ACCENT_SOFT` are the two states of an input row, and
@@ -2559,18 +2557,16 @@ class TableSurfaceTest(unittest.TestCase):
     """ASO's landmark chooser is a table, and a table is an object you look
     into -- not a region of the panel's own ground with a hairline round it."""
 
-    def test_the_pane_is_a_surface_with_no_visible_edge(self):
-        """The fill is what separates the table from the panel. The border is
-        declared in the fill's own colour rather than as `none`: a rule with no
-        border leaves Qt free to draw the pane with the native style, and this
-        guarantees the surface is painted while showing no edge."""
+    def test_the_pane_is_an_outlined_surface(self):
+        """It was filled in its own colour and given a border of that same
+        colour -- which on this palette is a white table on a white card, with
+        nothing at all saying where it starts."""
         for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
             rule = re.search(r"QTabWidget::pane \{(.*?)\n    \}",
                              design._base_stylesheet(theme), re.S).group(1)
             self.assertIn("background-color: {}".format(theme["SURFACE_TABLE"]),
                           rule, name)
-            self.assertIn("border: 1px solid {}".format(theme["SURFACE_TABLE"]),
-                          rule, name)
+            self.assertIn("border: 1px solid {}".format(theme["BORDER"]), rule, name)
 
     def test_a_tab_changes_nothing_but_its_colours_when_chosen(self):
         """Qt sizes a tab from what it holds when the bar is laid out, so
@@ -2676,17 +2672,19 @@ class InputCardTest(unittest.TestCase):
         with open(self.scan, "wb") as handle:
             handle.write(b"0" * 32)
 
-    def test_an_untouched_row_is_the_same_neutral_slot_a_field_is(self):
+    def test_an_untouched_row_is_the_same_outlined_surface_a_field_is(self):
         row = formgen.FileOrFolderInput()
-        self.assertIn(design.tokens()["FIELD"], row.container._stylesheet)
-        self.assertIn("border: none", row.container._stylesheet)
+        self.assertIn(design.tokens()["SURFACE"], row.container._stylesheet)
+        self.assertIn("1px solid {}".format(design.tokens()["BORDER"]),
+                      row.container._stylesheet)
 
-    def test_a_filled_row_takes_the_accent(self):
+    def test_a_filled_row_takes_the_accent_in_its_fill_and_its_edge(self):
         row = formgen.FileOrFolderInput()
         row.setCurrentPath(self.scan)
 
         self.assertIn(design.tokens()["ACCENT_SOFT"], row.container._stylesheet)
-        self.assertNotIn(design.tokens()["FIELD"] + ";", row.container._stylesheet)
+        self.assertIn("1px solid {}".format(design.tokens()["PRIMARY"]),
+                      row.container._stylesheet)
 
     def test_emptying_it_again_takes_the_accent_back(self):
         row = formgen.FileOrFolderInput()
@@ -2695,17 +2693,20 @@ class InputCardTest(unittest.TestCase):
 
         self.assertNotIn(design.tokens()["ACCENT_SOFT"], row.container._stylesheet)
 
-    def test_only_the_colour_changes_with_the_state(self):
+    def test_only_the_colours_change_with_the_state(self):
         """It is the outermost thing on the row: anything that changed its box
         would move every control inside it by a pixel the moment a file was
-        chosen."""
+        chosen. The fill and the edge COLOUR move; the edge width does not."""
         row = formgen.FileOrFolderInput()
         empty = row.container._stylesheet
         row.setCurrentPath(self.scan)
         filled = row.container._stylesheet
 
-        strip = lambda sheet: re.sub(r"background-color:[^;]*;", "", sheet)
-        self.assertEqual(strip(empty), strip(filled))
+        def shape_only(sheet):
+            sheet = re.sub(r"background-color:[^;]*;", "", sheet)
+            return re.sub(r"solid #[0-9a-fA-F]{6}", "solid", sheet)
+
+        self.assertEqual(shape_only(empty), shape_only(filled))
 
     def test_it_styles_itself_and_not_the_controls_inside_it(self):
         """Every child of the card holds a control that has to keep the
@@ -2745,55 +2746,54 @@ class InputCardTest(unittest.TestCase):
         self.assertIn("font-weight: 600", row.caption._stylesheet)
 
 
-class NothingIsOutlinedTest(unittest.TestCase):
-    """The panel's structure is four stacked surfaces and one accent, not a
-    stroke around every control.
+class EverythingIsOutlinedTest(unittest.TestCase):
+    """Every control a clinician operates is a white surface with a hairline
+    round it -- and the line is what separates it from the card it sits on,
+    which is why the two can be the same colour.
 
-    A form of eight rows, each row a box, reads as a grid of cells with the
-    content incidental -- and that is how this panel read before the outlines
-    came off.
+    A borderless treatment was built and compared against this one on a real
+    panel: a control as a tinted slot sunk into its card, no lines anywhere. It
+    read as washed out on the screens this actually runs on, and the fills it
+    depended on kept drifting together. What is pinned here is the decision.
     """
 
-    # The two things that FLOAT above the panel rather than sit on it. A
-    # surface with nothing behind it needs an edge; a surface on a card does
-    # not.
-    FLOATING = ("QToolTip", "QAbstractItemView")
+    #: The rules that draw a control the user acts on.
+    CONTROLS = ("QLineEdit", "QComboBox", "QSpinBox", "QCheckBox::indicator",
+                "QTabWidget::pane", "QTabBar::tab", "QProgressBar")
 
-    def _visible_borders(self, theme):
-        """Every `border: Npx solid <colour>` that is not the fill's own
-        colour, outside the two floating surfaces.
+    def _sheet(self, theme):
+        return re.sub(r"/\*.*?\*/", "", design._base_stylesheet(theme), flags=re.S)
 
-        Rendered against `cards` EXPLICITLY, not against whatever treatment is
-        live: `outline` exists precisely to draw the edges this test forbids,
-        and a claim about one treatment must name it."""
-        sheet = re.sub(r"/\*.*?\*/", "",
-                       design._base_stylesheet(theme, design._SHAPE_CARDS), flags=re.S)
-        found = []
-        for block in re.findall(r"([^{}]+)\{([^{}]*)\}", sheet):
-            selector, body = block[0].strip(), block[1]
-            if any(name in selector for name in self.FLOATING):
-                continue
-            for width, colour in re.findall(r"border:\s*(\d+)px solid ([^;]+);", body):
-                fill = re.search(r"background-color:\s*([^;]+);", body)
-                if colour.strip() in ("transparent",):
-                    continue
-                if fill and fill.group(1).strip() == colour.strip():
-                    continue  # declared in the fill's colour: painted, not drawn
-                found.append((selector, width, colour))
-        return found
-
-    def test_no_control_on_the_panel_carries_a_visible_outline(self):
+    def test_every_control_carries_the_hairline(self):
         for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
-            self.assertEqual(self._visible_borders(theme), [], name)
+            sheet = self._sheet(theme)
+            for selector in self.CONTROLS:
+                rule = re.search(re.escape(selector) + r"[^{}]*\{([^{}]*)\}", sheet)
+                self.assertIsNotNone(rule, "{}: {}".format(name, selector))
+                self.assertIn("1px solid {}".format(theme["BORDER"]), rule.group(1),
+                              "{}: {}".format(name, selector))
 
-    def test_a_focus_ring_is_a_border_that_was_always_there(self):
-        """Declared transparent at rest and coloured on focus, so the ring can
-        appear without the text inside the field moving by a pixel. Qt paints a
-        widget's background under its border, so a transparent one simply shows
-        the fill."""
-        sheet = design._base_stylesheet(design._LIGHT, design._SHAPE_CARDS)
-        self.assertIn("border: 2px solid transparent", sheet)
+    def test_the_edge_is_one_pixel_in_every_state(self):
+        """Only the COLOUR moves. A hairline that thickened on focus would grow
+        its field by a pixel under the pointer, Qt laying a row out from the
+        border box -- and a tab that did it would clip its own label."""
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            widths = set(re.findall(r"border:\s*(\d+)px solid", self._sheet(theme)))
+            self.assertEqual(widths, {"1"}, name)
+
+    def test_the_accent_is_what_a_focused_control_takes(self):
+        sheet = self._sheet(design._LIGHT)
         self.assertIn("border-color: {}".format(design._LIGHT["PRIMARY"]), sheet)
+
+    def test_a_filled_surface_factory_carries_it_too(self):
+        """The trap the borderless pass left behind: on this palette FIELD and
+        SURFACE are both white, so a chip or a card filled with one and given
+        no edge is white on white -- an option nobody can see until they hover
+        it."""
+        for widget in (design.option_chip("MAND"), design.segment_button("File"),
+                       design.ghost_button("Select all"), design.input_card(),
+                       design.table_frame(), design.cohort_frame()):
+            self.assertIn("1px solid", widget._stylesheet, widget)
 
 
 class EveryColourComesFromTheTablesTest(unittest.TestCase):
@@ -2993,16 +2993,14 @@ class TheSurfacesAreTellingApartTest(unittest.TestCase):
     STEP = 8
 
     #: The pairs that actually touch on screen, with the pair each one is.
+    #: The pairs that have to be told apart by COLOUR. `SURFACE` and `FIELD`
+    #: are deliberately absent, and are the same white: the hairline between a
+    #: control and its card is what separates those two, which is the whole
+    #: bargain of an outlined design.
     NEIGHBOURS = (
         ("BACKGROUND", "SURFACE"),      # a section card on the panel's ground
-        ("SURFACE", "FIELD"),           # a slot sunk into that card
-        ("FIELD", "FIELD_HOVER"),       # the same slot under the pointer
+        ("FIELD", "FIELD_HOVER"),       # a control under the pointer
         ("FIELD", "ACCENT_SOFT"),       # empty against chosen
-        # A catalogue's own card, and the chips standing on it. It sits INSIDE
-        # a section, so the card is its neighbour and the panel's ground is
-        # not -- no multichoice is ever drawn outside one.
-        ("SURFACE", "SURFACE_TABLE"),
-        ("SURFACE_TABLE", "FIELD"),
     )
 
     @staticmethod
@@ -3026,129 +3024,6 @@ class TheSurfacesAreTellingApartTest(unittest.TestCase):
                 gap = abs(self._brightness(theme["TEXT_MUTED"])
                           - self._brightness(theme[ground]))
                 self.assertGreater(gap, 80, "{}: TEXT_MUTED on {}".format(theme_name, ground))
-
-
-class DesignVariantsTest(unittest.TestCase):
-    """Four complete treatments, switchable at run time, so one can be
-    COMPARED rather than described.
-
-    A palette read off a page is not a panel: the difference between two of
-    these shows up on the sixth row of a crowded form. Everything below is
-    what has to hold for all four, because a treatment nobody can render is a
-    treatment nobody can judge.
-    """
-
-    def setUp(self):
-        self.addCleanup(design.set_variant, design.variant())
-
-    def _rendered(self, name):
-        design.set_variant(name)
-        return [design._base_stylesheet(design.tokens(), design.shape())]
-
-    def test_every_treatment_renders_in_both_themes(self):
-        for name in design.variants():
-            design.set_variant(name)
-            for theme in ("light", "dark"):
-                palette = design._VARIANTS[name][theme]
-                sheet = design._base_stylesheet(palette, design.shape())
-                self.assertIn("QComboBox", sheet, "{} {}".format(name, theme))
-
-    def test_every_treatment_holds_exactly_the_same_token_names(self):
-        """A key one palette has and another does not is a KeyError the day
-        someone switches, in the treatment nobody was running."""
-        for name in design.variants():
-            for theme in ("light", "dark"):
-                self.assertEqual(set(design._VARIANTS[name][theme]), set(design._LIGHT),
-                                 "{} {}".format(name, theme))
-
-    def test_every_treatment_declares_every_shape_knob(self):
-        for name in design.variants():
-            self.assertEqual(set(design._VARIANTS[name]["shape"]),
-                             set(design._SHAPE_CARDS), name)
-
-    def test_chosen_never_looks_like_empty_in_any_treatment(self):
-        """An input row is a block with NO edge in every treatment -- only its
-        fill says whether the row has been given anything. FIELD against
-        ACCENT_SOFT is that whole answer, so no treatment may let the two
-        drift together."""
-        for name in design.variants():
-            for theme in ("light", "dark"):
-                palette = design._VARIANTS[name][theme]
-                gap = abs(TheSurfacesAreTellingApartTest._brightness(palette["FIELD"])
-                          - TheSurfacesAreTellingApartTest._brightness(palette["ACCENT_SOFT"]))
-                self.assertGreaterEqual(gap, TheSurfacesAreTellingApartTest.STEP,
-                                        "{} {}".format(name, theme))
-
-    def test_a_treatment_with_no_edge_separates_by_fill_instead(self):
-        """The two ways a control can be told from the card it sits on, and a
-        treatment has to do ONE of them: sink it into a different colour, or
-        draw a line round it. `outline` does the second, which is exactly why
-        its FIELD may equal its SURFACE."""
-        for name in design.variants():
-            shape = design._VARIANTS[name]["shape"]
-            if shape["field_edge"] is not None:
-                continue
-            for theme in ("light", "dark"):
-                palette = design._VARIANTS[name][theme]
-                gap = abs(TheSurfacesAreTellingApartTest._brightness(palette["FIELD"])
-                          - TheSurfacesAreTellingApartTest._brightness(palette["SURFACE"]))
-                self.assertGreaterEqual(gap, TheSurfacesAreTellingApartTest.STEP,
-                                        "{} {}".format(name, theme))
-
-    def test_an_edged_treatment_keeps_one_border_width_in_every_state(self):
-        """Only the colour may move: a hairline that thickened on focus would
-        grow the field by a pixel under the pointer."""
-        design.set_variant("outline")
-        sheet = design._base_stylesheet(design.tokens(), design.shape())
-        widths = set(re.findall(r"border:\s*(\d+)px solid", sheet))
-        self.assertEqual(widths, {"1"})
-
-    def test_a_rail_is_declared_even_where_it_is_not_painted(self):
-        """Transparent in the treatments that do not want it, so a section is
-        laid out identically either way -- a bar that ARRIVED with the
-        treatment would shift every label on the panel three pixels right."""
-        for name in design.variants():
-            design.set_variant(name)
-            sheet = design._base_stylesheet(design.tokens(), design.shape())
-            self.assertIn("border-left: 3px solid", sheet, name)
-
-    def test_an_unknown_treatment_is_refused_rather_than_defaulted(self):
-        """It is read back from a saved setting, and a typo silently repainting
-        the panel in something else is a support call nobody can reproduce."""
-        design.set_variant("cards")
-
-        self.assertFalse(design.set_variant("kards"))
-        self.assertEqual(design.variant(), "cards")
-
-    def test_every_treatment_is_named_and_explained(self):
-        for name in design.variants():
-            self.assertTrue(design.VARIANT_LABELS.get(name), name)
-            self.assertTrue(design.VARIANT_HINTS.get(name), name)
-
-    def test_the_default_is_one_of_them(self):
-        self.assertIn(design.DEFAULT_VARIANT, design.variants())
-
-    def test_at_least_one_treatment_changes_the_structure_and_not_the_palette(self):
-        """The first four were a card look and three recolourings of it, which
-        is not a choice between designs. `flat` takes the container away
-        entirely: no card behind a section, and air where the card edge was."""
-        design.set_variant("flat")
-        sheet = design._base_stylesheet(design.tokens(), design.shape())
-        section = re.search(r"ctkCollapsibleButton \{(.*?)\n    \}", sheet, re.S).group(1)
-
-        self.assertIn("background-color: transparent", section)
-        self.assertGreater(design.shape()["section_gap"],
-                           design._SHAPE_CARDS["section_gap"])
-
-    def test_a_carded_treatment_still_paints_its_card(self):
-        for name in design.variants():
-            design.set_variant(name)
-            if not design.shape()["card_fill"]:
-                continue
-            sheet = design._base_stylesheet(design.tokens(), design.shape())
-            section = re.search(r"ctkCollapsibleButton \{(.*?)\n    \}", sheet, re.S).group(1)
-            self.assertIn("background-color: {}".format(design.tokens()["SURFACE"]),
-                          section, name)
 
 
 class OutputFolderRowTest(unittest.TestCase):

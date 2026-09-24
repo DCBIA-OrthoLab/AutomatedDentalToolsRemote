@@ -17,7 +17,6 @@ _KEY_SERVER_URL = f"{_GROUP}/ServerUrl"
 _KEY_API_TOKEN = f"{_GROUP}/ApiToken"
 _KEY_VERIFY_TLS = f"{_GROUP}/VerifyTls"
 _KEY_TIMEOUT = f"{_GROUP}/Timeout"
-_KEY_DESIGN = f"{_GROUP}/Design"
 
 
 def load_overrides() -> dict:
@@ -48,36 +47,6 @@ def clear_overrides() -> None:
     settings = qt.QSettings()
     settings.remove(_GROUP)
     settings.sync()
-
-
-def load_design() -> str:
-    """The design treatment the user last chose, or "" if they never did."""
-    settings = qt.QSettings()
-    if settings.contains(_KEY_DESIGN):
-        return str(settings.value(_KEY_DESIGN))
-    return ""
-
-
-def save_design(name: str) -> None:
-    settings = qt.QSettings()
-    settings.setValue(_KEY_DESIGN, name)
-    settings.sync()
-
-
-def apply_saved_design() -> str:
-    """Put the saved treatment in force, and answer which one won.
-
-    Called once at startup, before any panel is built. A saved name that no
-    longer exists is IGNORED rather than defaulted noisily: a treatment can be
-    removed between two releases, and a clinician who has one saved should get
-    the current default and no dialog.
-    """
-    from . import design
-
-    saved = load_design()
-    if saved and design.set_variant(saved):
-        return saved
-    return design.variant()
 
 
 def apply_saved_overrides(client) -> bool:

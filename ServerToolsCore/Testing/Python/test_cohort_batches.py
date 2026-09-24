@@ -1014,14 +1014,15 @@ class CohortPanelTest(unittest.TestCase):
 
     # --- it has to look like it belongs in Slicer ----------------------
 
-    def test_the_box_is_a_soft_fill_and_never_an_outline(self):
-        """It shipped as a hairline with no fill, from when a filled card meant
-        the pure white that read as pasted in from another application. The
-        slot colour every control here uses does not, and a tinted block
-        arriving mid-panel reads as something HAPPENING -- which is the only
-        time this box is on screen."""
+    def test_the_box_is_the_same_outlined_surface_as_every_other(self):
+        """It has been a hairline with no fill, then a fill with no hairline,
+        and is now what the whole panel is: a surface with a line round it.
+        The thing it must never be is a shape the panel uses nowhere else --
+        this box appears mid-run, and a reader should not have to work out
+        what kind of object just arrived."""
         self._cohort()
         view = self._view()
 
-        self.assertIn(design.tokens()["FIELD"], view.frame.styleSheet)
-        self.assertIn("border: none", view.frame.styleSheet)
+        self.assertIn(design.tokens()["SURFACE"], view.frame.styleSheet)
+        self.assertIn("1px solid {}".format(design.tokens()["BORDER"]),
+                      view.frame.styleSheet)

@@ -112,15 +112,15 @@ class TheyLookLikeControlsNotLinksTest(unittest.TestCase):
         for button in self._buttons():
             self.assertNotIn("text-decoration: underline", button._stylesheet)
 
-    def test_each_one_is_a_filled_pill_so_it_reads_as_a_button(self):
-        """Not an outline any more: nothing on this panel is outlined, and a
-        control that said it was one by being the only stroked thing on the
-        form would have stopped reading as a control the day the strokes
-        went."""
+    def test_each_one_is_outlined_so_it_reads_as_a_control(self):
+        """The panel's own way of saying "a control": every one of them is a
+        surface with a hairline round it, and a bulk command that said it
+        differently would read as a different kind of thing."""
         for button in self._buttons():
-            self.assertIn("border: none", button._stylesheet)
+            self.assertIn("1px solid {}".format(design.tokens()["BORDER"]),
+                          button._stylesheet)
             self.assertIn("border-radius", button._stylesheet)
-            self.assertIn(design.tokens()["FIELD"], button._stylesheet)
+            self.assertIn(design.tokens()["SURFACE"], button._stylesheet)
 
     def test_neither_one_is_filled_like_apply(self):
         """A filled blue slab a few rows above Apply competes with the one

@@ -27,11 +27,6 @@ class ServerToolsCore(ScriptedLoadableModule):
         # saved via "Server Tools Settings" in a previous session, on top of
         # config.py's compiled-in defaults.
         from ServerToolsCoreLib import get_client
-        from ServerToolsCoreLib.settings_qt import apply_saved_design, apply_saved_overrides
+        from ServerToolsCoreLib.settings_qt import apply_saved_overrides
 
         apply_saved_overrides(get_client())
-        # And the design treatment, which has to be in force BEFORE the first
-        # panel is built: a factory bakes the palette into the widget it makes,
-        # so a treatment chosen after the fact repaints nothing already on
-        # screen.
-        apply_saved_design()
