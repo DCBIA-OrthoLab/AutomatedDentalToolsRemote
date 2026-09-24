@@ -63,8 +63,16 @@ class QObject:
         """`rebuild` detaches a widget this way; the stub only has to accept it."""
         self.parent = parent
 
+    def setObjectName(self, name):
+        """An id selector is how a container styles ITSELF without the rule
+        reaching every child, which is what `design.table_frame` relies on."""
+        self.objectName = name
+
     def setStyleSheet(self, sheet):
         self._stylesheet = sheet
+        # Readable under the name Qt publishes it under, so a test asserting
+        # what a widget was painted with reads the same on every stub class.
+        self.styleSheet = sheet
 
     def setCursor(self, _cursor):
         pass
@@ -650,9 +658,6 @@ class QFrame(QWidget):
     def __init__(self, parent=None):
         QWidget.__init__(self, parent)
         self.styleSheet = ""
-
-    def setStyleSheet(self, sheet):
-        self.styleSheet = sheet
 
 
 class QPalette:

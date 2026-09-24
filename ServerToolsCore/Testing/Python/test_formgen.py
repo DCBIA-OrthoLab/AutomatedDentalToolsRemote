@@ -222,15 +222,16 @@ class MultiChoiceWidgetTest(unittest.TestCase):
             self.assertIsInstance(box, qt.QCheckBox)
 
     def test_checkboxes_are_laid_out_in_declaration_order(self):
-        # The group also lays out the argument's description as a hint label
-        # above the boxes, so filter to the boxes themselves.
         laid_out = [w for w in self.group.container.layout.widgets if isinstance(w, qt.QCheckBox)]
         self.assertEqual([box.text for box in laid_out], ["summary", "preview", "columns"])
 
-    def test_the_description_is_laid_out_above_the_boxes(self):
-        laid_out = self.group.container.layout.widgets
-        self.assertIsInstance(laid_out[0], qt.QLabel)
-        self.assertEqual(laid_out[0].text, "Which result files to produce")
+    def test_nothing_but_the_options_is_printed_in_the_field(self):
+        """The description used to be rendered here, as a small grey paragraph
+        above the boxes. Several of those stacked down a panel is text a reader
+        scrolls past; it is the label's tooltip now."""
+        printed = [w.text for w in self.group.container.layout.widgets
+                   if getattr(w, "text", None)]
+        self.assertNotIn("Which result files to produce", printed)
 
     def test_initial_state_matches_the_declared_booleans(self):
         self.assertEqual(
@@ -271,14 +272,15 @@ class MultiChoiceWidgetTest(unittest.TestCase):
         self.assertGreater(bottom, 0)
 
 
-    def test_the_description_is_shown_rather_than_hovered(self):
-        """It used to be BOTH: rendered as a hint label above the options and
-        set as the container's tooltip. Qt hands a container's tooltip to every
-        child that has none, so ALI's 304-character note on `landmarks` popped
-        up under each of its 236 chips."""
-        shown = [w for w in self.group.container.layout.widgets
-                 if getattr(w, "text", None) == "Which result files to produce"]
-        self.assertEqual(len(shown), 1)
+    def test_the_description_is_hovered_on_the_label(self):
+        """Not on the container, which Qt would hand to every child that has
+        none -- ALI's 304-character note on `landmarks` popped up under each of
+        its 236 chips that way. The label has no children to hand it down to,
+        and is where a reader looks for what a field means."""
+        label = dict((field, label) for label, field in self.layout.rows)[
+            self.group.container]
+
+        self.assertEqual(label.toolTip(), "Which result files to produce")
         self.assertFalse(self.group.container.toolTip())
 
 
@@ -752,7 +754,7 @@ class MultiChoiceLayoutTest(unittest.TestCase):
     """
 
     def _group(self, layout, groups=None):
-        return formgen.MultiChoiceGroup(_LAYOUT_CHOICES, "", layout=layout, groups=groups)
+        return formgen.MultiChoiceGroup(_LAYOUT_CHOICES, layout=layout, groups=groups)
 
     def test_every_layout_reads_back_identically(self):
         for layout, groups in ((None, None), ("inline", None),
@@ -826,7 +828,7 @@ class MultiChoiceLayoutTest(unittest.TestCase):
         many = ["opt{}".format(i) for i in range(40)]
         choices = {option: False for option in few + many}
         group = formgen.MultiChoiceGroup(
-            choices, "", layout="tabs", groups={"Few": few, "Many": many})
+            choices, layout="tabs", groups={"Few": few, "Many": many})
         tabs = [w for w in group.container.layout.widgets if isinstance(w, qt.QTabWidget)][0]
 
         small = tabs.maximumHeight()
@@ -839,7 +841,7 @@ class MultiChoiceLayoutTest(unittest.TestCase):
     def test_the_height_comes_back_when_the_small_tab_does(self):
         few, many = ["a"], ["opt{}".format(i) for i in range(40)]
         group = formgen.MultiChoiceGroup(
-            {option: False for option in few + many}, "",
+            {option: False for option in few + many},
             layout="tabs", groups={"Few": few, "Many": many})
         tabs = [w for w in group.container.layout.widgets if isinstance(w, qt.QTabWidget)][0]
 
@@ -850,7 +852,7 @@ class MultiChoiceLayoutTest(unittest.TestCase):
 
     def test_a_long_catalogue_is_capped_rather_than_pushing_apply_off_screen(self):
         many = {"opt{}".format(i): False for i in range(200)}
-        group = formgen.MultiChoiceGroup(many, "", layout="tabs", groups=None)
+        group = formgen.MultiChoiceGroup(many, layout="tabs", groups=None)
         tabs = [w for w in group.container.layout.widgets if isinstance(w, qt.QTabWidget)][0]
 
         self.assertEqual(tabs.maximumHeight(), design.TABS_MAX_HEIGHT)
@@ -858,7 +860,7 @@ class MultiChoiceLayoutTest(unittest.TestCase):
     def test_a_short_catalogue_no_longer_gets_a_tall_empty_box(self):
         """The floor used to be 220 px whatever the content held."""
         few = {"a": False, "b": True}
-        group = formgen.MultiChoiceGroup(few, "", layout="tabs", groups=None)
+        group = formgen.MultiChoiceGroup(few, layout="tabs", groups=None)
         tabs = [w for w in group.container.layout.widgets if isinstance(w, qt.QTabWidget)][0]
 
         self.assertEqual(tabs.maximumHeight(), design.tabs_height_for(1))
@@ -988,7 +990,7 @@ class MultiChoiceLayoutTest(unittest.TestCase):
         short = ["Ba", "S", "N", "RPo", "LPo", "C2"]
         long = ["UR3OIPxx", "LFZygxxx", "RFZygxxx", "UL6Oxxxx"]
         group = formgen.MultiChoiceGroup(
-            {option: False for option in short + long}, "",
+            {option: False for option in short + long},
             layout="tabs", groups={"Short": short, "Long": long})
         tabs = [w for w in group.container.layout.widgets if isinstance(w, qt.QTabWidget)][0]
 
@@ -1017,13 +1019,29 @@ class MultiChoiceLayoutTest(unittest.TestCase):
         """The columns ARE the arch. Spreading them across whatever width the
         panel happens to have destroys the adjacency the layout exists to show,
         which is why only the rows take the slack here."""
-        group = self._group("grid", _LAYOUT_GROUPS)
-        area = [w for w in group.container.layout.widgets
-                if isinstance(w, qt.QScrollArea)][0]
-        grid = area.widget.layout
+        grid = self._chart_grid(self._group("grid", _LAYOUT_GROUPS))
 
         self.assertEqual(grid.rowStretch.get(grid.rowCount()), 1)
         self.assertEqual(grid.columnStretch, {})
+
+    def test_the_chart_is_drawn_on_a_table_surface(self):
+        """A tabbed layout gets its frame from QTabWidget::pane; this one has
+        no pane, and without a frame thirty-two chips sat on the panel with no
+        edge saying where the table stopped."""
+        group = self._group("grid", _LAYOUT_GROUPS)
+        frame = group.container.layout.widgets[-1]
+
+        self.assertIn("tableFrame", frame._stylesheet)
+        self.assertIn(design.tokens()["BORDER_STRONG"], frame._stylesheet)
+
+    @staticmethod
+    def _chart_grid(group):
+        """The chart's own QGridLayout, through the table frame it now sits
+        in."""
+        frame = group.container.layout.widgets[-1]
+        area = [w for w in frame.layout.widgets
+                if isinstance(w, qt.QScrollArea)][0]
+        return area.widget.layout
 
     def test_no_layout_carries_a_global_selection_bar(self):
         """`All` / `None` / `Default` were three small links under the options.
@@ -1083,7 +1101,7 @@ class FacadeGroupsTest(unittest.TestCase):
     def test_rebuilding_keeps_what_survives_and_defaults_the_rest(self):
         """Switching mode and back must not silently clear a selection."""
         group = formgen.MultiChoiceGroup(
-            {"Ba": False, "S": True}, "", layout="tabs", groups={"Cranial base": ["Ba", "S"]})
+            {"Ba": False, "S": True}, layout="tabs", groups={"Cranial base": ["Ba", "S"]})
         group.boxes["Ba"].setChecked(True)
 
         group.rebuild({"Ba": False, "L0MG": True}, {"Mucogingival Lower": ["L0MG"]})
@@ -1093,7 +1111,7 @@ class FacadeGroupsTest(unittest.TestCase):
         self.assertTrue(group.boxes["L0MG"].isChecked(), "a new one takes its declared default")
 
     def test_rebuilding_with_the_same_options_redraws_nothing(self):
-        group = formgen.MultiChoiceGroup({"a": True, "b": False}, "", layout="tabs")
+        group = formgen.MultiChoiceGroup({"a": True, "b": False}, layout="tabs")
         before = group.boxes["a"]
 
         group.rebuild({"a": True, "b": False}, None)
@@ -1101,7 +1119,7 @@ class FacadeGroupsTest(unittest.TestCase):
         self.assertIs(group.boxes["a"], before)
 
     def test_the_group_still_reads_back_the_complete_state(self):
-        group = formgen.MultiChoiceGroup({"a": True, "b": False}, "", layout="tabs")
+        group = formgen.MultiChoiceGroup({"a": True, "b": False}, layout="tabs")
 
         group.rebuild({"b": False, "c": True}, None)
 
@@ -1876,11 +1894,18 @@ class JoystickWidgetTest(unittest.TestCase):
         pad.setValues(1.0, 1.0, notify=True)
         self.assertEqual(widget.value(), [3.0, 2.0])
 
-    def test_the_description_is_shown_above_the_widgets(self):
-        widget = formgen._make_widget("k", _vec2(ui="joystick", description="Move the landmark"))
-        laid_out = widget.container.layout.widgets
-        self.assertIsInstance(laid_out[0], qt.QLabel)
-        self.assertEqual(laid_out[0].text, "Move the landmark")
+    def test_the_description_is_hovered_rather_than_printed(self):
+        """It was printed above the pad, as a small grey paragraph. Every
+        argument's description is the row label's tooltip now; a pad that also
+        printed its own would be the one field on the panel saying it twice."""
+        schema = {"k": _vec2(ui="joystick", description="Move the landmark")}
+        layout = qt.QFormLayout()
+        formgen.build(schema, layout)
+        label, field = layout.rows[0]
+
+        printed = [w.text for w in field.layout.widgets if getattr(w, "text", None)]
+        self.assertNotIn("Move the landmark", printed)
+        self.assertEqual(label.toolTip(), "Move the landmark")
 
     def test_an_invalid_range_falls_back_to_the_unit_axis(self):
         widget = self._one(_vec2(ui="joystick", x_range=[3], y_range=[0, 1]))
@@ -2015,7 +2040,7 @@ class ToolTipStyleTest(unittest.TestCase):
 
 
 class MultiChoiceTooltipTest(unittest.TestCase):
-    """A group's description is shown, not hovered."""
+    """A group's description never lands on the group itself."""
 
     CHOICES = {"Ba": False, "S": False, "N": False}
     NOTE = ("Predict exactly these landmarks -- naming any of them REPLACES the "
@@ -2026,13 +2051,13 @@ class MultiChoiceTooltipTest(unittest.TestCase):
         """Qt hands a container's tooltip to every child that has none, so this
         paragraph popped up under each of ALI's 236 chips -- printed and hovered
         at once, and the hovered copy is the one nobody asked for."""
-        group = formgen.MultiChoiceGroup(self.CHOICES, self.NOTE)
+        group = formgen.MultiChoiceGroup(self.CHOICES)
         group.setToolTip(self.NOTE)
         self.assertFalse(group.container._tooltip)
 
     def test_every_other_composite_still_takes_one(self):
-        """Only the multichoice shows its description already. A file picker's
-        tooltip says which path it holds, and nothing else says that."""
+        """Only the multichoice refuses it. A file picker's tooltip says which
+        path it holds, and nothing else says that."""
         field = formgen.FileOrFolderInput()
         field.setToolTip("/data/patient/scan.nii.gz")
         self.assertEqual(field.container._tooltip, "/data/patient/scan.nii.gz")
@@ -2051,7 +2076,7 @@ class OptionHelpTest(unittest.TestCase):
 
     def _group(self, layout=None, help_texts=None, groups=None):
         return formgen.MultiChoiceGroup(
-            self.CHOICES, "", layout=layout, groups=groups,
+            self.CHOICES, layout=layout, groups=groups,
             option_help=self.HELP if help_texts is None else help_texts)
 
     def test_the_named_option_carries_its_line(self):
@@ -2107,7 +2132,7 @@ class ChipsLayoutTest(unittest.TestCase):
 
     def _group(self, groups=None, help_texts=None):
         return formgen.MultiChoiceGroup(
-            {option: False for option in self.STRUCTURES}, "",
+            {option: False for option in self.STRUCTURES},
             layout="chips", groups=groups, option_help=help_texts)
 
     def _grid(self, group, index=0):
@@ -2388,8 +2413,20 @@ class SelectionLabelTest(unittest.TestCase):
         hint = design.hint_label("CBCT only: ignored for intraoral scans")
 
         self.assertIn("font-size: 12pt", selection._stylesheet)
-        self.assertIn("font-weight: 600", selection._stylesheet)
         self.assertIn("font-size: 8pt", hint._stylesheet)
+
+    def test_it_only_shouts_once_the_row_holds_something(self):
+        """Empty, this line is the prompt "Nothing selected" -- a prompt in
+        full-strength semi-bold is a panel of four inputs all demanding
+        attention. The weight and the colour are what change when a scan
+        actually lands."""
+        label = design.selection_label("Nothing selected")
+        empty = label._stylesheet
+
+        design.set_input_filled(design.input_card(), label, True)
+
+        self.assertIn("font-weight: 500", empty)
+        self.assertIn("font-weight: 600", label._stylesheet)
 
     def test_it_is_still_a_statement_and_not_a_control(self):
         """No border, no fill: a filled block here would read as a third thing
@@ -2399,8 +2436,9 @@ class SelectionLabelTest(unittest.TestCase):
         self.assertNotIn("border", style)
         self.assertNotIn("background", style)
 
-    def test_it_uses_the_body_colour_not_the_muted_one(self):
+    def test_a_filled_row_uses_the_body_colour_not_the_muted_one(self):
         selection = design.selection_label("Folder: /data/cohort")
+        design.set_input_filled(design.input_card(), selection, True)
 
         self.assertIn(design.tokens()["TEXT"], selection._stylesheet)
         self.assertNotIn(design.tokens()["TEXT_MUTED"], selection._stylesheet)
@@ -2417,3 +2455,235 @@ class SelectionLabelTest(unittest.TestCase):
         the theme nobody tests in."""
         for theme in (design._LIGHT, design._DARK):
             self.assertIn("TEXT", theme)
+
+
+class ThemeSymmetryTest(unittest.TestCase):
+    """A token defined in one theme and not the other is a KeyError in the
+    theme nobody tests in -- and the theme nobody tests in is whichever one the
+    author was not running."""
+
+    def test_the_two_tables_hold_exactly_the_same_names(self):
+        self.assertEqual(set(design._LIGHT), set(design._DARK))
+
+    def test_no_token_has_the_same_value_in_both(self):
+        """Not a style rule -- a detection. A value that survived a palette
+        rewrite unchanged in both tables is one that was never re-chosen for
+        the second theme."""
+        shared = [name for name in design._LIGHT
+                  if design._LIGHT[name] == design._DARK[name]
+                  and name not in ("DANGER",)]
+        self.assertEqual(shared, [], "carried over rather than chosen")
+
+    def test_an_operated_control_has_a_stronger_edge_than_a_grouping(self):
+        """The whole reason `BORDER_STRONG` exists: at one hairline for both,
+        a combo box on the panel's ground had no visible outline, and nothing
+        said where a field began."""
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            self.assertNotEqual(theme["BORDER"], theme["BORDER_STRONG"], name)
+
+
+class DropdownArrowTest(unittest.TestCase):
+    """A dropdown has to look like one. It had Qt's default arrow -- a grey
+    triangle a few pixels across -- so next to a spin box of the same size and
+    the same outline, nothing said there was a list behind it."""
+
+    def test_the_chevron_carries_no_uri_fragment_marker(self):
+        """`#` ends a data URI at the fragment. Left in, Qt loads no image at
+        all and the arrow simply is not drawn, with nothing logged."""
+        self.assertNotIn("#", design._chevron_svg("#4ba3ff"))
+
+    def test_a_hex_colour_becomes_an_rgb_triple(self):
+        self.assertEqual(design._rgb("#4ba3ff"), "rgb(75, 163, 255)")
+
+    def test_a_colour_keyword_reaches_the_svg_intact(self):
+        """`white` needs no rewriting, and rewriting it would break it."""
+        self.assertEqual(design._rgb("white"), "white")
+
+    def test_the_open_state_points_the_other_way(self):
+        """The only feedback a collapsed combo box gives that its list is
+        down."""
+        self.assertNotEqual(design._chevron_svg("#4ba3ff"),
+                            design._chevron_svg("#4ba3ff", up=True))
+
+    def test_both_themes_draw_an_arrow_of_their_own(self):
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            sheet = design._base_stylesheet(theme)
+            self.assertIn("QComboBox::down-arrow", sheet, name)
+            self.assertIn("QComboBox::drop-down", sheet, name)
+            self.assertIn(design._rgb(theme["PRIMARY"]), sheet, name)
+
+    def test_the_text_clears_the_arrow_zone(self):
+        """Without the right padding a long hosted entry runs under the
+        chevron rather than being elided before it."""
+        sheet = design._base_stylesheet(design._LIGHT)
+        rule = re.search(r"QComboBox \{(.*?)\n    \}", sheet, re.S).group(1)
+        self.assertIn("{}px".format(design.DROPDOWN_ARROW_WIDTH + design.SPACING_SM), rule)
+
+
+class TableSurfaceTest(unittest.TestCase):
+    """ASO's landmark chooser is a table, and a table is an object you look
+    into -- not a region of the panel's own ground with a hairline round it."""
+
+    def test_the_pane_is_filled_and_strongly_edged_in_both_themes(self):
+        for name, theme in (("light", design._LIGHT), ("dark", design._DARK)):
+            rule = re.search(r"QTabWidget::pane \{(.*?)\n    \}",
+                             design._base_stylesheet(theme), re.S).group(1)
+            self.assertIn(theme["SURFACE_TABLE"], rule, name)
+            self.assertIn("2px solid {}".format(theme["BORDER_STRONG"]), rule, name)
+
+    def test_every_tab_carries_the_same_border_width(self):
+        """Qt lays the bar out from the tab it is drawing, so a selected tab
+        given a thicker border than its neighbours grows by the difference and
+        clips its own label -- `Cranial base` rendered as `ranial bas`. The
+        colour is free to change; the width is not."""
+        sheet = design._base_stylesheet(design._LIGHT)
+        widths = set(re.findall(r"QTabBar::tab[^{]*\{[^}]*?border:\s*(\d+)px", sheet, re.S))
+        self.assertEqual(widths, {"2"})
+
+    def test_a_table_frame_styles_itself_and_not_its_children(self):
+        """An id selector, because every child of it holds a control that has
+        to keep the styling the panel's own sheet gives it."""
+        frame = design.table_frame()
+        self.assertTrue(frame._stylesheet.startswith("#tableFrame"))
+
+
+class ChipGroupSpacingTest(unittest.TestCase):
+    """AMASSS declares three groups -- Bones, Soft tissue, Masks -- and they
+    were drawn at the column's own 4px option spacing, so `Soft tissue` sat as
+    close to the last chip of `Bones` as two chips of one group sit to each
+    other. Three groups, read as one run of nine."""
+
+    STRUCTURES = {"MAND": False, "MAX": False, "SKIN": False, "UAW": False}
+    GROUPS = {"Bones": ["MAND", "MAX"], "Soft tissue": ["SKIN", "UAW"]}
+
+    def _headings(self):
+        group = formgen.MultiChoiceGroup(
+            dict(self.STRUCTURES), layout="chips", groups=self.GROUPS)
+        return [w for w in group.container.layout.widgets
+                if getattr(w, "text", None) in self.GROUPS]
+
+    def test_every_group_still_gets_its_heading(self):
+        self.assertEqual([w.text for w in self._headings()],
+                         ["Bones", "Soft tissue"])
+
+    def test_a_heading_carries_air_above_it_and_a_rule_under_it(self):
+        for heading in self._headings():
+            self.assertIn("margin-top", heading._stylesheet)
+            self.assertIn("border-bottom", heading._stylesheet)
+
+    def test_it_is_not_the_plain_section_title_it_used_to_be(self):
+        self.assertNotEqual(design.group_heading("Bones")._stylesheet,
+                            design.section_title("Bones")._stylesheet)
+
+
+class ExplainedLabelTest(unittest.TestCase):
+    """The argument's description used to be printed under the field, as a
+    small grey paragraph. It is the label's tooltip now, and the label says so
+    with a dotted rule -- the oldest convention there is for "there is more
+    here if you hover", and one that costs the label no words."""
+
+    def _label(self, name):
+        """The row label of one argument, found by the words it shows."""
+        spec = EXAMPLE_TOOL_SCHEMA["arguments"][name]
+        wanted = formgen.label_for(name, spec)
+        layout = qt.QFormLayout()
+        formgen.build(EXAMPLE_TOOL_SCHEMA["arguments"], layout)
+        return [label for label, _field in layout.rows
+                if label.text.startswith(wanted)][0]
+
+    def test_an_explained_field_is_marked_and_hovered(self):
+        label = self._label("outputs")
+        self.assertIn("dotted", label._stylesheet)
+        self.assertEqual(label.toolTip(), "Which result files to produce")
+
+    def test_a_field_with_nothing_to_say_carries_no_rule(self):
+        plain = design.section_title("Jaws")
+        self.assertNotIn("dotted", plain._stylesheet)
+        self.assertNotIn("border-bottom", plain._stylesheet)
+
+    def test_the_mark_survives_the_required_star(self):
+        self.assertIn("dotted", design.required_label("Input", True)._stylesheet)
+        self.assertIn("dotted", design.optional_label("Landmarks", True)._stylesheet)
+
+
+class InputCardTest(unittest.TestCase):
+    """One input row is up to five controls on one line -- two dropdowns, two
+    browse buttons -- and a sentence under them. Laid out bare that is five
+    shapes and no edge anywhere, and the question a clinician actually has
+    ("have I given this tool its scan yet?") was answered only by a line of
+    12pt text among all of it.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.temp, True)
+        self.scan = os.path.join(self.temp, "patient1.nii.gz")
+        with open(self.scan, "wb") as handle:
+            handle.write(b"0" * 32)
+
+    def test_an_untouched_row_is_a_neutral_outline(self):
+        row = formgen.FileOrFolderInput()
+        self.assertIn(design.tokens()["BORDER_STRONG"], row.container._stylesheet)
+        self.assertIn("transparent", row.container._stylesheet)
+
+    def test_a_filled_row_takes_the_accent(self):
+        row = formgen.FileOrFolderInput()
+        row.setCurrentPath(self.scan)
+
+        self.assertIn(design.tokens()["PRIMARY"], row.container._stylesheet)
+        self.assertIn(design.tokens()["ACCENT_SOFT"], row.container._stylesheet)
+
+    def test_emptying_it_again_takes_the_accent_back(self):
+        row = formgen.FileOrFolderInput()
+        row.setCurrentPath(self.scan)
+        row.setCurrentPath("")
+
+        self.assertNotIn(design.tokens()["ACCENT_SOFT"], row.container._stylesheet)
+
+    def test_the_border_never_changes_width_with_the_state(self):
+        """It is the outermost thing on the row: a 2px-to-3px change on fill
+        would move every control inside it by a pixel the moment a file was
+        chosen."""
+        row = formgen.FileOrFolderInput()
+        empty = re.search(r"border:\s*(\d+)px", row.container._stylesheet).group(1)
+        row.setCurrentPath(self.scan)
+        filled = re.search(r"border:\s*(\d+)px", row.container._stylesheet).group(1)
+
+        self.assertEqual(empty, filled)
+
+    def test_it_styles_itself_and_not_the_controls_inside_it(self):
+        """Every child of the card holds a control that has to keep the
+        styling the panel's own sheet gives it."""
+        self.assertTrue(formgen.FileOrFolderInput().container._stylesheet
+                        .startswith("#inputCard"))
+
+    def test_a_wrapped_row_paints_the_box_the_panel_actually_shows(self):
+        """The picker inside a `ServerFileInput` is never added to a layout --
+        only its buttons are -- so painting its own card would leave the box a
+        clinician can see saying the row is still empty."""
+        widget = formgen.file_widget(_VOLUME_SPEC, "file_or_folder")
+        widget.setChoices([{"name": "MG_test_scan.nii.gz", "kind": "file", "size": 94}])
+        formgen.set_local_path(widget, self.scan)
+
+        self.assertIn(design.tokens()["ACCENT_SOFT"], widget.container._stylesheet)
+
+    def test_a_scene_pick_fills_the_row_though_no_path_was_chosen(self):
+        """An open volume is exported at upload time and has no local path at
+        all, so a card driven off `currentPath` would call a satisfied row
+        empty."""
+        widget = formgen.file_widget(_VOLUME_SPEC, "file_or_folder")
+        widget.setSceneSupported(True)
+        widget.setVolumeChoices(["CBCT_patient1"])
+        widget.sceneCombo.setCurrentIndex(1)
+
+        self.assertTrue(widget.volume_name(), "the scene pick did not register")
+        self.assertIn(design.tokens()["ACCENT_SOFT"], widget.container._stylesheet)
+
+    def test_the_line_inside_it_says_the_same_thing_the_box_does(self):
+        """The box says THAT the row is satisfied and the line says WITH WHAT.
+        A panel where those two disagreed would be worse than either alone."""
+        row = formgen.FileOrFolderInput()
+        row.setCurrentPath(self.scan)
+
+        self.assertIn("patient1.nii.gz", row.caption.text)
+        self.assertIn("font-weight: 600", row.caption._stylesheet)

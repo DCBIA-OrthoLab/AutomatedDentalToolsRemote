@@ -78,29 +78,14 @@ class SelectAllTest(unittest.TestCase):
 
     def test_a_redraw_does_not_leave_two_of_each_button(self):
         """`rebuild` empties the column; anything added once in __init__ used to
-        survive as an orphan. The description had exactly that bug."""
-        group = _group(select_all=True, description="what these steps are")
+        survive as an orphan. The description had exactly that bug, back when
+        the field printed one."""
+        group = _group(select_all=True)
         group.rebuild({"ALI_CBCT": False, "ASO": False})
 
         widgets = getattr(group._column, "widgets", [])
         holders = [w for w in widgets if getattr(w, "layout", None) is not None]
         self.assertEqual(len(holders), 1, "the button row was drawn twice")
-
-    def test_the_description_survives_a_redraw(self):
-        """Found while adding the buttons: `rebuild` took the hint label out and
-        `_draw` never put it back, so a facade narrowing its options lost the
-        sentence explaining them."""
-        hint = "what these steps are"
-        group = _group(select_all=True, description=hint)
-        self.assertIn(hint, self._texts(group))
-
-        group.rebuild({"ALI_CBCT": False, "ASO": False})
-        self.assertIn(hint, self._texts(group),
-                      "the sentence explaining the options was dropped")
-
-    @staticmethod
-    def _texts(group):
-        return [getattr(w, "text", None) for w in getattr(group._column, "widgets", [])]
 
 
 if __name__ == "__main__":

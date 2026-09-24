@@ -14,6 +14,17 @@ SPACING_SM = 6
 SPACING_MD = 8
 SPACING_LG = 12
 
+# Two levels of edge, and the distinction is what makes a control read as one.
+# `BORDER` is a HAIRLINE around something that groups (a collapsible box, a
+# frame); `BORDER_STRONG` is the edge of something a clinician OPERATES -- a
+# dropdown, a spin box, the box a scan is chosen in. Both were the same value
+# once, and at 1px of #e0e6ed on a #f8f9fa ground a combo box had no visible
+# outline at all: the panel read as a column of text with a few blue buttons in
+# it, and nothing said where a field began.
+#
+# `BACKGROUND` moved off near-white with it. A raised surface needs a ground to
+# be raised ABOVE, and #f8f9fa against #ffffff is a difference of three counts
+# that no screen reproduces reliably.
 _LIGHT = {
     "PRIMARY": "#3498db",
     "PRIMARY_HOVER": "#2980b9",
@@ -24,10 +35,13 @@ _LIGHT = {
     "SUCCESS": "#27ae60",
     "TEXT": "#2c3e50",
     "TEXT_MUTED": "#34495e",
-    "BORDER": "#e0e6ed",
-    "BACKGROUND": "#f8f9fa",
+    "BORDER": "#d3dce6",
+    "BORDER_STRONG": "#a9b9ca",
+    "BACKGROUND": "#eceff4",
     "SURFACE": "#ffffff",
-    "SURFACE_HOVER": "#fbfcfd",
+    "SURFACE_HOVER": "#f3f8fd",
+    "SURFACE_TABLE": "#ffffff",
+    "ACCENT_SOFT": "#e7f1fb",
     "DISABLED_BG": "#bdc3c7",
     "DISABLED_TEXT": "#95a5a6",
 }
@@ -42,10 +56,13 @@ _DARK = {
     "SUCCESS": "#2ecc71",
     "TEXT": "#e0e0e0",
     "TEXT_MUTED": "#b0b0b0",
-    "BORDER": "#454545",
-    "BACKGROUND": "#2b2b2b",
-    "SURFACE": "#383838",
-    "SURFACE_HOVER": "#414141",
+    "BORDER": "#454b53",
+    "BORDER_STRONG": "#616b78",
+    "BACKGROUND": "#26292e",
+    "SURFACE": "#343a41",
+    "SURFACE_HOVER": "#3d444c",
+    "SURFACE_TABLE": "#31363d",
+    "ACCENT_SOFT": "#233748",
     "DISABLED_BG": "#555555",
     "DISABLED_TEXT": "#888888",
 }
@@ -82,6 +99,48 @@ _CHECKMARK_SVG = (
     "<path fill='white' d='M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0"
     "l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z'/></svg>"
 )
+
+# How wide the tinted zone at a dropdown's right edge is, and how big the
+# chevron drawn in it is. Wide enough to read as a part of the control rather
+# than as a sliver of colour, and the whole width of it is clickable because
+# QComboBox opens on a click anywhere.
+DROPDOWN_ARROW_WIDTH = 24
+_CHEVRON_SIDE = 10
+
+
+def _rgb(color: str) -> str:
+    """`#4ba3ff` as `rgb(75, 163, 255)`; anything else passed through, so a
+    keyword like `white` still reaches the SVG intact."""
+    value = color.strip()
+    if not (value.startswith("#") and len(value) == 7):
+        return value
+    red, green, blue = (int(value[index:index + 2], 16) for index in (1, 3, 5))
+    return "rgb({}, {}, {})".format(red, green, blue)
+
+
+def _chevron_svg(color: str, up: bool = False) -> str:
+    """A chevron as an inline data URI, in whatever colour the theme wants.
+
+    Parameterised where `_CHECKMARK_SVG` is a constant, because this one is
+    drawn on a light fill and has to take a real colour rather than white --
+    and the OPEN state points the other way, which is the only feedback a
+    collapsed combo box gives that its list is down.
+
+    The colour is rewritten as `rgb(r, g, b)` and NEVER reaches the URI as a
+    hex literal. `#` is a data URI's fragment marker: left as it is the SVG is
+    truncated at the fill, and percent-escaping it only moves the question to
+    whether Qt decodes the escape before handing the bytes to the SVG reader.
+    `rgb()` needs no character a URI reserves, so neither question arises --
+    and the failure both would have had is silent, the arrow simply not being
+    drawn with nothing logged.
+    """
+    tint = _rgb(color)
+    points = "4,10 8,6 12,10" if up else "4,6 8,10 12,6"
+    return (
+        "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
+        "<polyline points='{}' fill='none' stroke='{}' stroke-width='2'"
+        " stroke-linecap='round' stroke-linejoin='round'/></svg>"
+    ).format(points, tint)
 
 
 def is_dark_mode() -> bool:
@@ -120,56 +179,109 @@ def _base_stylesheet(t: dict) -> str:
       color: {t['TEXT']};
       font-weight: 500;
     }}
+    /* Every control a clinician OPERATES carries the strong edge, and a
+       2px one at that: on a form of eight rows the outline is the only thing
+       that says where a field starts and the label beside it stops. The width
+       never changes with state -- only the COLOUR does -- because Qt lays a
+       row out from the border box, and a 1px-to-2px focus border used to move
+       the text inside the field by a pixel every time it was clicked. */
     QLineEdit, QTextEdit {{
       background-color: {t['SURFACE']};
-      border: 1px solid {t['BORDER']};
-      border-radius: 4px;
+      border: 2px solid {t['BORDER_STRONG']};
+      border-radius: 5px;
       padding: {SPACING_SM}px;
       color: {t['TEXT']};
       selection-background-color: {t['PRIMARY']};
     }}
+    QLineEdit:hover, QTextEdit:hover {{ border-color: {t['PRIMARY']}; }}
     QLineEdit:focus, QTextEdit:focus {{
-      border: 2px solid {t['PRIMARY']};
+      border-color: {t['PRIMARY']};
     }}
+    /* A dropdown has to LOOK like one. It had a 1px hairline and Qt's default
+       arrow, which on Slicer's own palette is a grey triangle a few pixels
+       across -- next to a spin box of the same size and the same outline, the
+       only difference between "type a number here" and "there is a list behind
+       this" was that triangle. The right edge is a tinted zone of its own with
+       a chevron in it, and the chevron turns over while the list is down. */
     QComboBox {{
       background-color: {t['SURFACE']};
-      border: 1px solid {t['BORDER']};
-      border-radius: 4px;
-      padding: {SPACING_XS}px {SPACING_SM}px;
+      border: 2px solid {t['BORDER_STRONG']};
+      border-radius: 5px;
+      /* Right padding clears the arrow zone, so a long entry is elided before
+         it runs under the chevron rather than behind it. */
+      padding: {SPACING_XS}px {DROPDOWN_ARROW_WIDTH + SPACING_SM}px {SPACING_XS}px {SPACING_SM}px;
       color: {t['TEXT']};
     }}
-    QComboBox:focus {{ border: 2px solid {t['PRIMARY']}; }}
-    QComboBox::drop-down {{ width: 20px; border: none; }}
+    QComboBox:hover {{ border-color: {t['PRIMARY']}; }}
+    QComboBox:focus {{ border-color: {t['PRIMARY']}; }}
+    QComboBox::drop-down {{
+      subcontrol-origin: padding;
+      subcontrol-position: top right;
+      width: {DROPDOWN_ARROW_WIDTH}px;
+      border-left: 1px solid {t['BORDER']};
+      border-top-right-radius: 3px;
+      border-bottom-right-radius: 3px;
+      background-color: {t['ACCENT_SOFT']};
+    }}
+    QComboBox::down-arrow {{
+      width: {_CHEVRON_SIDE}px;
+      height: {_CHEVRON_SIDE}px;
+      image: url("{_chevron_svg(t['PRIMARY'])}");
+    }}
+    /* The list is down: the chevron points back at the box it came out of. */
+    QComboBox::down-arrow:on {{ image: url("{_chevron_svg(t['PRIMARY'], up=True)}"); }}
+    /* The zone does NOT repaint on hover, and that is a decision rather than
+       an omission. Qt decides a sub-control's own :hover from the mouse being
+       inside THAT sub-control's rect, and the arrow's rect is strictly inside
+       the zone's -- so a rule filling the zone with the accent would fire a
+       few pixels before the rule that turns the chevron white, and the arrow
+       would vanish into its own background on the way in. The border already
+       answers a hover; this stays legible in every state instead. */
+    QComboBox:disabled {{ color: {t['DISABLED_TEXT']}; border-color: {t['BORDER']}; }}
+    QComboBox::drop-down:disabled {{ background-color: transparent; }}
     QComboBox QAbstractItemView {{
       background-color: {t['SURFACE']};
       color: {t['TEXT']};
       selection-background-color: {t['PRIMARY']};
-      border: 1px solid {t['BORDER']};
+      border: 1px solid {t['BORDER_STRONG']};
+      /* Air around each entry: the popup is where a hosted test file is
+         actually read, and eleven entries packed at Qt's default line height
+         are a wall of text. */
+      padding: {SPACING_XS}px;
     }}
     QSpinBox, QDoubleSpinBox {{
       background-color: {t['SURFACE']};
-      border: 1px solid {t['BORDER']};
-      border-radius: 4px;
+      border: 2px solid {t['BORDER_STRONG']};
+      border-radius: 5px;
       padding: {SPACING_XS}px {SPACING_SM}px;
       color: {t['TEXT']};
     }}
-    QSpinBox:focus, QDoubleSpinBox:focus {{ border: 2px solid {t['PRIMARY']}; }}
+    QSpinBox:hover, QDoubleSpinBox:hover {{ border-color: {t['PRIMARY']}; }}
+    QSpinBox:focus, QDoubleSpinBox:focus {{ border-color: {t['PRIMARY']}; }}
     QTabWidget::pane {{
-      /* Transparent, not SURFACE. A white card behind the options was a block of
-         a colour the panel around it does not use -- Slicer's own ground shows
-         through instead, and the chips and buttons on top of it are what carry
-         the shapes. The border still says where the group ends. */
-      background-color: transparent;
-      border: 1px solid {t['BORDER']};
+      /* A FILLED, strongly-bordered surface: this is the panel's table, and a
+         table has to be an object you look into rather than a region of the
+         same ground with a hairline drawn round it. It shipped transparent
+         with a 1px border on the reasoning that a filled card reads as pasted
+         in from another application -- true of a card floating on the panel,
+         false of a hundred and thirty landmarks that a reader has to scan row
+         by row. The fill is what separates the options from the panel; the
+         2px edge is what says the tab bar above belongs to it. */
+      background-color: {t['SURFACE_TABLE']};
+      border: 2px solid {t['BORDER_STRONG']};
       border-radius: 6px;
-      /* Lifted by one pixel so the selected tab's open bottom edge meets the
-         pane instead of leaving a seam across it. */
-      top: -1px;
+      /* Lifted by the border's own width so the selected tab's open bottom
+         edge meets the pane instead of leaving a seam across it. */
+      top: -2px;
     }}
     QTabBar::tab {{
       background-color: transparent;
       color: {t['TEXT_MUTED']};
-      border: 1px solid {t['BORDER']};
+      /* The same 2px as the pane, on EVERY state. Qt lays the bar out from the
+         tab it is drawing, so a selected tab given a thicker border than its
+         neighbours grows by the difference and clips its own label -- the same
+         trap the font-weight note below records. */
+      border: 2px solid {t['BORDER_STRONG']};
       border-bottom: none;
       border-top-left-radius: 6px;
       border-top-right-radius: 6px;
@@ -177,10 +289,18 @@ def _base_stylesheet(t: dict) -> str:
       margin-right: 2px;
       font-weight: 500;
     }}
+    QTabBar::tab:!selected {{
+      /* Sunk into the ground: an unselected tab is a door, not a surface. */
+      background-color: {t['BACKGROUND']};
+      border-color: {t['BORDER']};
+      /* Pushed down so the open tab stands proud of the closed ones by the
+         two pixels its border is worth, rather than by nothing at all. */
+      margin-top: 2px;
+    }}
     QTabBar::tab:selected {{
-      /* The accent and the closed bottom edge say which tab is open; a fill
-         would put the white card back one line higher. */
-      background-color: transparent;
+      /* The open tab is a continuation of the table under it: the same fill,
+         the same edge, and no line between the two. */
+      background-color: {t['SURFACE_TABLE']};
       color: {t['PRIMARY']};
       /* Same weight as an unselected tab, deliberately. Qt sizes a tab from the
          text it has when the bar is laid out, so bolding the selected one made
@@ -442,18 +562,37 @@ def toggle_button(text: str) -> qt.QPushButton:
     return button
 
 
-def section_title(text: str) -> qt.QLabel:
+def section_title(text: str, explained: bool = False) -> qt.QLabel:
+    """The name of a field, beside it.
+
+    `explained` marks a label whose argument carries a description, and the
+    mark is a dotted underline -- the oldest convention there is for "there is
+    more here if you hover", and one that costs the label no words. The
+    description itself is the label's TOOLTIP, and that is a deliberate move:
+    it used to be printed under the field as a small grey paragraph, several
+    lines of it on a crowded panel, and at that size and that contrast it was
+    text a reader skipped rather than read.
+
+    What it costs is stated rather than hidden: a paragraph that only applies
+    to one of two always-visible fields -- ALI publishes `cbct_regions` and
+    `ios_networks` together and the description of each says which input it is
+    for -- is now one hover away rather than on the panel. The dotted rule is
+    what has to carry that, so it is drawn on every explained label and on no
+    other.
+    """
     t = tokens()
     label = qt.QLabel(text)
-    label.setStyleSheet(f"color: {t['TEXT_MUTED']}; font-weight: 600;")
+    hint = (f" border-bottom: 1px dotted {t['BORDER_STRONG']};"
+            f" padding-bottom: 1px;" if explained else "")
+    label.setStyleSheet(f"color: {t['TEXT_MUTED']}; font-weight: 600;{hint}")
     return label
 
 
-def required_label(text: str) -> qt.QLabel:
-    return section_title(f"{text} *")
+def required_label(text: str, explained: bool = False) -> qt.QLabel:
+    return section_title(f"{text} *", explained)
 
 
-def optional_label(text: str) -> qt.QLabel:
+def optional_label(text: str, explained: bool = False) -> qt.QLabel:
     """A file argument the tool can do without.
 
     Said in words rather than by the absence of the `*`: an empty file picker
@@ -461,13 +600,69 @@ def optional_label(text: str) -> qt.QLabel:
     file itself when it is left empty -- AREG's landmarks, produced by ALI
     through the supervisor -- otherwise reads as a missing input.
     """
-    return section_title(f"{text} (optional)")
+    return section_title(f"{text} (optional)", explained)
+
+
+def group_heading(text: str) -> qt.QLabel:
+    """The name of one GROUP inside a field: AMASSS's Bones, Soft tissue and
+    Masks, each over its own row of chips.
+
+    Not `section_title`, and the difference is entirely the air. Those three
+    headings sat at the column's own 4px option spacing, so the last chip of
+    Bones and the heading of Soft tissue were as close as two chips of the same
+    group -- three groups drawn as one run of twenty. This puts a gap above the
+    heading and a hairline under it, which is the cheapest thing that says
+    "a new group starts here" without a frame around each.
+
+    The gap is a MARGIN and not a spacer widget: `MultiChoiceGroup.rebuild`
+    empties its column by reparenting the widgets in it, and a spacer item is
+    not a widget -- it would survive the redraw and stack up one gap per mode
+    switch.
+    """
+    t = tokens()
+    label = qt.QLabel(text)
+    label.setStyleSheet(
+        f"color: {t['TEXT_MUTED']}; font-weight: 600;"
+        f" border-bottom: 1px solid {t['BORDER']};"
+        f" margin-top: {SPACING_MD}px; padding-bottom: {SPACING_XS}px;"
+    )
+    return label
+
+
+def table_frame():
+    """The surface a chart-shaped field is drawn on: ASO's arch of teeth.
+
+    The same fill and the same 2px edge as a tab pane, because they are the
+    same object seen twice -- a table of options -- and the tabbed one gets
+    its frame from `QTabWidget::pane` while this one has no pane to inherit.
+
+    A QFrame, like `cohort_frame`, and the id selector is what keeps the rule
+    off its children. A bare QWidget is the shape that looks right and does
+    not paint: Qt draws a style sheet's background and border for it only once
+    `WA_StyledBackground` is set, and a QFrame carries that already -- while
+    its own frame, left at the default `NoFrame`, draws nothing to collide
+    with the border here.
+    """
+    t = tokens()
+    frame = qt.QFrame()
+    frame.setObjectName("tableFrame")
+    frame.setStyleSheet(
+        f"#tableFrame {{ background-color: {t['SURFACE_TABLE']};"
+        f" border: 2px solid {t['BORDER_STRONG']}; border-radius: 6px; }}"
+    )
+    return frame
 
 
 def hint_label(text: str) -> qt.QLabel:
-    """A wrapped, muted, smaller label for explanatory text shown next to a
-    field — the server's own `description` when a tooltip is not enough (see
-    formgen.MultiChoiceGroup)."""
+    """A wrapped, muted, smaller label for explanatory text a module writes
+    itself -- VISU's origin line, Slicer Cloud's per-tool summary.
+
+    NOT for an argument's `description` any more. A generated panel used to
+    print those under the fields they belong to, and several of them stacked
+    down a form is text at a size and a contrast that a reader scrolls past.
+    They are the row label's tooltip now, and `section_title(explained=True)`
+    is what marks a label as having one.
+    """
     t = tokens()
     label = qt.QLabel(text)
     label.setWordWrap(True)
@@ -487,22 +682,89 @@ def selection_label(text: str) -> qt.QLabel:
 
     Raised twice before it read as feedback. 8pt muted was a footnote; 10pt
     was still close enough to the surrounding text to be scanned past. It is
-    12pt and semi-bold now -- the largest text on the row, which is what it
-    should be: everything above it is a control offering a choice, and this is
-    the answer.
+    12pt now -- the largest text on the row, which is what it should be:
+    everything above it is a control offering a choice, and this is the
+    answer.
+
+    It has TWO states, painted by `_paint_selection` and never set here: muted
+    and medium while the row holds nothing, full-strength and semi-bold once
+    it does. The weight is the whole difference -- "Nothing selected" is a
+    prompt and should not shout, and the file name that replaces it should.
+    `set_input_filled` paints it together with the card around it, so the box
+    and the line inside it can never disagree about whether the row is
+    satisfied.
 
     It stays a plain wrapped label all the same. It is a statement of fact,
-    not a control, so it gets no border and no fill: a filled block here would
-    read as a third thing to click, beside two dropdowns and two buttons.
+    not a control, so it gets no border and no fill of its own: a filled block
+    here would read as a third thing to click, beside two dropdowns and two
+    buttons.
     """
-    t = tokens()
     label = qt.QLabel(text)
     label.setWordWrap(True)
+    _paint_selection(label, filled=False)
+    return label
+
+
+def _paint_selection(label, filled: bool) -> None:
+    t = tokens()
     label.setStyleSheet(
-        f"color: {t['TEXT']}; font-size: 12pt; font-weight: 600;"
+        f"color: {t['TEXT'] if filled else t['TEXT_MUTED']};"
+        f" font-size: 12pt; font-weight: {600 if filled else 500};"
         f" padding-top: {SPACING_XS}px; padding-bottom: {SPACING_SM}px;"
     )
-    return label
+
+
+# --- one input row, as one object -----------------------------------------
+#
+# An input row is up to five controls on one line -- two dropdowns, two browse
+# buttons -- and a sentence under them saying what came of it. Laid out bare on
+# the panel that is five things of five different shapes and no edge anywhere,
+# and the question a clinician actually has ("have I given this tool its scan
+# yet?") was answered only by a line of 12pt text among all of it.
+#
+# The card is the answer: ONE outlined box per input, holding every way of
+# filling it, and the box itself carries the state. Empty it is a neutral
+# outline waiting to be filled; filled it takes the accent, border and ground
+# together, so a panel of four inputs says at a glance which are done.
+#
+# The border width never changes between the two states. It is the outermost
+# thing on the row, and a 2px-to-3px change on fill would move every control
+# inside it by a pixel the moment a file was chosen.
+INPUT_CARD_BORDER = 2
+
+
+def input_card():
+    """The box one file argument is chosen in. See the note above.
+
+    A QFrame with an id selector: the frame is what makes Qt paint a style
+    sheet's background and border at all (see `table_frame`), and the id is
+    what keeps that rule off the controls inside, which must keep the styling
+    the panel's own sheet gives them.
+    """
+    card = qt.QFrame()
+    card.setObjectName("inputCard")
+    set_input_filled(card, None, False)
+    return card
+
+
+def set_input_filled(card, caption, filled: bool) -> None:
+    """Repaint an input row for whether it now holds something.
+
+    Takes the caption too, and paints both from one call, because they are one
+    statement: the box says THAT the row is satisfied and the line inside it
+    says WITH WHAT, and a panel where those two disagreed would be worse than
+    either alone. `caption` may be None for a card built before its label.
+    """
+    t = tokens()
+    edge = t["PRIMARY"] if filled else t["BORDER_STRONG"]
+    ground = t["ACCENT_SOFT"] if filled else "transparent"
+    card.setStyleSheet(
+        f"#inputCard {{ background-color: {ground};"
+        f" border: {INPUT_CARD_BORDER}px solid {edge}; border-radius: 8px;"
+        f" padding: {SPACING_SM}px; }}"
+    )
+    if caption is not None:
+        _paint_selection(caption, filled)
 
 
 # The two captions on a multichoice's bulk-select row, and on the per-tab pair

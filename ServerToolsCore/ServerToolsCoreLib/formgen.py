@@ -469,12 +469,14 @@ class MultiChoiceGroup:
     convenience: see ToolServerClient._stringify for why a missing option is
     not the same as an unchecked one.
 
-    The argument's `description` is rendered as a visible wrapped hint above
-    the boxes, not only as a tooltip. A group of check boxes is the one widget
-    whose meaning routinely does not fit in its label — ALI's `cbct_regions`
-    and `ios_networks` are both always shown and only one applies to any given
-    input, and the server says which in its description ("CBCT only: ...").
-    A tooltip nobody hovers is not where that belongs.
+    **The argument's `description` is not drawn here any more.** It was, as a
+    wrapped hint above the boxes, on the reasoning that a tooltip nobody
+    hovers is not where a field's meaning belongs. What that produced on a
+    real panel is several small grey paragraphs stacked between the fields —
+    ALI's `landmarks` note alone is 304 characters — at a size and a contrast
+    that made them text a reader scrolls past rather than reads. The
+    description is the row LABEL's tooltip now (see `build`), and the label is
+    marked with a dotted rule so it is visibly a thing that has more to say.
 
     **`layout` and `groups` change only where the boxes are put.** `self.boxes`
     is keyed and ordered by `choices` whatever the layout, so `value()`,
@@ -484,7 +486,7 @@ class MultiChoiceGroup:
     server's `ArgSpec.ui` for why they exist at all.
     """
 
-    def __init__(self, choices: dict, description: str = "", layout=None, groups=None,
+    def __init__(self, choices: dict, layout=None, groups=None,
                  option_help=None, select_all=False):
         self.container = qt.QWidget()
         column = qt.QVBoxLayout(self.container)
@@ -500,11 +502,6 @@ class MultiChoiceGroup:
         self._column = column
         self._layout = layout
         self._groups = groups
-        # Drawn in `_draw`, not here: `rebuild` empties the column and redraws,
-        # so anything added once in __init__ is gone the first time a facade
-        # narrows the options. The description used to be added here and
-        # disappeared exactly that way.
-        self._description = description
         # Two buttons above the options. Only a hint: whatever they do, what
         # `value()` reads back is the same complete {option: checked} dict.
         self._select_all = select_all
@@ -520,8 +517,6 @@ class MultiChoiceGroup:
         group whose option set changed with the mode."""
         layout = self._layout
         column = self._column
-        if self._description:
-            column.addWidget(design.hint_label(self._description))
         self._add_select_all(column, choices)
         builder = _LAYOUT_BUILDERS.get(layout)
         if builder is None:
@@ -621,13 +616,13 @@ class MultiChoiceGroup:
         self.container.setProperty(name, value)
 
     def setToolTip(self, _text) -> None:
-        """Deliberately nothing. The group ALREADY SHOWS its description.
+        """Deliberately nothing. The description belongs to the row's LABEL.
 
-        `__init__` renders it as a hint label above the options, so accepting it
-        here as well put the same paragraph on the container -- and Qt hands a
-        container's tooltip to every child that has none, so ALI's 304-character
-        note on `landmarks` popped up under each of its 236 chips. Printed and
-        hovered at once, and the hovered copy is the one nobody asked for.
+        Qt hands a container's tooltip to every child that has none, so
+        accepting it here put ALI's 304-character note on `landmarks` under
+        each of its 236 chips -- the hovered copy being the one nobody asked
+        for. `build` puts it on the label beside the field instead, which has
+        no children to hand it down to.
 
         A chip's own tooltip is a different thing: it says what THAT landmark is
         and where it goes, which the schema cannot express yet.
@@ -743,11 +738,17 @@ def _build_chips_boxes(column, choices: dict, groups=None, help_texts=None) -> d
     Groups, when a tool declares them, become a heading and a grid of their own
     rather than a tab -- which keeps a two-group argument readable without
     hiding half of it behind a click.
+
+    `group_heading`, not `section_title`: the headings used to sit at the
+    column's own 4px option spacing, so AMASSS's `Soft tissue` was as close to
+    the last chip of `Bones` as two chips of one group are to each other, and
+    its three groups read as one run of nine. The air and the rule under each
+    heading are what separate them.
     """
     boxes = {}
     for group_name, options in _grouped(choices, groups):
         if group_name and (groups or {}):
-            column.addWidget(design.section_title(group_name))
+            column.addWidget(design.group_heading(group_name))
 
         page = qt.QWidget()
         grid = qt.QGridLayout(page)
@@ -782,6 +783,12 @@ def _build_grid_boxes(column, choices: dict, groups=None, help_texts=None) -> di
     horizontally rather than being squeezed or wrapped — wrapping an arch onto
     two lines would destroy the very adjacency the layout exists to show. The
     old module did the same (`ASO.ui`'s scrollArea around LayoutSemiIOS_tooth).
+
+    It is drawn on a `table_frame`: the same filled, strongly-bordered surface
+    a tab pane gives the other dense layouts, which this one has no pane to
+    inherit. Without it a chart of thirty-two chips and two row headings sat
+    directly on the panel with no edge anywhere, and where the table stopped
+    and the next argument started was left to the reader.
     """
     grid_container = qt.QWidget()
     grid = qt.QGridLayout(grid_container)
@@ -791,7 +798,9 @@ def _build_grid_boxes(column, choices: dict, groups=None, help_texts=None) -> di
     boxes = {}
     for row_index, (group_name, options) in enumerate(_grouped(choices, groups)):
         if group_name:
-            grid.addWidget(design.hint_label(group_name), row_index, 0)
+            # A row header, not a hint: 8pt muted put the name of the arch in
+            # the smallest type on the panel, beside the chips it names.
+            grid.addWidget(design.section_title(group_name), row_index, 0)
         for offset, option in enumerate(options):
             boxes[option] = _make_chip(option, choices[option],
                                        _help_for(help_texts, option))
@@ -801,7 +810,13 @@ def _build_grid_boxes(column, choices: dict, groups=None, help_texts=None) -> di
     # spread a tooth chart across whatever width the panel happens to have --
     # destroying the adjacency this layout exists to show.
     grid.setRowStretch(grid.rowCount(), 1)
-    column.addWidget(_horizontal_scroll(grid_container))
+
+    frame = design.table_frame()
+    inside = qt.QVBoxLayout(frame)
+    inside.setContentsMargins(design.SPACING_SM, design.SPACING_SM,
+                              design.SPACING_SM, design.SPACING_SM)
+    inside.addWidget(_horizontal_scroll(grid_container))
+    column.addWidget(frame)
     return boxes
 
 
@@ -984,15 +999,13 @@ class JoystickInput:
 
     def __init__(self, x_range=(0.0, 1.0), y_range=(0.0, 1.0), initial=None, step=None,
                  x_axis="X", y_axis="Y", x_labels=None, y_labels=None,
-                 spring_back=False, description="", with_pad=True):
+                 spring_back=False, with_pad=True):
         self._syncing = False
 
         self.container = qt.QWidget()
         column = qt.QVBoxLayout(self.container)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(design.SPACING_XS)
-        if description:
-            column.addWidget(design.hint_label(description))
 
         row_container = qt.QWidget()
         row = qt.QHBoxLayout(row_container)
@@ -1152,7 +1165,13 @@ class FileOrFolderInput:
         # rather than on the sources wrapper so that every input row has one --
         # a `.csv` argument has no dropdowns to be wrapped in, and used to show
         # nothing at all once the path field went.
-        self.container = qt.QWidget()
+        #
+        # A CARD, not a bare container: the box is what says at a glance
+        # whether this input has been given anything (see design.input_card).
+        # When a `ServerFileInput` wraps this picker it is that wrapper's card
+        # the panel shows, and this one is never added to a layout -- the
+        # caption is shared between them, so both are painted all the same.
+        self.container = design.input_card()
         column = qt.QVBoxLayout(self.container)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
@@ -1245,6 +1264,11 @@ class FileOrFolderInput:
             else:
                 text = "File: {}".format(describe_file(path, name_only=False))
         self.caption.setText(text)
+        # The card and the line inside it are one statement, so they are
+        # painted together and can never disagree about whether the row is
+        # satisfied. A wrapper's own words are never NOTHING_CHOSEN unless
+        # nothing was chosen, which is what makes that comparison the answer.
+        design.set_input_filled(self.container, self.caption, text != NOTHING_CHOSEN)
 
     def onPathChanged(self, callback) -> None:
         self._listeners.append(callback)
@@ -1367,7 +1391,12 @@ class ServerFileInput:
         # A column, not a row: the controls sit on one line and the caption
         # under them. The caption is the only place that can say what is loaded
         # without truncating it -- see `describe_file`.
-        self.container = qt.QWidget()
+        #
+        # The card is HERE rather than on the picker inside it, because this is
+        # the widget the panel actually shows for a wrapped argument: the box
+        # has to hold every way of filling the row -- both dropdowns included
+        # -- or it would outline two of the four and look like a mistake.
+        self.container = design.input_card()
         column = qt.QVBoxLayout(self.container)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
@@ -1741,11 +1770,19 @@ class ServerFileInput:
         `None` means "describe your own path", which only a picker that owns a
         caption can do -- a bare Qt field gets the neutral words instead.
         """
+        # `None` means the picker answers for itself, so what it holds is what
+        # decides; anything else is this wrapper's own sentence.
+        filled = (bool(_local_path(self.local)) if text is None
+                  else text != NOTHING_CHOSEN)
         describe = getattr(self.local, "describe", None)
         if describe is not None:
+            # It owns the caption -- detached into this column, but still its
+            # widget -- so it paints that, and this paints the box around it.
             describe(text)
+            design.set_input_filled(self.container, None, filled)
         else:
             self.caption.setText(text or NOTHING_CHOSEN)
+            design.set_input_filled(self.container, self.caption, filled)
 
     def _is_fetched(self, path: str) -> bool:
         """Whether this path is one of the hosted entries this row offered.
@@ -2088,7 +2125,16 @@ def build(arguments_schema: dict, layout, sections=None, rows=None) -> dict:
             widget.setToolTip(description)
 
         text = label_for(name, spec)
-        label = design.required_label(text) if spec.get("required") else design.section_title(text)
+        # The description hangs off the LABEL as well as off the field, and for
+        # the widgets that refuse it (a multichoice, whose container would hand
+        # it to each of its chips) the label is the only place it survives at
+        # all. It is also where a reader looks for it: the label is what names
+        # the thing they do not understand.
+        explained = bool(description)
+        label = (design.required_label(text, explained) if spec.get("required")
+                 else design.section_title(text, explained))
+        if description:
+            label.setToolTip(description)
         target = (sections or {}).get(section_of(spec), layout)
         field = row_widget(widget)
         if hasattr(target, "addRow"):
@@ -2164,7 +2210,6 @@ def _make_widget(name: str, spec: dict):
     if arg_type == "multichoice":
         return MultiChoiceGroup(
             _choices(name, spec),
-            spec.get("description", ""),
             layout=spec.get("ui"),
             groups=spec.get("groups"),
             option_help=spec.get("option_help"),
@@ -2270,7 +2315,6 @@ def _make_vec2_widget(name: str, spec: dict):
         x_labels=_axis_labels(spec.get("x_labels")),
         y_labels=_axis_labels(spec.get("y_labels")),
         spring_back=bool(spec.get("spring_back")),
-        description=spec.get("description", ""),
         with_pad=ui == JOYSTICK_UI,
     )
 
