@@ -1183,8 +1183,18 @@ class FileOrFolderInput:
     extensions *and* every selection observable.
     """
 
-    def __init__(self, extensions=(), modes=("file", "folder")):
+    def __init__(self, extensions=(), modes=("file", "folder"), destination=False):
         self._extensions = tuple(extensions)
+        # Whether this row is where results GO rather than where inputs come
+        # from. Two things follow from it and both are the same reason -- a
+        # destination is about a PLACE, not about a file:
+        #
+        #   * it shows the whole path. A patient's scan is identified by its
+        #     name and the directory above it is noise; a folder results are
+        #     about to be written into is identified by WHERE it is, and the
+        #     name alone (`out`, `Documents`) says nothing.
+        #   * it never takes the accent. See design.set_input_filled.
+        self._destination = bool(destination)
         # Which KINDS this argument accepts. Published rather than consumed and
         # forgotten: the sources wrapper turns them into segments, and it can
         # no longer read them off a pair of buttons that no longer exists.
@@ -1282,23 +1292,29 @@ class FileOrFolderInput:
         """
         if text is None:
             path = self._path
+            whole = self._destination
             if not path:
                 text = NOTHING_CHOSEN
             elif os.path.isdir(path):
-                text = "Folder: {}".format(describe_folder(path))
+                # A destination needs no `Folder:` in front of it: it only ever
+                # holds one, and the word costs a fifth of the box.
+                text = describe_folder(path, name_only=not whole)
+                text = text if whole else "Folder: {}".format(text)
             else:
-                text = "File: {}".format(describe_file(path))
-            # The NAME, not the path. The box is half a row wide now, and a
-            # full path elided into it is the one part of itself that means
-            # nothing -- `/tmp/tmpgt7qr_f5/pati...` where a reader is looking
-            # for `patient1.nii.gz`. The whole path is on the row's tooltip.
+                text = describe_file(path, name_only=not whole)
+                text = text if whole else "File: {}".format(text)
+            # An input shows the NAME. The box is half a row wide, and a full
+            # path elided into it is the one part of itself that means nothing
+            # -- `/tmp/tmpgt7qr_f5/pati...` where a reader is looking for
+            # `patient1.nii.gz`. The whole path is on the row's tooltip.
             self.container.setToolTip(path)
         self.caption.setText(text)
         # The card and the line inside it are one statement, so they are
         # painted together and can never disagree about whether the row is
         # satisfied. A wrapper's own words are never NOTHING_CHOSEN unless
         # nothing was chosen, which is what makes that comparison the answer.
-        design.set_input_filled(self.container, self.caption, text != NOTHING_CHOSEN)
+        design.set_input_filled(self.container, self.caption,
+                                text != NOTHING_CHOSEN, accent=not self._destination)
 
     def onPathChanged(self, callback) -> None:
         self._listeners.append(callback)

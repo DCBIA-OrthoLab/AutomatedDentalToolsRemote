@@ -851,17 +851,27 @@ def input_card():
     return card
 
 
-def set_input_filled(card, caption, filled: bool) -> None:
+def set_input_filled(card, caption, filled: bool, accent: bool = True) -> None:
     """Repaint an input row for whether it now holds something.
 
     Takes the caption too, and paints both from one call, because they are one
     statement: the block says THAT the row is satisfied and the line inside it
     says WITH WHAT, and a panel where those two disagreed would be worse than
     either alone. `caption` may be None for a card built before its label.
+
+    `accent` is what a row turns when it is satisfied, and it answers a
+    question: *have I given this tool its scan yet?* A row that fills ITSELF in
+    has no such question -- the output folder is proposed the moment the panel
+    opens and is never empty -- so it passes False and keeps the neutral edge.
+    Accented, it would be a blue block sitting permanently on every panel,
+    saying something that was never in doubt and drawing the eye away from the
+    rows where it is. The TEXT still goes to full strength either way: that
+    says what is there, which is worth reading in both cases.
     """
     t = tokens()
-    ground = t["ACCENT_SOFT"] if filled else t["SURFACE"]
-    edge = t["PRIMARY"] if filled else t["BORDER"]
+    lit = filled and accent
+    ground = t["ACCENT_SOFT"] if lit else t["SURFACE"]
+    edge = t["PRIMARY"] if lit else t["BORDER"]
     card.setStyleSheet(
         f"#inputCard {{ background-color: {ground}; border: 1px solid {edge};"
         f" border-radius: {RADIUS_LG}px;"

@@ -3034,9 +3034,50 @@ class OutputFolderRowTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self.row = formgen.FileOrFolderInput(modes=("folder",))
+        # Exactly as base_widget builds it.
+        self.row = formgen.FileOrFolderInput(modes=("folder",), destination=True)
         self.temp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.temp, True)
+
+    def test_it_shows_the_whole_path(self):
+        """A patient's scan is identified by its NAME and the directory above
+        it is noise. A folder results are about to be written into is
+        identified by WHERE it is -- `out` or `Documents` on its own says
+        nothing about which of them it is."""
+        formgen.set_local_path(self.row, self.temp)
+
+        self.assertIn(self.temp, self.row.caption.text)
+
+    def test_it_never_takes_the_accent(self):
+        """The accent answers "have I given this tool its scan yet?", and this
+        row fills ITSELF in the moment the panel opens -- so accented it would
+        be a blue block sitting permanently on every panel, saying something
+        that was never in doubt and pulling the eye off the rows where it is."""
+        formgen.set_local_path(self.row, self.temp)
+
+        self.assertNotIn(design.tokens()["ACCENT_SOFT"], self.row.container._stylesheet)
+        self.assertIn("1px solid {}".format(design.tokens()["BORDER"]),
+                      self.row.container._stylesheet)
+
+    def test_its_text_still_goes_to_full_strength(self):
+        """What is there is worth reading whether or not the box is lit."""
+        formgen.set_local_path(self.row, self.temp)
+
+        self.assertIn("font-weight: 600", self.row.caption._stylesheet)
+
+    def test_an_input_row_is_the_other_way_round(self):
+        """The same two decisions, both inverted -- which is what makes
+        `destination` one flag rather than two."""
+        scan = os.path.join(self.temp, "patient1.nii.gz")
+        with open(scan, "wb") as handle:
+            handle.write(b"0" * 16)
+        row = formgen.FileOrFolderInput(modes=("file",))
+
+        row.setCurrentPath(scan)
+
+        self.assertNotIn(self.temp, row.caption.text)
+        self.assertIn("patient1.nii.gz", row.caption.text)
+        self.assertIn(design.tokens()["ACCENT_SOFT"], row.container._stylesheet)
 
     def test_it_offers_one_primary_select_button(self):
         self.assertEqual(self.row.selectButton.text, formgen.SELECT_LABEL)

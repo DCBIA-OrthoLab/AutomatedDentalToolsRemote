@@ -717,7 +717,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # small grey `...` at its end, sitting under four rows that had
             # stopped looking anything like it. One folder, so no source bar:
             # a choice of one is not a choice.
-            self._outputFolderWidget = formgen.FileOrFolderInput(modes=("folder",))
+            self._outputFolderWidget = formgen.FileOrFolderInput(
+                modes=("folder",), destination=True)
             outputsLayout.addRow(design.required_label(_("Output folder")),
                                  formgen.row_widget(self._outputFolderWidget))
             formgen.connect_changed(self._outputFolderWidget, self._checkCanApply)
