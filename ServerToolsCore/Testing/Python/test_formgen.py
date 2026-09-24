@@ -2672,19 +2672,18 @@ class InputCardTest(unittest.TestCase):
         with open(self.scan, "wb") as handle:
             handle.write(b"0" * 32)
 
-    def test_an_untouched_row_is_the_same_outlined_surface_a_field_is(self):
+    def test_an_untouched_row_goes_white_against_the_panels_ground(self):
+        """Which is the whole of what it needs to say -- see
+        EverythingIsOutlinedTest for why this one block carries no line."""
         row = formgen.FileOrFolderInput()
         self.assertIn(design.tokens()["SURFACE"], row.container._stylesheet)
-        self.assertIn("1px solid {}".format(design.tokens()["BORDER"]),
-                      row.container._stylesheet)
+        self.assertIn("border: none", row.container._stylesheet)
 
-    def test_a_filled_row_takes_the_accent_in_its_fill_and_its_edge(self):
+    def test_a_filled_row_takes_the_accent(self):
         row = formgen.FileOrFolderInput()
         row.setCurrentPath(self.scan)
 
         self.assertIn(design.tokens()["ACCENT_SOFT"], row.container._stylesheet)
-        self.assertIn("1px solid {}".format(design.tokens()["PRIMARY"]),
-                      row.container._stylesheet)
 
     def test_emptying_it_again_takes_the_accent_back(self):
         row = formgen.FileOrFolderInput()
@@ -2693,20 +2692,17 @@ class InputCardTest(unittest.TestCase):
 
         self.assertNotIn(design.tokens()["ACCENT_SOFT"], row.container._stylesheet)
 
-    def test_only_the_colours_change_with_the_state(self):
+    def test_only_the_fill_changes_with_the_state(self):
         """It is the outermost thing on the row: anything that changed its box
         would move every control inside it by a pixel the moment a file was
-        chosen. The fill and the edge COLOUR move; the edge width does not."""
+        chosen."""
         row = formgen.FileOrFolderInput()
         empty = row.container._stylesheet
         row.setCurrentPath(self.scan)
         filled = row.container._stylesheet
 
-        def shape_only(sheet):
-            sheet = re.sub(r"background-color:[^;]*;", "", sheet)
-            return re.sub(r"solid #[0-9a-fA-F]{6}", "solid", sheet)
-
-        self.assertEqual(shape_only(empty), shape_only(filled))
+        strip = lambda sheet: re.sub(r"background-color:[^;]*;", "", sheet)
+        self.assertEqual(strip(empty), strip(filled))
 
     def test_it_styles_itself_and_not_the_controls_inside_it(self):
         """Every child of the card holds a control that has to keep the
@@ -2787,13 +2783,24 @@ class EverythingIsOutlinedTest(unittest.TestCase):
 
     def test_a_filled_surface_factory_carries_it_too(self):
         """The trap the borderless pass left behind: on this palette FIELD and
-        SURFACE are both white, so a chip or a card filled with one and given
+        SURFACE are both white, so a chip or a frame filled with one and given
         no edge is white on white -- an option nobody can see until they hover
         it."""
         for widget in (design.option_chip("MAND"), design.segment_button("File"),
-                       design.ghost_button("Select all"), design.input_card(),
+                       design.ghost_button("Select all"),
                        design.table_frame(), design.cohort_frame()):
             self.assertIn("1px solid", widget._stylesheet, widget)
+
+    def test_the_input_row_is_the_one_exception(self):
+        """A hairline separates a CONTROL from the card it sits on. An input
+        row is not a control -- it is a block standing on the panel's own grey
+        ground, and going white against that ground already says where it
+        starts. An outline on it was the fifth line in a row of four, drawn
+        round something that was not in any doubt."""
+        card = design.input_card()
+
+        self.assertIn("border: none", card._stylesheet)
+        self.assertIn(design.tokens()["SURFACE"], card._stylesheet)
 
 
 class EveryColourComesFromTheTablesTest(unittest.TestCase):
@@ -3056,8 +3063,7 @@ class OutputFolderRowTest(unittest.TestCase):
         formgen.set_local_path(self.row, self.temp)
 
         self.assertNotIn(design.tokens()["ACCENT_SOFT"], self.row.container._stylesheet)
-        self.assertIn("1px solid {}".format(design.tokens()["BORDER"]),
-                      self.row.container._stylesheet)
+        self.assertIn(design.tokens()["SURFACE"], self.row.container._stylesheet)
 
     def test_its_text_still_goes_to_full_strength(self):
         """What is there is worth reading whether or not the box is lit."""

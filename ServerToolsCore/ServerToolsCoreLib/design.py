@@ -826,15 +826,19 @@ def _paint_selection(field, filled: bool) -> None:
 # yet?") was answered only by a line of 12pt text among all of it.
 #
 # The card is the answer: ONE block per input, holding every way of filling it,
-# and the block itself carries the state. It is a FILL and never an outline,
-# like everything else here -- empty it is the same neutral slot a field is,
-# filled it turns the accent tint, so a panel of four inputs says at a glance
-# which are done without drawing four boxes to do it.
+# and the block itself carries the state.
 #
-# The two fills are far enough apart to read at a glance and both quiet enough
-# to sit under a form: a neutral grey-blue against a light accent blue. That
-# distance is why FIELD is kept NEUTRAL in the token table -- drift it towards
-# the accent and this row stops being able to say anything.
+# **It is the one thing on this panel with no line round it**, and that is a
+# decision rather than an oversight. Everything else here is outlined because
+# a control has to be told from the card it sits ON, and a hairline is what
+# does that where two whites meet. This is not a control -- it is a block
+# standing on the panel's own grey ground, and going white against that ground
+# already says where it starts. An outline added to it was the fifth line in a
+# row of four, drawn round something that was not in any doubt.
+#
+# So the state is two fills: white while the row is empty, the accent tint once
+# it holds something. Far enough apart to read at a glance and both quiet
+# enough to sit under a form.
 
 
 def input_card():
@@ -842,8 +846,8 @@ def input_card():
 
     A QFrame with an id selector: the frame is what makes Qt paint a style
     sheet's background at all (see `table_frame`), and the id is what keeps
-    that rule off the controls inside, which must keep the styling the panel's
-    own sheet gives them.
+    that rule off the controls inside -- which DO carry the hairline, and must
+    keep the styling the panel's own sheet gives them.
     """
     card = qt.QFrame()
     card.setObjectName("inputCard")
@@ -869,11 +873,9 @@ def set_input_filled(card, caption, filled: bool, accent: bool = True) -> None:
     says what is there, which is worth reading in both cases.
     """
     t = tokens()
-    lit = filled and accent
-    ground = t["ACCENT_SOFT"] if lit else t["SURFACE"]
-    edge = t["PRIMARY"] if lit else t["BORDER"]
+    ground = t["ACCENT_SOFT"] if (filled and accent) else t["SURFACE"]
     card.setStyleSheet(
-        f"#inputCard {{ background-color: {ground}; border: 1px solid {edge};"
+        f"#inputCard {{ background-color: {ground}; border: none;"
         f" border-radius: {RADIUS_LG}px;"
         f" padding: {SPACING_MD}px {SPACING_MD}px {SPACING_XS}px {SPACING_MD}px; }}"
     )
