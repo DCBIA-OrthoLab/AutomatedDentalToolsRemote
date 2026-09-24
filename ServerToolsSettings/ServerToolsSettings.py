@@ -7,7 +7,7 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadableModuleWidget
 
 from ServerToolsCoreLib import config, design, get_client
-from ServerToolsCoreLib.settings_qt import clear_overrides, save_overrides
+from ServerToolsCoreLib.settings_qt import clear_overrides, save_design, save_overrides
 from ServerToolsCoreLib.worker import BackgroundJob
 
 logger = logging.getLogger("ServerToolsCore.settings")
@@ -41,6 +41,10 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         self.uiWidget = None
         self._statusBadge = None
         self._statusJob = None
+        # Set while the panel writes into its own chooser, so reflecting the
+        # saved treatment does not read as the user having picked one -- and
+        # does not write the setting back on every open.
+        self._syncingDesign = False
 
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
@@ -74,6 +78,8 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         self.timeoutSpin.setSuffix(_(" s"))
         formLayout.addRow(design.section_title(_("Timeout")), self.timeoutSpin)
 
+        self._buildAppearance(rootLayout)
+
         self.saveButton = design.primary_button(_("Save"))
         self.restoreButton = design.danger_button(_("Restore defaults"))
         rootLayout.addWidget(self.saveButton)
@@ -84,7 +90,65 @@ class ServerToolsSettingsWidget(ScriptedLoadableModuleWidget):
         self.restoreButton.clicked.connect(self.onRestoreButton)
 
         design.apply(self.uiWidget)
+        self._loadDesign()
         self._loadFromClient()
+
+    def _buildAppearance(self, rootLayout) -> None:
+        """A chooser between the design treatments, so they can be COMPARED.
+
+        A palette read off a page is not a panel: the difference between two of
+        these shows up on the sixth row of a crowded form, and the only way to
+        judge that is to look at one. It lives in the advanced settings module
+        rather than on every panel because it is a preference, and one a
+        clinician sets once.
+        """
+        box = ctk.ctkCollapsibleButton()
+        box.text = _("Appearance")
+        layout = qt.QFormLayout(box)
+        rootLayout.addWidget(box)
+
+        self.designCombo = qt.QComboBox()
+        for name in design.variants():
+            # The name travels as item DATA, never as the label: the labels are
+            # translated and the saved setting must not be.
+            self.designCombo.addItem(_(design.VARIANT_LABELS[name]), name)
+        self.designCombo.currentIndexChanged.connect(self.onDesignChosen)
+        layout.addRow(design.section_title(_("Design")), self.designCombo)
+
+        self._designHint = design.hint_label("")
+        layout.addRow(self._designHint)
+
+        layout.addRow(design.hint_label(_(
+            "Reload a tool module, or restart Slicer, to repaint it: a widget "
+            "is built with the treatment that was in force when it was made."
+        )))
+
+    def onDesignChosen(self, _index=None) -> None:
+        if self._syncingDesign:
+            return
+        name = self.designCombo.itemData(self.designCombo.currentIndex)
+        if not name or not design.set_variant(name):
+            return
+        save_design(name)
+        self._designHint.setText(_(design.VARIANT_HINTS[name]))
+        # Repaints what this stylesheet reaches -- the ground, the fields, the
+        # boxes -- so the choice shows something at once. The buttons and chips
+        # around it keep the treatment they were built with, which is what the
+        # line under the chooser says.
+        design.apply(self.uiWidget)
+        logger.info("Design treatment set to %s", name)
+
+    def _loadDesign(self) -> None:
+        current = design.variant()
+        self._syncingDesign = True
+        try:
+            for index in range(self.designCombo.count):
+                if self.designCombo.itemData(index) == current:
+                    self.designCombo.setCurrentIndex(index)
+                    break
+        finally:
+            self._syncingDesign = False
+        self._designHint.setText(_(design.VARIANT_HINTS[current]))
 
     def cleanup(self) -> None:
         if self._statusJob:

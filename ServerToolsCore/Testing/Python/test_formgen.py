@@ -2742,8 +2742,13 @@ class NothingIsOutlinedTest(unittest.TestCase):
 
     def _visible_borders(self, theme):
         """Every `border: Npx solid <colour>` that is not the fill's own
-        colour, outside the two floating surfaces."""
-        sheet = re.sub(r"/\*.*?\*/", "", design._base_stylesheet(theme), flags=re.S)
+        colour, outside the two floating surfaces.
+
+        Rendered against `cards` EXPLICITLY, not against whatever treatment is
+        live: `outline` exists precisely to draw the edges this test forbids,
+        and a claim about one treatment must name it."""
+        sheet = re.sub(r"/\*.*?\*/", "",
+                       design._base_stylesheet(theme, design._SHAPE_CARDS), flags=re.S)
         found = []
         for block in re.findall(r"([^{}]+)\{([^{}]*)\}", sheet):
             selector, body = block[0].strip(), block[1]
@@ -2767,7 +2772,7 @@ class NothingIsOutlinedTest(unittest.TestCase):
         appear without the text inside the field moving by a pixel. Qt paints a
         widget's background under its border, so a transparent one simply shows
         the fill."""
-        sheet = design._base_stylesheet(design._LIGHT)
+        sheet = design._base_stylesheet(design._LIGHT, design._SHAPE_CARDS)
         self.assertIn("border: 2px solid transparent", sheet)
         self.assertIn("border-color: {}".format(design._LIGHT["PRIMARY"]), sheet)
 
@@ -2980,3 +2985,104 @@ class TheSurfacesAreTellingApartTest(unittest.TestCase):
                 gap = abs(self._brightness(theme["TEXT_MUTED"])
                           - self._brightness(theme[ground]))
                 self.assertGreater(gap, 80, "{}: TEXT_MUTED on {}".format(theme_name, ground))
+
+
+class DesignVariantsTest(unittest.TestCase):
+    """Four complete treatments, switchable at run time, so one can be
+    COMPARED rather than described.
+
+    A palette read off a page is not a panel: the difference between two of
+    these shows up on the sixth row of a crowded form. Everything below is
+    what has to hold for all four, because a treatment nobody can render is a
+    treatment nobody can judge.
+    """
+
+    def setUp(self):
+        self.addCleanup(design.set_variant, design.variant())
+
+    def _rendered(self, name):
+        design.set_variant(name)
+        return [design._base_stylesheet(design.tokens(), design.shape())]
+
+    def test_every_treatment_renders_in_both_themes(self):
+        for name in design.variants():
+            design.set_variant(name)
+            for theme in ("light", "dark"):
+                palette = design._VARIANTS[name][theme]
+                sheet = design._base_stylesheet(palette, design.shape())
+                self.assertIn("QComboBox", sheet, "{} {}".format(name, theme))
+
+    def test_every_treatment_holds_exactly_the_same_token_names(self):
+        """A key one palette has and another does not is a KeyError the day
+        someone switches, in the treatment nobody was running."""
+        for name in design.variants():
+            for theme in ("light", "dark"):
+                self.assertEqual(set(design._VARIANTS[name][theme]), set(design._LIGHT),
+                                 "{} {}".format(name, theme))
+
+    def test_every_treatment_declares_every_shape_knob(self):
+        for name in design.variants():
+            self.assertEqual(set(design._VARIANTS[name]["shape"]),
+                             set(design._SHAPE_CARDS), name)
+
+    def test_chosen_never_looks_like_empty_in_any_treatment(self):
+        """An input row is a block with NO edge in every treatment -- only its
+        fill says whether the row has been given anything. FIELD against
+        ACCENT_SOFT is that whole answer, so no treatment may let the two
+        drift together."""
+        for name in design.variants():
+            for theme in ("light", "dark"):
+                palette = design._VARIANTS[name][theme]
+                gap = abs(TheSurfacesAreTellingApartTest._brightness(palette["FIELD"])
+                          - TheSurfacesAreTellingApartTest._brightness(palette["ACCENT_SOFT"]))
+                self.assertGreaterEqual(gap, TheSurfacesAreTellingApartTest.STEP,
+                                        "{} {}".format(name, theme))
+
+    def test_a_treatment_with_no_edge_separates_by_fill_instead(self):
+        """The two ways a control can be told from the card it sits on, and a
+        treatment has to do ONE of them: sink it into a different colour, or
+        draw a line round it. `outline` does the second, which is exactly why
+        its FIELD may equal its SURFACE."""
+        for name in design.variants():
+            shape = design._VARIANTS[name]["shape"]
+            if shape["field_edge"] is not None:
+                continue
+            for theme in ("light", "dark"):
+                palette = design._VARIANTS[name][theme]
+                gap = abs(TheSurfacesAreTellingApartTest._brightness(palette["FIELD"])
+                          - TheSurfacesAreTellingApartTest._brightness(palette["SURFACE"]))
+                self.assertGreaterEqual(gap, TheSurfacesAreTellingApartTest.STEP,
+                                        "{} {}".format(name, theme))
+
+    def test_an_edged_treatment_keeps_one_border_width_in_every_state(self):
+        """Only the colour may move: a hairline that thickened on focus would
+        grow the field by a pixel under the pointer."""
+        design.set_variant("outline")
+        sheet = design._base_stylesheet(design.tokens(), design.shape())
+        widths = set(re.findall(r"border:\s*(\d+)px solid", sheet))
+        self.assertEqual(widths, {"1"})
+
+    def test_a_rail_is_declared_even_where_it_is_not_painted(self):
+        """Transparent in the treatments that do not want it, so a section is
+        laid out identically either way -- a bar that ARRIVED with the
+        treatment would shift every label on the panel three pixels right."""
+        for name in design.variants():
+            design.set_variant(name)
+            sheet = design._base_stylesheet(design.tokens(), design.shape())
+            self.assertIn("border-left: 3px solid", sheet, name)
+
+    def test_an_unknown_treatment_is_refused_rather_than_defaulted(self):
+        """It is read back from a saved setting, and a typo silently repainting
+        the panel in something else is a support call nobody can reproduce."""
+        design.set_variant("cards")
+
+        self.assertFalse(design.set_variant("kards"))
+        self.assertEqual(design.variant(), "cards")
+
+    def test_every_treatment_is_named_and_explained(self):
+        for name in design.variants():
+            self.assertTrue(design.VARIANT_LABELS.get(name), name)
+            self.assertTrue(design.VARIANT_HINTS.get(name), name)
+
+    def test_the_default_is_one_of_them(self):
+        self.assertIn(design.DEFAULT_VARIANT, design.variants())
