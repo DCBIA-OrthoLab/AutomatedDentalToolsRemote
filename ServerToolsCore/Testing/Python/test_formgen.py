@@ -3149,3 +3149,47 @@ class DesignVariantsTest(unittest.TestCase):
             section = re.search(r"ctkCollapsibleButton \{(.*?)\n    \}", sheet, re.S).group(1)
             self.assertIn("background-color: {}".format(design.tokens()["SURFACE"]),
                           section, name)
+
+
+class OutputFolderRowTest(unittest.TestCase):
+    """The output folder is built by the PANEL, not by the schema -- and it was
+    the last ctkPathLineEdit in a generated panel: an editable box with a small
+    grey `...` at its end, sitting under four rows that had stopped looking
+    anything like it. It is the same row as every other now, in folder mode.
+    """
+
+    def setUp(self):
+        self.row = formgen.FileOrFolderInput(modes=("folder",))
+        self.temp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.temp, True)
+
+    def test_it_offers_one_primary_select_button(self):
+        self.assertEqual(self.row.selectButton.text, formgen.SELECT_LABEL)
+        self.assertIn(design._fills_for(design.tokens())["primary"]["base"],
+                      self.row.selectButton._stylesheet)
+
+    def test_its_one_button_opens_the_folder_dialog(self):
+        qt.QFileDialog.next_directory = self.temp
+        self.addCleanup(setattr, qt.QFileDialog, "next_directory", "")
+
+        self.row.selectButton.clicked.emit()
+
+        self.assertEqual(self.row.currentPath, self.temp)
+
+    def test_a_proposed_folder_is_written_through_the_generic_writer(self):
+        """`_suggestOutputFolder` fills this row in so Apply works on a panel
+        nobody set up, and it has to announce it or Apply stays grey."""
+        seen = []
+        formgen.connect_changed(self.row, lambda *args: seen.append(1))
+
+        formgen.set_local_path(self.row, self.temp)
+
+        self.assertEqual(self.row.currentPath, self.temp)
+        self.assertTrue(seen, "the folder was filled in and nothing was told")
+
+    def test_assigning_currentPath_directly_is_refused(self):
+        """The trap this row replaced a ctkPathLineEdit into: that widget takes
+        `widget.currentPath = path`, and this one raises. Pinned so the panel
+        keeps writing through `set_local_path`, which serves both."""
+        with self.assertRaises(AttributeError):
+            self.row.currentPath = self.temp

@@ -2070,9 +2070,10 @@ def _local_path(widget) -> str:
 def _set_local_path(widget, value: str) -> None:
     """Write a path into whichever picker kind `widget` is.
 
-    Every INPUT row is a FileOrFolderInput now; a ctkPathLineEdit is left only
-    where the panel itself puts one (the output folder), and that one is
-    written through its own `currentPath`.
+    Every row a panel builds is a FileOrFolderInput now, the output folder
+    included. The `currentPath` branch is kept for a bare ctkPathLineEdit,
+    which only a test constructs -- and for anything a module puts on its own
+    panel through `addExtraWidgets`.
     """
     setter = getattr(widget, "setCurrentPath", None)
     if setter is not None:
