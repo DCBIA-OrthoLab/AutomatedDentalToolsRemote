@@ -395,7 +395,7 @@ class PanelTest(unittest.TestCase):
     # -- fixtures ------------------------------------------------------
 
     def _checkpoint(self, produced=("01_ALI_CBCT",), members=None, flat=False,
-                    steps=None):
+                    steps=None, stopped_after="ALI_CBCT"):
         """A stopped run's answer, with a real archive on disk.
 
         `flat` is the single-step shape: the server's zip flattens ONE
@@ -418,7 +418,7 @@ class PanelTest(unittest.TestCase):
         with open(archive, "wb") as handle:
             handle.write(_zip_bytes(laid_out))
         return ToolResult(kind="checkpoint", checkpoint=RunCheckpoint(
-            run_id="run-1", stopped_after="ALI_CBCT",
+            run_id="run-1", stopped_after=stopped_after,
             produced=tuple(produced), path=archive))
 
     def _apply(self):
@@ -440,17 +440,21 @@ class PanelTest(unittest.TestCase):
 
     # -- standing in for the reader -------------------------------------
 
-    def _reviewed(self) -> str:
-        """Where the checkpoint was unpacked, which is what the reader edits."""
-        return os.path.join(self.work, "quality_control")
+    def _reviewed(self, stop="ALI_CBCT") -> str:
+        """Where one STOP was unpacked, which is what the reader edits.
 
-    def _edit(self, relative, data="moved"):
+        One directory per stop, named after it: two checkpoints of the same
+        run never share a review folder.
+        """
+        return os.path.join(self.work, "quality_control", stop)
+
+    def _edit(self, relative, data="moved", stop="ALI_CBCT"):
         """Write into the unpacked checkpoint, as the reviewer's save does.
 
         Subfolders are created, because a step mirrors its input tree and the
         file a reader corrects can be two directories down.
         """
-        path = os.path.join(self._reviewed(), relative)
+        path = os.path.join(self._reviewed(stop), relative)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(data)
@@ -485,7 +489,7 @@ class PanelTest(unittest.TestCase):
     def test_the_reviewer_is_opened_on_what_the_run_produced(self):
         self._stopped()
 
-        folder = os.path.join(self.work, "quality_control")
+        folder = self._reviewed()
         self.assertEqual(self.reviewer.opened, [folder])
         self.assertTrue(os.path.isfile(
             os.path.join(folder, "01_ALI_CBCT", "p1_lm_Pred.mrk.json")))
@@ -703,6 +707,73 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(len(self.reviewer.opened), 2)
         self.assertEqual(self.handled, [])
         self.assertIsNotNone(self.panel._runs[0].paused)
+
+    # -- one review holds one stop, and nothing else -------------------
+    #
+    # Every checkpoint of a run used to unpack into ONE folder, so the second
+    # reader was handed everything the first had already reviewed -- and the
+    # baseline was retaken over the mixture, which let a file from the first
+    # stop, edited during the second review, travel back as a correction of a
+    # step the run had already left.
+
+    def test_a_second_stop_is_reviewed_in_a_folder_of_its_own(self):
+        self._stopped()
+        self.reviewer.press_continue(written=set())
+
+        _Job.started[-1].succeed(self._checkpoint(
+            produced=("02_ASO",), stopped_after="ASO",
+            steps={"02_ASO": {"p1_Or.nii.gz": "oriented"}}))
+
+        self.assertEqual(self.reviewer.opened,
+                         [self._reviewed("ALI_CBCT"), self._reviewed("ASO")])
+
+    def test_the_second_reader_is_not_shown_what_the_first_already_reviewed(self):
+        self._stopped()
+        self.reviewer.press_continue(written=set())
+        _Job.started[-1].succeed(self._checkpoint(
+            produced=("02_ASO",), stopped_after="ASO",
+            steps={"02_ASO": {"p1_Or.nii.gz": "oriented"}}))
+
+        second = self._reviewed("ASO")
+        here = [name for _root, _dirs, files in os.walk(second) for name in files]
+        self.assertEqual(sorted(here), ["p1_Or.nii.gz"])
+        self.assertFalse(os.path.exists(
+            os.path.join(second, "01_ALI_CBCT", "p1_lm_Pred.mrk.json")))
+
+    def test_editing_the_earlier_stop_cannot_correct_the_one_being_reviewed(self):
+        """A reader who goes and touches the first stop's files while standing
+        at the second changes nothing here. The step is past; a correction
+        that reached it would be worse than one that did not."""
+        self._stopped()
+        self.reviewer.press_continue(written=set())
+        _Job.started[-1].succeed(self._checkpoint(
+            produced=("02_ASO",), stopped_after="ASO",
+            steps={"02_ASO": {"p1_Or.nii.gz": "oriented"}}))
+
+        self._edit("01_ALI_CBCT/p1_lm_Pred.mrk.json", stop="ALI_CBCT")
+        self.reviewer.press_continue(written={"p1"})
+
+        sent = self._collectResume()["corrections"]
+        self.assertEqual(sent, {}, "a finished step was corrected from behind")
+
+    def test_a_nested_stop_name_is_one_folder_rather_than_two(self):
+        # `ASO/ALI_CBCT` is a legal stop name. Nested, one stop's folder would
+        # sit INSIDE another's, which is the mixing this exists to prevent.
+        self._stopped(stopped_after="ASO/ALI_CBCT")
+        self.assertEqual(self.reviewer.opened, [self._reviewed("ASO_ALI_CBCT")])
+
+    def test_stopping_at_a_step_again_reviews_what_it_produced_this_time(self):
+        """What a run sent BACK to a step is answered with: that step's new
+        output, not the union with what the previous pass left."""
+        self._stopped(steps={"01_ALI_CBCT": {"p1_lm_Pred.mrk.json": "{}",
+                                             "p2_lm_Pred.mrk.json": "{}"}})
+        self.reviewer.press_continue(written=set())
+
+        _Job.started[-1].succeed(self._checkpoint(
+            steps={"01_ALI_CBCT": {"p1_lm_Pred.mrk.json": "{}"}}))
+
+        folder = os.path.join(self._reviewed(), "01_ALI_CBCT")
+        self.assertEqual(sorted(os.listdir(folder)), ["p1_lm_Pred.mrk.json"])
 
     # -- when there is nothing, or nobody, to review -------------------
 

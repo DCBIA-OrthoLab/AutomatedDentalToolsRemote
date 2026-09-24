@@ -52,7 +52,8 @@ _OUTPUTS_SECTION = "Outputs"
 # archive. Its own, unimportable: `execution/runner.INTERMEDIATE_DIRNAME`.
 _INTERMEDIATE_DIRNAME = "intermediate"
 
-# Where what a STOPPED run produced is unpacked, under the run's output folder.
+# Where what a STOPPED run produced is unpacked, under the run's output
+# folder. One subdirectory per stop below it -- see `_unpackCheckpoint`.
 # Apart from the results themselves, because the two are not the same thing: a
 # checkpoint holds a copy of a step's output for a reader to correct, and the
 # run is still going to write its real answer beside it.
@@ -2133,12 +2134,40 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                            self.REVIEW_MODULE, folder, exc)
             return False
 
+    @staticmethod
+    def _checkpointFolderName(checkpoint) -> str:
+        """The directory ONE stop is reviewed in, named after that stop.
+
+        `ASO/ALI_CBCT` is a legal stop name and not a legal directory name,
+        so the separator is folded rather than nested: nesting would put one
+        stop's folder inside another's, which is the very mixing this exists
+        to prevent.
+        """
+        name = (getattr(checkpoint, "stopped_after", "") or "").strip()
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_")
+        # A stop that named itself nothing still gets its own folder rather
+        # than the parent, which `shutil.rmtree` below would then empty.
+        return safe or "checkpoint"
+
     def _unpackCheckpoint(self, run, checkpoint):
         """Unpack what the stopped run produced, and say where. None if empty.
 
         Under the run's own output folder rather than a temporary directory:
         the reader is about to CORRECT these files, and a correction that
         disappears with the panel is worse than no correction at all.
+
+        **One folder per stop.** Every checkpoint of a run used to unpack into
+        the same directory, so a run that stopped twice offered the SECOND
+        reader everything the first had already reviewed -- and the baseline
+        below was retaken over the mixture, which made a file from the first
+        stop, edited during the second review, travel back as a correction of
+        a step the run had already left. A review now holds exactly what the
+        stop it belongs to produced.
+
+        Emptied before unpacking, for the same reason one directory down: a
+        run sent BACK to a step it already stopped at is answered with what
+        that step produced this time, and files the previous pass left would
+        otherwise read as part of it.
 
         The digest of everything unpacked is taken here, before the reader can
         touch any of it, and that timing is the whole mechanism: it is the only
@@ -2151,8 +2180,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         run.checkpoint_digests = {}
         if not checkpoint.path or not run.output_dir:
             return None
-        folder = os.path.join(run.output_dir, _CHECKPOINT_DIRNAME)
+        folder = os.path.join(run.output_dir, _CHECKPOINT_DIRNAME,
+                              self._checkpointFolderName(checkpoint))
         try:
+            shutil.rmtree(folder, ignore_errors=True)
             os.makedirs(folder, exist_ok=True)
             slicer_io.unzip_folder(checkpoint.path, folder)
             os.remove(checkpoint.path)
