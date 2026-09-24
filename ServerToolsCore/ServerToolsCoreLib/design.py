@@ -646,9 +646,14 @@ def group_heading(text: str) -> qt.QLabel:
     where it separates one group from the NEXT, and nowhere else.
 
     It first shipped with the air on both sides and a rule underneath. The rule
-    is gone with every other line on this panel, and it is not missed: at two
-    sizes and two weights below a chip, the heading is already a different kind
+    is gone with every other line on this panel, and it is not missed: bold and
+    muted over a row of filled chips, the heading is already a different kind
     of thing.
+
+    **No font-size override**, and that is the one place this does not shrink.
+    Compactness here comes from taking out the padding and the rule, never from
+    making the words smaller -- this panel has been told twice that its small
+    text cannot be read, and a heading nobody can read is not a saving.
 
     The gap is a MARGIN and not a spacer widget: `MultiChoiceGroup.rebuild`
     empties its column by reparenting the widgets in it, and a spacer item is
@@ -658,7 +663,7 @@ def group_heading(text: str) -> qt.QLabel:
     t = tokens()
     label = qt.QLabel(text)
     label.setStyleSheet(
-        f"color: {t['TEXT_MUTED']}; font-weight: 700; font-size: 8pt;"
+        f"color: {t['TEXT_MUTED']}; font-weight: 700;"
         f" background: transparent; border: none;"
         f" margin-top: {SPACING_SM}px; padding: 0px;"
     )

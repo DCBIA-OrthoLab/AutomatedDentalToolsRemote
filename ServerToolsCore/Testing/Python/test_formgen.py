@@ -2594,6 +2594,13 @@ class ChipGroupSpacingTest(unittest.TestCase):
             self.assertIn("padding: 0px", heading._stylesheet)
             self.assertNotIn("border-bottom", heading._stylesheet)
 
+
+    def test_the_heading_is_not_shrunk_to_make_room(self):
+        """Compactness comes from taking out the padding and the rule, never
+        from making the words smaller: this panel has been told twice that its
+        small text cannot be read."""
+        self.assertNotIn("font-size", design.group_heading("Soft tissue")._stylesheet)
+
     def test_it_is_not_the_plain_section_title_it_used_to_be(self):
         self.assertNotEqual(design.group_heading("Bones")._stylesheet,
                             design.section_title("Bones")._stylesheet)
