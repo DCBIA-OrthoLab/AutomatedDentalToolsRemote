@@ -321,15 +321,28 @@ class ApplyQueuesOneRunPerBatchTest(unittest.TestCase):
                           ["patient2.nii.gz", "patient3.nii.gz"],
                           ["patient4.nii.gz"]])
 
-    def test_every_batch_writes_to_the_one_output_folder_the_user_picked(self):
-        """Otherwise a cohort's results scatter across three folders and the
-        clinician has to put them back together by hand."""
+    def test_a_batch_writes_apart_while_the_others_are_still_running(self):
+        """Into the folder the clinician picked, one level down.
+
+        Sharing one folder meant a finished batch's results sitting among a
+        running one's half-written files with nothing saying which was which,
+        and two batches writing one name overwriting in silence. They are
+        folded back into that folder when the last batch lands, so what the
+        clinician ends up with is what they asked for.
+        """
         for index in range(5):
             self.cohort.scan(f"patient{index}.nii.gz")
 
         self.panel.onApplyButton()
 
-        self.assertEqual({run.output_dir for run in self.panel._runs}, {self.output})
+        self.assertEqual([run.output_dir for run in self.panel._runs],
+                         [os.path.join(self.output, "batch_%02d" % n)
+                          for n in (1, 2, 3)])
+        for run in self.panel._runs:
+            self.assertTrue(os.path.isdir(run.output_dir),
+                            "the batch folder was named but never created")
+        self.assertEqual({run.cohort.root for run in self.panel._runs},
+                         {self.output})
 
     def test_each_batch_says_which_one_it_is(self):
         for index in range(3):
@@ -574,6 +587,150 @@ class CohortReportOnDiskTest(unittest.TestCase):
         self.panel._mergeRunReport(self.output)
 
         self.assertIsNone(self.cohort.report)
+
+
+class CohortFoldedBackTest(unittest.TestCase):
+    """The batches write apart, and are put back together when the last lands.
+
+    Apart while they run, because a finished batch's results among a running
+    one's half-written files say nothing about which is which, and two
+    batches writing one name overwrite in silence. Together at the end,
+    because a clinician looking for a patient should not have to know which
+    batch the transfer happened to put them in.
+    """
+
+    def setUp(self):
+        from ServerToolsCoreLib.base_widget import ServerToolWidgetBase, _Cohort, _Run
+
+        self.output = tempfile.mkdtemp(prefix="out_")
+        self.addCleanup(shutil.rmtree, self.output, True)
+
+        class _Panel(ServerToolWidgetBase):
+            RUN_REPORT = "AMASSS_report.json"
+            TOOL_NAME = "AMASSS"
+
+        self.panel = _Panel.__new__(_Panel)
+        self.cohort = _Cohort(2)
+        self.cohort.root = self.output
+        self.runs = [_Run(n, "cohort (%d/2)" % n, {}, {},
+                          os.path.join(self.output, "batch_%02d" % n), None,
+                          cohort=self.cohort, cohort_index=n) for n in (1, 2)]
+
+    def _produced(self, batch, relative, data="result"):
+        path = os.path.join(self.output, "batch_%02d" % batch, relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(data)
+        return path
+
+    def _here(self):
+        """Everything under the output folder, relative and sorted."""
+        found = []
+        for root, _dirs, names in os.walk(self.output):
+            for name in names:
+                found.append(os.path.relpath(os.path.join(root, name), self.output))
+        return sorted(found)
+
+    def _endCohort(self):
+        self.cohort.finished = self.cohort.total
+        self.panel._finishCohort(self.runs[-1])
+
+    def test_the_batches_are_folded_back_into_the_folder_that_was_picked(self):
+        self._produced(1, "p1_Or.nii.gz")
+        self._produced(1, "p2_Or.nii.gz")
+        self._produced(2, "p3_Or.nii.gz")
+
+        self._endCohort()
+
+        self.assertEqual(self._here(),
+                         ["p1_Or.nii.gz", "p2_Or.nii.gz", "p3_Or.nii.gz"])
+        self.assertEqual([name for name in os.listdir(self.output)
+                          if name.startswith("batch_")], [],
+                         "an empty batch folder was left behind")
+
+    def test_a_tree_is_merged_rather_than_replaced(self):
+        """A tool mirrors its input tree, so two batches legitimately write
+        into subfolders of the same name -- and moving one over the other
+        would take the whole of the first with it."""
+        self._produced(1, os.path.join("Segmentations", "p1.nii.gz"))
+        self._produced(2, os.path.join("Segmentations", "p3.nii.gz"))
+
+        self._endCohort()
+
+        self.assertEqual(self._here(), [os.path.join("Segmentations", "p1.nii.gz"),
+                                        os.path.join("Segmentations", "p3.nii.gz")])
+
+    def test_what_survives_is_the_cohort_report_not_whichever_batch_moved_first(self):
+        """Every batch writes the same report name. Folding them up on file
+        order would leave a report that describes one batch and is named as
+        if it described the run."""
+        self._produced(1, "AMASSS_report.json", json.dumps({"scans": ["a"]}))
+        self._produced(2, "AMASSS_report.json", json.dumps({"scans": ["c"]}))
+        self.cohort.report = {"scans": ["a", "b", "c"]}
+
+        self._endCohort()
+
+        with open(os.path.join(self.output, "AMASSS_report.json")) as handle:
+            self.assertEqual(json.load(handle), {"scans": ["a", "b", "c"]})
+
+    def test_one_name_produced_by_two_batches_keeps_the_first(self):
+        """Two batches hold different patients, so this means two runs wrote
+        one name -- and the one already there is what the merged report and
+        any loaded node already refer to."""
+        self._produced(1, "shared.nii.gz", "from the first")
+        self._produced(2, "shared.nii.gz", "from the second")
+
+        self._endCohort()
+
+        with open(os.path.join(self.output, "shared.nii.gz")) as handle:
+            self.assertEqual(handle.read(), "from the first")
+
+    def test_the_reviews_come_up_with_the_results_they_belong_to(self):
+        """A correction a clinician made is not scratch: it is the record of
+        what they changed, and it has to survive the merge like everything
+        else."""
+        self._produced(1, os.path.join("quality_control", "batch_01",
+                                       "ALI_CBCT", "p1_lm_Pred.mrk.json"))
+        self._produced(2, os.path.join("quality_control", "batch_02",
+                                       "ALI_CBCT", "p3_lm_Pred.mrk.json"))
+
+        self._endCohort()
+
+        self.assertEqual(self._here(), [
+            os.path.join("quality_control", "batch_01", "ALI_CBCT", "p1_lm_Pred.mrk.json"),
+            os.path.join("quality_control", "batch_02", "ALI_CBCT", "p3_lm_Pred.mrk.json"),
+        ])
+
+    def test_nothing_is_folded_while_a_batch_is_still_running(self):
+        """Half a cohort merged reads as a finished one that lost patients."""
+        self._produced(1, "p1_Or.nii.gz")
+        self.cohort.finished = 1
+
+        self.panel._finishCohort(self.runs[0])
+
+        self.assertEqual(self._here(), [os.path.join("batch_01", "p1_Or.nii.gz")])
+
+    def test_a_folder_of_the_clinicians_own_is_not_moved_by_us(self):
+        """Only what this panel named. Someone who keeps a `notes` folder
+        beside their results keeps it exactly where it is."""
+        os.makedirs(os.path.join(self.output, "notes"))
+        with open(os.path.join(self.output, "notes", "mine.txt"), "w") as handle:
+            handle.write("kept")
+        self._produced(1, "p1_Or.nii.gz")
+
+        self._endCohort()
+
+        self.assertEqual(self._here(), [os.path.join("notes", "mine.txt"),
+                                        "p1_Or.nii.gz"])
+
+    def test_an_undivided_run_has_no_cohort_and_nothing_is_touched(self):
+        from ServerToolsCoreLib.base_widget import _Run
+        with open(os.path.join(self.output, "p1_Or.nii.gz"), "w") as handle:
+            handle.write("result")
+
+        self.panel._finishCohort(_Run(1, "one", {}, {}, self.output, None))
+
+        self.assertEqual(self._here(), ["p1_Or.nii.gz"])
 
 
 class OneDialogPerCohortTest(unittest.TestCase):

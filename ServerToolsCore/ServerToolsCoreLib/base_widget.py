@@ -128,6 +128,24 @@ class _CohortView:
         self.remainder = remainder  # the "+ N more" line, or None
 
 
+def _batch_dirname(index) -> str:
+    """What one batch of a cohort calls its folder.
+
+    One function because two things are named by it and they have to agree:
+    the folder a batch WRITES into while the cohort runs, and the folder its
+    review is unpacked in. A reader who saw `batch_02` on a progress line
+    finds `batch_02` in both places.
+    """
+    return "batch_%02d" % int(index)
+
+
+# What `_mergeCohortFolders` is allowed to fold back up. Matched rather than
+# remembered, so a cohort interrupted by a crashed Slicer is still merged the
+# next time -- and so nothing the clinician put in that folder themselves can
+# be moved by us.
+_BATCH_DIRNAME = re.compile(r"^batch_\d{2,}$")
+
+
 class _Cohort:
     """The few things several batches of one Apply have in common.
 
@@ -139,6 +157,9 @@ class _Cohort:
 
     def __init__(self, total: int, total_scans: int = 0):
         self.total = total
+        # The folder the clinician chose, under which every batch has one of
+        # its own. Set when the batches are queued.
+        self.root = None
         # In SCANS, not batches: a batch is how the transfer was cut up and
         # nobody has twenty batches of work to do. Known before anything is
         # sent, which is what lets the panel answer "how many of my scans are
@@ -1725,9 +1746,30 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         sizes = [len(batch[1]) for batch in batches] if batches[0] else []
         cohort = _Cohort(len(prepared), sum(sizes)) if len(prepared) > 1 else None
+        chosen = (self._outputFolderWidget.currentPath
+                  if self._outputFolderWidget else None)
+        if cohort:
+            # Where the whole cohort lands once its last batch has been
+            # merged back up. Kept on the cohort rather than reconstructed
+            # later with `dirname`: it is the folder the clinician chose.
+            cohort.root = chosen
         for index, (workspace, files) in enumerate(prepared, start=1):
-            outputDir = (self._outputFolderWidget.currentPath
-                         if self._outputFolderWidget else workspace.path)
+            outputDir = chosen if chosen else workspace.path
+            if cohort:
+                # A batch writes APART while the cohort runs. Together, a
+                # finished batch's results sit among a running one's
+                # half-written files with nothing saying which is which --
+                # and two batches writing one name overwrite in silence.
+                # They are folded back into one folder when the last batch
+                # lands, which is when the answer is whole.
+                outputDir = os.path.join(outputDir, _batch_dirname(index))
+                try:
+                    os.makedirs(outputDir, exist_ok=True)
+                except OSError as exc:
+                    slicer.util.errorDisplay(
+                        _("Could not create {path}: {error}").format(
+                            path=outputDir, error=exc))
+                    return
             self._runsStarted += 1
             self._runs.append(_Run(
                 self._runsStarted,
@@ -1963,6 +2005,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self.handleResult(result)
         finally:
             self._runInHand = None
+        # After `handleResult`, so the last batch's own results are on disk
+        # and its report has been folded into the cohort's.
+        self._finishCohort(run)
         # Move the SUGGESTION on, now that this folder holds a result. The next
         # run then lands beside this one instead of into it, which is the whole
         # reason the folders are numbered. A path the user chose is left alone
@@ -1973,6 +2018,91 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # the next Apply somewhere the current cohort is still writing.
         if not run.cohort:
             self._suggestOutputFolder()
+
+    def _finishCohort(self, run) -> None:
+        """Put a divided cohort back in one folder, once its last batch has
+        landed.
+
+        Called from the success path AFTER `handleResult`, not from
+        `_countBatch` beside it: the count is taken before the archive is
+        unpacked, so a merge there would run while the last batch's results
+        were still arriving. And from the failure path too -- a cohort whose
+        fourth batch failed still has three batches of results that belong
+        together, and leaving them in `batch_01/` is telling a clinician to
+        do the merge by hand.
+        """
+        cohort = getattr(run, "cohort", None)
+        if cohort is None or not cohort.complete or not cohort.root:
+            return
+        self._mergeCohortFolders(cohort.root, cohort.report)
+
+    def _mergeCohortFolders(self, root: str, report=None) -> None:
+        """Fold every `<root>/batch_NN` back into `<root>`.
+
+        The batch folders exist so that runs in flight do not write over one
+        another; once nothing is in flight they are an obstacle -- a clinician
+        looking for a patient should not have to know which batch the transfer
+        happened to put them in, and no module reading its own results knows
+        this feature exists.
+
+        The report is written LAST and from the cohort's merged copy, not
+        moved up with the files. Every batch writes the same report name, so
+        whichever one happened to be moved first would otherwise survive as
+        the cohort's report while describing one batch of it.
+        """
+        try:
+            names = sorted(os.listdir(root))
+        except OSError as exc:
+            logger.warning("Could not merge the batches in %s: %s", root, exc)
+            return
+        folded = 0
+        for name in names:
+            folder = os.path.join(root, name)
+            if not _BATCH_DIRNAME.match(name) or not os.path.isdir(folder):
+                continue
+            try:
+                folded += self._hoist(folder, root)
+                shutil.rmtree(folder, ignore_errors=True)
+            except OSError as exc:
+                # Never fatal: the results are on disk either way, and a
+                # cohort left in batch folders is readable. Said out loud so
+                # it is not discovered as a folder that should not be there.
+                logger.warning("Could not merge %s: %s", folder, exc)
+        if report is not None and self.RUN_REPORT:
+            try:
+                with open(os.path.join(root, self.RUN_REPORT), "w",
+                          encoding="utf-8") as handle:
+                    json.dump(report, handle, indent=2)
+            except OSError as exc:
+                logger.warning("Could not write the merged %s: %s",
+                               self.RUN_REPORT, exc)
+        if folded:
+            logger.info("'%s': %d file(s) merged back into %s",
+                        self.TOOL_NAME, folded, root)
+
+    @staticmethod
+    def _hoist(source: str, destination: str) -> int:
+        """Move everything under `source` into `destination`, merging trees.
+
+        A file already at the destination is LEFT there and the one below it
+        dropped. Two batches hold different patients, so a collision means
+        two runs wrote one name -- and the one already there is what the
+        merged report and any loaded node already refer to.
+        """
+        moved = 0
+        for entry in sorted(os.listdir(source)):
+            origin = os.path.join(source, entry)
+            landing = os.path.join(destination, entry)
+            if os.path.isdir(origin):
+                os.makedirs(landing, exist_ok=True)
+                moved += ServerToolWidgetBase._hoist(origin, landing)
+                continue
+            if os.path.exists(landing):
+                logger.warning("Two batches produced %s; kept the first", entry)
+                continue
+            shutil.move(origin, landing)
+            moved += 1
+        return moved
 
     def _countBatch(self, run, succeeded: bool = True) -> None:
         """Record that one batch of a cohort has ended, and how.
@@ -2011,6 +2141,9 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """One run failing takes only that run: the rest of a cohort goes on."""
         self._finishRun(run)
         self._countBatch(run, succeeded=False)
+        # A cohort whose last batch failed still has the earlier ones to put
+        # together, and it is over either way.
+        self._finishCohort(run)
         if isinstance(exc, RunCancelled):
             # 499: the user asked for this. A cancellation is not a failure and
             # must never open an error dialog -- the panel simply closes the
@@ -2159,7 +2292,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         index = getattr(run, "cohort_index", None)
         # A run that was not divided is not called a batch: there is no
         # second one to tell it apart from.
-        where = ("batch_%02d" % index if index
+        where = (_batch_dirname(index) if index
                  else "run_%02d" % (getattr(run, "number", 0) or 0))
         name = (getattr(checkpoint, "stopped_after", "") or "").strip()
         step = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_")
