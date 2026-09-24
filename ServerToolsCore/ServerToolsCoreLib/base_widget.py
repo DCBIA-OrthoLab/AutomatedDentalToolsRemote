@@ -2135,19 +2135,37 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return False
 
     @staticmethod
-    def _checkpointFolderName(checkpoint) -> str:
-        """The directory ONE stop is reviewed in, named after that stop.
+    def _checkpointFolderName(run, checkpoint) -> str:
+        """The directory ONE stop of ONE run is reviewed in.
+
+        Two levels, and both are load-bearing.
+
+        The RUN comes first because one Apply is several runs: a cohort over
+        the server's published batch size is divided, and every batch is an
+        ordinary run with its own checkpoint -- into the same output folder.
+        Naming a review after the step alone made all of them the same
+        directory, so batch 2 landed on batch 1, and batch 2 may well stop
+        while a reader is still looking at batch 1. Batches are numbered as
+        the progress lines number them, so the folder and the line a reader
+        was watching say the same thing.
+
+        The STEP comes second because one run can stop more than once, which
+        is what this whole split is for.
 
         `ASO/ALI_CBCT` is a legal stop name and not a legal directory name,
-        so the separator is folded rather than nested: nesting would put one
-        stop's folder inside another's, which is the very mixing this exists
-        to prevent.
+        so its separator is folded rather than nested: nested, one stop's
+        folder would sit inside another's, which is the mixing this prevents.
         """
+        index = getattr(run, "cohort_index", None)
+        # A run that was not divided is not called a batch: there is no
+        # second one to tell it apart from.
+        where = ("batch_%02d" % index if index
+                 else "run_%02d" % (getattr(run, "number", 0) or 0))
         name = (getattr(checkpoint, "stopped_after", "") or "").strip()
-        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_")
+        step = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_")
         # A stop that named itself nothing still gets its own folder rather
         # than the parent, which `shutil.rmtree` below would then empty.
-        return safe or "checkpoint"
+        return os.path.join(where, step or "checkpoint")
 
     def _unpackCheckpoint(self, run, checkpoint):
         """Unpack what the stopped run produced, and say where. None if empty.
@@ -2156,13 +2174,14 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         the reader is about to CORRECT these files, and a correction that
         disappears with the panel is worse than no correction at all.
 
-        **One folder per stop.** Every checkpoint of a run used to unpack into
-        the same directory, so a run that stopped twice offered the SECOND
-        reader everything the first had already reviewed -- and the baseline
-        below was retaken over the mixture, which made a file from the first
-        stop, edited during the second review, travel back as a correction of
-        a step the run had already left. A review now holds exactly what the
-        stop it belongs to produced.
+        **One folder per stop, per run.** Every checkpoint used to unpack
+        into the same directory -- across the stops of one run AND across the
+        batches of one cohort, which share an output folder. So a reader was
+        handed everything every earlier review had already covered, and the
+        baseline below was retaken over the mixture, which made a file from
+        an earlier stop, edited during a later review, travel back as a
+        correction of a step the run had already left. A review now holds
+        exactly what the stop it belongs to produced.
 
         Emptied before unpacking, for the same reason one directory down: a
         run sent BACK to a step it already stopped at is answered with what
@@ -2181,7 +2200,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not checkpoint.path or not run.output_dir:
             return None
         folder = os.path.join(run.output_dir, _CHECKPOINT_DIRNAME,
-                              self._checkpointFolderName(checkpoint))
+                              self._checkpointFolderName(run, checkpoint))
         try:
             shutil.rmtree(folder, ignore_errors=True)
             os.makedirs(folder, exist_ok=True)

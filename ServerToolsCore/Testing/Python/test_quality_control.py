@@ -440,21 +440,22 @@ class PanelTest(unittest.TestCase):
 
     # -- standing in for the reader -------------------------------------
 
-    def _reviewed(self, stop="ALI_CBCT") -> str:
-        """Where one STOP was unpacked, which is what the reader edits.
+    def _reviewed(self, stop="ALI_CBCT", run="run_01") -> str:
+        """Where one STOP of one RUN was unpacked -- what the reader edits.
 
-        One directory per stop, named after it: two checkpoints of the same
-        run never share a review folder.
+        One directory per run and per stop: neither two checkpoints of one
+        run nor two batches of one cohort ever share a review folder, and
+        the batches of one Apply share an output folder.
         """
-        return os.path.join(self.work, "quality_control", stop)
+        return os.path.join(self.work, "quality_control", run, stop)
 
-    def _edit(self, relative, data="moved", stop="ALI_CBCT"):
+    def _edit(self, relative, data="moved", stop="ALI_CBCT", run="run_01"):
         """Write into the unpacked checkpoint, as the reviewer's save does.
 
         Subfolders are created, because a step mirrors its input tree and the
         file a reader corrects can be two directories down.
         """
-        path = os.path.join(self._reviewed(stop), relative)
+        path = os.path.join(self._reviewed(stop, run), relative)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(data)
@@ -755,6 +756,42 @@ class PanelTest(unittest.TestCase):
 
         sent = self._collectResume()["corrections"]
         self.assertEqual(sent, {}, "a finished step was corrected from behind")
+
+    def _batchRun(self, index):
+        """A batch of one cohort, as `_beginRun` builds it: its own run, its
+        own checkpoint, and the SAME output folder as its siblings."""
+        return types.SimpleNamespace(
+            output_dir=self.work, cohort_index=index, number=index,
+            checkpoint_digests={})
+
+    def test_two_batches_of_one_cohort_do_not_share_a_review_folder(self):
+        """A cohort over the server's batch size is divided, and every batch
+        is an ordinary run writing into the one output folder the clinician
+        chose. They stop independently, so batch 2 can well stop while a
+        reader is still looking at batch 1."""
+        first = self.panel._unpackCheckpoint(
+            self._batchRun(1),
+            self._checkpoint(steps={"01_ALI_CBCT": {"p1_lm_Pred.mrk.json": "{}"}}).checkpoint)
+        second = self.panel._unpackCheckpoint(
+            self._batchRun(2),
+            self._checkpoint(steps={"01_ALI_CBCT": {"p5_lm_Pred.mrk.json": "{}"}}).checkpoint)
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(first, self._reviewed(run="batch_01"))
+        self.assertEqual(second, self._reviewed(run="batch_02"))
+        self.assertTrue(os.path.isfile(
+            os.path.join(first, "01_ALI_CBCT", "p1_lm_Pred.mrk.json")),
+            "the second batch emptied what the first reader was reading")
+        self.assertFalse(os.path.exists(
+            os.path.join(second, "01_ALI_CBCT", "p1_lm_Pred.mrk.json")))
+
+    def test_a_run_that_was_not_divided_is_not_called_a_batch(self):
+        # There is no second one to tell it apart from, and `batch_01` alone
+        # in a folder reads as a cohort whose other batches went missing.
+        self.assertTrue(ServerToolWidgetBase._checkpointFolderName(
+            types.SimpleNamespace(cohort_index=None, number=3),
+            RunCheckpoint(run_id="r", stopped_after="ALI_CBCT",
+                          produced=(), path=None)).startswith("run_03"))
 
     def test_a_nested_stop_name_is_one_folder_rather_than_two(self):
         # `ASO/ALI_CBCT` is a legal stop name. Nested, one stop's folder would
