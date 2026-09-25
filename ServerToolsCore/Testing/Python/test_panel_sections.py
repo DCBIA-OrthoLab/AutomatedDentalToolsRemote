@@ -41,6 +41,7 @@ class FoldedSectionsTest(unittest.TestCase):
         # What else enter() does. None of it is the subject, and all of it
         # wants a server.
         panel._sweepLeftoverTestFiles = lambda: None
+        panel._refreshSchema = lambda: None
         panel._refreshServerSelectables = lambda: None
         panel._refreshSceneVolumes = lambda: None
         panel._refreshServerStatus = lambda: None
@@ -108,6 +109,7 @@ class TheFoldHasToActuallyRunTest(unittest.TestCase):
         panel._collapsePending = False
         panel._sectionBoxes = {"Advanced": ctk.ctkCollapsibleButton()}
         panel._sweepLeftoverTestFiles = lambda: None
+        panel._refreshSchema = lambda: None
         panel._refreshServerSelectables = lambda: None
         panel._refreshSceneVolumes = lambda: None
         panel._refreshServerStatus = lambda: None

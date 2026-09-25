@@ -78,6 +78,17 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
 
+# test_schema_refresh.py: the panel noticing that the server's schema changed
+# under it. A form built at setup() outlives the tool it was built from, and
+# the rule -- re-read on every enter(), rebuild only on a difference -- is not
+# visible anywhere in the panel, so only a test can hold it. Stand-ins only:
+# no Slicer interpreter, no server.
+add_test(
+  NAME ServerToolsCore_test_schema_refresh
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_schema_refresh
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+
 # test_quality_control.py: a run that stops for a reader to correct it, and is
 # then carried on. Both halves -- the client recognising the record and posting
 # the corrections back, and the panel's loop around a stub reviewer -- run

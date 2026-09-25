@@ -1160,6 +1160,7 @@ class NothingIsLeftBehindTest(HostedTestFileTest):
         # `enter()` also repaints and re-reads the server; the subject here is
         # only that the sweep is among the things it does.
         self.panel.uiWidget = None
+        self.panel._refreshSchema = lambda: None
         self.panel._refreshServerSelectables = lambda: None
         self.panel._refreshSceneVolumes = lambda: None
         self.panel._refreshServerStatus = lambda: None

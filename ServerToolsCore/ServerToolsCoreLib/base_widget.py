@@ -532,6 +532,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # says so -- and a user who downloaded a 648 MB cohort once and did not
         # come back would keep it for good. Opening any tool is now enough.
         self._sweepLeftoverTestFiles()
+        self._refreshSchema()
         self._refreshServerSelectables()
         self._refreshSceneVolumes()
         self._refreshServerStatus()
@@ -1027,6 +1028,41 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if previous in entries:
             widget.setCurrentIndex(entries.index(previous))
         return choices
+
+    def _refreshSchema(self) -> None:
+        """Rebuild the form when the SERVER's schema has changed under it.
+
+        The schema is read once, at `setup()`. A panel built while the server
+        offered an older version of this tool then keeps that form for the
+        whole Slicer session, and visiting another module and coming back does
+        not help: `enter()` re-reads the hosted FILES, not the shape of the
+        form. On a deployment being worked on that is a field added, renamed or
+        hidden minutes ago and simply absent, with nothing on the panel saying
+        why -- the user is looking at a form the server stopped publishing.
+
+        Rebuilt ONLY when it actually differs. A rebuild throws the form away,
+        so a path somebody typed and has not run yet must survive an ordinary
+        trip to another module; paying that on every visit to fix a case that
+        almost never happens would be the worse bargain.
+
+        A server that cannot be reached leaves the panel exactly as it is, for
+        the reason `_refreshServerSelectables` gives: the form is already
+        usable, and a server that went away between two visits must not empty
+        it.
+        """
+        if self._schema is None:
+            return
+        try:
+            schema = self.client.get_tool_schema(self.TOOL_NAME, force_refresh=True)
+        except ServerToolError as exc:
+            logger.warning("Could not re-read the schema for '%s': %s",
+                           self.TOOL_NAME, exc)
+            return
+        if schema == self._schema:
+            return
+        logger.info("'%s': the server's schema changed; rebuilding the panel",
+                    self.TOOL_NAME)
+        self._buildForm(force_refresh=True)
 
     def _refreshServerSelectables(self) -> None:
         """Re-read the hosted-file lists and update the dropdowns in place.
