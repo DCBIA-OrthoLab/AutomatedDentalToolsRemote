@@ -998,7 +998,17 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         in the list — the kind of change a user does not look for, and which
         would then run the tool against weights they never picked.
         """
-        choices = list(data.get("models" if kind == "model" else "testfiles", []))
+        # An argument may draw from ONE subfolder of the tool's hosted files
+        # rather than from all of them: a tool serving several modalities keeps
+        # one folder per modality, and AREG's CBCT baseline picker was offering
+        # the intraoral meshes, which cannot be a baseline. The server publishes
+        # the subfolder on the argument and the list beside the flat one; a
+        # deployment that scopes nothing sends no `scoped` section and every
+        # argument reads the same list it always did.
+        spec = (self._schema or {}).get("arguments", {}).get(arg_name, {})
+        scope = spec.get("selectable_scope")
+        source = (data.get("scoped", {}) or {}).get(scope, data) if scope else data
+        choices = list(source.get("models" if kind == "model" else "testfiles", []))
         fileInput = self._inputWidgets.get(arg_name)
 
         if fileInput is not None:
@@ -1012,11 +1022,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # cohort and how many bytes that is. A model dropdown gets the
             # names, because naming a model is all that ever travels for one.
             fileInput.setChoices(
-                testfile_entries(data) if kind == "testfile" else choices
+                testfile_entries(source) if kind == "testfile" else choices
             )
             return choices
 
-        spec = (self._schema or {}).get("arguments", {}).get(arg_name, {})
         entries = list(choices)
         if not spec.get("required"):
             entries.insert(0, formgen.AUTOMATIC_OPTION)

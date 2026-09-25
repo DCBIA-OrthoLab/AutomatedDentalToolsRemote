@@ -78,6 +78,16 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
 
+# test_scoped_hosted_files.py: an argument drawing from one subfolder of the
+# tool's hosted files instead of all of them. Stand-ins only, and the subject
+# is the CLIENT half -- which list a picker reads, and what it does when the
+# server sent no scoped section at all.
+add_test(
+  NAME ServerToolsCore_test_scoped_hosted_files
+  COMMAND ${Python3_EXECUTABLE} -m unittest test_scoped_hosted_files
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+
 # test_schema_refresh.py: the panel noticing that the server's schema changed
 # under it. A form built at setup() outlives the tool it was built from, and
 # the rule -- re-read on every enter(), rebuild only on a difference -- is not
