@@ -3202,8 +3202,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         declared = self._declaredKind(arg_name, name)
 
+        scope = ((self._schema or {}).get("arguments", {})
+                 .get(arg_name, {}).get("selectable_scope") or "")
+
         def task(progress_cb):
-            return self._fetchTestFile(name, destination, declared, progress_cb)
+            return self._fetchTestFile(name, destination, declared, progress_cb, scope)
 
         def finish():
             self._downloadJob = None
@@ -3225,7 +3228,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._showPhase(_("Downloading {name}...").format(name=name))
         self._downloadJob.start()
 
-    def _fetchTestFile(self, name: str, destination: str, declared, progress_cb) -> str:
+    def _fetchTestFile(self, name: str, destination: str, declared, progress_cb,
+                       scope: str = "") -> str:
         """Worker-thread half: download, unpack a hosted folder, move into place.
 
         Staged in a sibling directory and renamed at the end, so a failed or
@@ -3252,7 +3256,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         try:
             payload = os.path.join(staging, _safe_name(name))
             phase("download", lambda: self.client.download_testfile(
-                self.TOOL_NAME, name, payload, progress_cb))
+                self.TOOL_NAME, name, payload, progress_cb, scope))
 
             # A hosted FOLDER is zipped by the server on the way out (there
             # being no other way to put a directory on a wire) and is unpacked

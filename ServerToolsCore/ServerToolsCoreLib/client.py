@@ -708,6 +708,7 @@ class ToolServerClient:
         filename: str,
         destination: str,
         progress_cb: Optional[Callable[[str], None]] = None,
+        scope: str = "",
     ) -> str:
         """Fetch one of the tool's server-hosted test files to `destination`.
 
@@ -726,6 +727,13 @@ class ToolServerClient:
         # listing, but it lands in a URL path and a stray "/" or "?" in it must
         # address the same file rather than a different route.
         url = f"{self._server_url}/tools/{tool_name}/testfiles/{quote(filename, safe='')}"
+        # The subfolder the name was LISTED under, when a deployment scopes an
+        # argument's hosted files. Said rather than guessed: a name is bare and
+        # two scopes may hold the same one. Without it the server looks in the
+        # tool's own folder and answers "No such testfile" for an entry its own
+        # picker had just offered.
+        if scope:
+            url += f"?scope={quote(scope, safe='')}"
         headers = {"Authorization": f"Bearer {self._token}"}
         label = f"Downloading {filename}..."
 

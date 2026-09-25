@@ -84,5 +84,43 @@ class ScopedHostedFilesTest(unittest.TestCase):
         assert "CBCT" in panel._argWidgets["t1"].items
 
 
+class ScopedDownloadTest(unittest.TestCase):
+    """The name a scoped picker listed must be downloadable from that scope.
+
+    The run path learned this first: a hosted file is resolved through the
+    ARGUMENT it was sent for, so the server knows which subfolder to look in.
+    The DOWNLOAD path did not, and the server answered "No such testfile
+    'IOSCBCT_TestFile' for tool 'AREG'" for an entry its own picker had just
+    offered -- a list the user could read and not use.
+    """
+
+    def test_the_scope_travels_with_the_download(self):
+        import ServerToolsCoreLib.client as client_module
+
+        captured = {}
+
+        def _probe(session, url, **kwargs):
+            # `probe_ranged(session, url, ...)`: the URL is the SECOND argument.
+            captured["url"] = url
+            raise RuntimeError("stop here: the URL is the subject")
+
+        original = client_module.transfer.probe_ranged
+        client_module.transfer.probe_ranged = _probe
+        try:
+            client = client_module.ToolServerClient.__new__(client_module.ToolServerClient)
+            client._server_url = "https://example.org"
+            client._token = "t"
+            client._verify_tls = False
+            client._session = object()
+            try:
+                client.download_testfile("AREG", "IOSCBCT_TestFile", "/tmp/x", None, "IOSCBCT")
+            except Exception:
+                pass
+        finally:
+            client_module.transfer.probe_ranged = original
+
+        assert "scope=IOSCBCT" in captured.get("url", ""), captured
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -530,10 +530,16 @@ class _FakeClient:
         self.payloads = {}   # {hosted name: bytes | {member: bytes} for a folder}
         self.calls = []
         self.threads = []
+        self.scopes = []
         self.gate = None     # an Event a test holds to keep a download running
         self.error = None
 
-    def download_testfile(self, tool_name, filename, destination, progress_cb=None):
+    def download_testfile(self, tool_name, filename, destination, progress_cb=None,
+                          scope=""):
+        # `scope` is the subfolder the name was listed under, when a deployment
+        # scopes an argument's hosted files. Recorded so a test can assert the
+        # picker sent the one it listed from.
+        self.scopes.append(scope)
         self.calls.append((tool_name, filename))
         self.threads.append(threading.current_thread())
         if self.gate is not None:
