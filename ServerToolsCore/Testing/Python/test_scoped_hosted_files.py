@@ -122,5 +122,36 @@ class ScopedDownloadTest(unittest.TestCase):
         assert "scope=IOSCBCT" in captured.get("url", ""), captured
 
 
+class ScopedCacheTest(unittest.TestCase):
+    """Two scopes may offer the SAME entry name, and they are not the same file.
+
+    `IOSCBCT_TestFile` is the intraoral surfaces under one scope and the CBCT
+    volume under another. Cached by name alone, picking it for the second
+    argument handed back the first one's download -- meshes in the CBCT field,
+    from a cache hit that looked perfectly healthy.
+    """
+
+    def _panel(self):
+        panel = ServerToolWidgetBase.__new__(ServerToolWidgetBase)
+        panel._schema = {"arguments": {
+            "ios": {"selectable_scope": "IOSCBCT_IOS"},
+            "cbct": {"selectable_scope": "IOSCBCT_CBCT"},
+            "plain": {},
+        }}
+        return panel
+
+    def test_the_same_name_under_two_scopes_is_two_cache_entries(self):
+        panel = self._panel()
+
+        assert panel._selectableScope("ios") == "IOSCBCT_IOS"
+        assert panel._selectableScope("cbct") == "IOSCBCT_CBCT"
+        assert panel._selectableScope("ios") != panel._selectableScope("cbct")
+
+    def test_an_unscoped_argument_has_no_scope(self):
+        """Every deployment that scopes nothing, where the name alone was
+        always enough."""
+        assert self._panel()._selectableScope("plain") == ""
+
+
 if __name__ == "__main__":
     unittest.main()

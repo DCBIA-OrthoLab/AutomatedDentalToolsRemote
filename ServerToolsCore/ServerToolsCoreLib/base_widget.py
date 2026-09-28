@@ -381,7 +381,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Created on first use and never in Documents: a 648 MB cohort a user
         # clicked once must not still be on their disk next month.
         self._testFileRoot = None
-        self._testFileCache = {}  # {hosted name: local path already fetched}
+        self._testFileCache = {}  # {(scope, hosted name): local path already fetched}
         # {argument: path already put in the scene}, so re-picking the same
         # file does not stack a second copy of it on the first.
         self._scenePreviews = {}
@@ -3182,7 +3182,16 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if widget is None or not name:
             return
 
-        cached = self._testFileCache.get(name)
+        # Keyed by SCOPE and name, never by the name alone. Two arguments that
+        # draw from different subfolders may legitimately offer the same entry
+        # name -- `IOSCBCT_TestFile` is the intraoral surfaces under one scope
+        # and the CBCT volume under another -- and keyed by name, picking it for
+        # the second argument silently handed back the first one's download:
+        # meshes in the CBCT field, from a cache that looked like a hit.
+        scope = self._selectableScope(arg_name)
+        key = (scope, name)
+
+        cached = self._testFileCache.get(key)
         if cached and os.path.exists(cached):
             self._useTestFile(arg_name, name, cached)
             return
@@ -3193,17 +3202,20 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             )
             return
 
-        destination = os.path.join(self._testFileDir(), _safe_name(name))
+        # The scope is part of the file name on disk for the same reason it is
+        # part of the cache key: one staging directory, two entries that share
+        # a name and do not share their contents.
+        destination = os.path.join(
+            self._testFileDir(),
+            _safe_name("{}__{}".format(scope, name) if scope else name),
+        )
         if os.path.exists(destination):
             # A previous pick in this session that never made it into the
-            # cache (a rebuilt panel, another argument offering the same file).
+            # cache (a rebuilt panel, the same entry picked twice).
             self._useTestFile(arg_name, name, destination)
             return
 
         declared = self._declaredKind(arg_name, name)
-
-        scope = ((self._schema or {}).get("arguments", {})
-                 .get(arg_name, {}).get("selectable_scope") or "")
 
         def task(progress_cb):
             return self._fetchTestFile(name, destination, declared, progress_cb, scope)
@@ -3227,6 +3239,17 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         self._showPhase(_("Downloading {name}...").format(name=name))
         self._downloadJob.start()
+
+    def _selectableScope(self, arg_name: str) -> str:
+        """The subfolder this argument's hosted files come from, or "".
+
+        Read in three places -- the cache key, the staged file name, and the
+        download itself -- and all three have to agree: two arguments drawing
+        from different subfolders may offer the same entry NAME, and treating
+        them as one handed the CBCT field a folder of intraoral meshes.
+        """
+        return ((self._schema or {}).get("arguments", {})
+                .get(arg_name, {}).get("selectable_scope") or "")
 
     def _fetchTestFile(self, name: str, destination: str, declared, progress_cb,
                        scope: str = "") -> str:
@@ -3319,7 +3342,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         never raises).
         """
         load_started = time.perf_counter()
-        self._testFileCache[name] = path
+        self._testFileCache[(self._selectableScope(arg_name), name)] = path
         widget = self._inputWidgets.get(arg_name)
         if widget is not None:
             formgen.set_local_path(widget, path)
