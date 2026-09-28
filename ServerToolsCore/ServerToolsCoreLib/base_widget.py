@@ -381,7 +381,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Created on first use and never in Documents: a 648 MB cohort a user
         # clicked once must not still be on their disk next month.
         self._testFileRoot = None
-        self._testFileCache = {}  # {hosted name: local path already fetched}
+        self._testFileCache = {}  # {(scope, hosted name): local path already fetched}
         # {argument: path already put in the scene}, so re-picking the same
         # file does not stack a second copy of it on the first.
         self._scenePreviews = {}
@@ -532,6 +532,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # says so -- and a user who downloaded a 648 MB cohort once and did not
         # come back would keep it for good. Opening any tool is now enough.
         self._sweepLeftoverTestFiles()
+        self._refreshSchema()
         self._refreshServerSelectables()
         self._refreshSceneVolumes()
         self._refreshServerStatus()
@@ -997,7 +998,17 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         in the list — the kind of change a user does not look for, and which
         would then run the tool against weights they never picked.
         """
-        choices = list(data.get("models" if kind == "model" else "testfiles", []))
+        # An argument may draw from ONE subfolder of the tool's hosted files
+        # rather than from all of them: a tool serving several modalities keeps
+        # one folder per modality, and AREG's CBCT baseline picker was offering
+        # the intraoral meshes, which cannot be a baseline. The server publishes
+        # the subfolder on the argument and the list beside the flat one; a
+        # deployment that scopes nothing sends no `scoped` section and every
+        # argument reads the same list it always did.
+        spec = (self._schema or {}).get("arguments", {}).get(arg_name, {})
+        scope = spec.get("selectable_scope")
+        source = (data.get("scoped", {}) or {}).get(scope, data) if scope else data
+        choices = list(source.get("models" if kind == "model" else "testfiles", []))
         fileInput = self._inputWidgets.get(arg_name)
 
         if fileInput is not None:
@@ -1011,11 +1022,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # cohort and how many bytes that is. A model dropdown gets the
             # names, because naming a model is all that ever travels for one.
             fileInput.setChoices(
-                testfile_entries(data) if kind == "testfile" else choices
+                testfile_entries(source) if kind == "testfile" else choices
             )
             return choices
 
-        spec = (self._schema or {}).get("arguments", {}).get(arg_name, {})
         entries = list(choices)
         if not spec.get("required"):
             entries.insert(0, formgen.AUTOMATIC_OPTION)
@@ -1027,6 +1037,41 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if previous in entries:
             widget.setCurrentIndex(entries.index(previous))
         return choices
+
+    def _refreshSchema(self) -> None:
+        """Rebuild the form when the SERVER's schema has changed under it.
+
+        The schema is read once, at `setup()`. A panel built while the server
+        offered an older version of this tool then keeps that form for the
+        whole Slicer session, and visiting another module and coming back does
+        not help: `enter()` re-reads the hosted FILES, not the shape of the
+        form. On a deployment being worked on that is a field added, renamed or
+        hidden minutes ago and simply absent, with nothing on the panel saying
+        why -- the user is looking at a form the server stopped publishing.
+
+        Rebuilt ONLY when it actually differs. A rebuild throws the form away,
+        so a path somebody typed and has not run yet must survive an ordinary
+        trip to another module; paying that on every visit to fix a case that
+        almost never happens would be the worse bargain.
+
+        A server that cannot be reached leaves the panel exactly as it is, for
+        the reason `_refreshServerSelectables` gives: the form is already
+        usable, and a server that went away between two visits must not empty
+        it.
+        """
+        if self._schema is None:
+            return
+        try:
+            schema = self.client.get_tool_schema(self.TOOL_NAME, force_refresh=True)
+        except ServerToolError as exc:
+            logger.warning("Could not re-read the schema for '%s': %s",
+                           self.TOOL_NAME, exc)
+            return
+        if schema == self._schema:
+            return
+        logger.info("'%s': the server's schema changed; rebuilding the panel",
+                    self.TOOL_NAME)
+        self._buildForm(force_refresh=True)
 
     def _refreshServerSelectables(self) -> None:
         """Re-read the hosted-file lists and update the dropdowns in place.
@@ -3137,7 +3182,16 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if widget is None or not name:
             return
 
-        cached = self._testFileCache.get(name)
+        # Keyed by SCOPE and name, never by the name alone. Two arguments that
+        # draw from different subfolders may legitimately offer the same entry
+        # name -- `IOSCBCT_TestFile` is the intraoral surfaces under one scope
+        # and the CBCT volume under another -- and keyed by name, picking it for
+        # the second argument silently handed back the first one's download:
+        # meshes in the CBCT field, from a cache that looked like a hit.
+        scope = self._selectableScope(arg_name)
+        key = (scope, name)
+
+        cached = self._testFileCache.get(key)
         if cached and os.path.exists(cached):
             self._useTestFile(arg_name, name, cached)
             return
@@ -3148,17 +3202,23 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             )
             return
 
-        destination = os.path.join(self._testFileDir(), _safe_name(name))
+        # The scope is part of the file name on disk for the same reason it is
+        # part of the cache key: one staging directory, two entries that share
+        # a name and do not share their contents.
+        destination = os.path.join(
+            self._testFileDir(),
+            _safe_name("{}__{}".format(scope, name) if scope else name),
+        )
         if os.path.exists(destination):
             # A previous pick in this session that never made it into the
-            # cache (a rebuilt panel, another argument offering the same file).
+            # cache (a rebuilt panel, the same entry picked twice).
             self._useTestFile(arg_name, name, destination)
             return
 
         declared = self._declaredKind(arg_name, name)
 
         def task(progress_cb):
-            return self._fetchTestFile(name, destination, declared, progress_cb)
+            return self._fetchTestFile(name, destination, declared, progress_cb, scope)
 
         def finish():
             self._downloadJob = None
@@ -3180,7 +3240,19 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._showPhase(_("Downloading {name}...").format(name=name))
         self._downloadJob.start()
 
-    def _fetchTestFile(self, name: str, destination: str, declared, progress_cb) -> str:
+    def _selectableScope(self, arg_name: str) -> str:
+        """The subfolder this argument's hosted files come from, or "".
+
+        Read in three places -- the cache key, the staged file name, and the
+        download itself -- and all three have to agree: two arguments drawing
+        from different subfolders may offer the same entry NAME, and treating
+        them as one handed the CBCT field a folder of intraoral meshes.
+        """
+        return ((self._schema or {}).get("arguments", {})
+                .get(arg_name, {}).get("selectable_scope") or "")
+
+    def _fetchTestFile(self, name: str, destination: str, declared, progress_cb,
+                       scope: str = "") -> str:
         """Worker-thread half: download, unpack a hosted folder, move into place.
 
         Staged in a sibling directory and renamed at the end, so a failed or
@@ -3207,7 +3279,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         try:
             payload = os.path.join(staging, _safe_name(name))
             phase("download", lambda: self.client.download_testfile(
-                self.TOOL_NAME, name, payload, progress_cb))
+                self.TOOL_NAME, name, payload, progress_cb, scope))
 
             # A hosted FOLDER is zipped by the server on the way out (there
             # being no other way to put a directory on a wire) and is unpacked
@@ -3270,7 +3342,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         never raises).
         """
         load_started = time.perf_counter()
-        self._testFileCache[name] = path
+        self._testFileCache[(self._selectableScope(arg_name), name)] = path
         widget = self._inputWidgets.get(arg_name)
         if widget is not None:
             formgen.set_local_path(widget, path)

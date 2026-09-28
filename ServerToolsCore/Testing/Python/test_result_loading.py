@@ -262,6 +262,10 @@ class OneCheckBoxTest(unittest.TestCase):
         class _P(ServerToolWidgetBase):
             TOOL_NAME = "AREG"
             _LOADABLE = (("*.nii.gz", "volume"),)
+            # The real panel reads `_schema` to know which subfolder an
+            # argument's hosted files come from; a double without one is a
+            # double of an older panel.
+            _schema = {"arguments": {}}
 
         panel = _P.__new__(_P)
         panel._producedFiles = []
@@ -569,6 +573,9 @@ class RenderOnImportTest(ImportPreviewTest):
         """
         panel = self._panel()
         panel._testFileCache = {}
+        # The cache is keyed by (scope, name): the panel reads the scope off
+        # its schema, two arguments being able to offer the same entry name.
+        panel._schema = {"arguments": {}}
         panel._checkCanApply = lambda *a: None
         panel._lastTestFileTimings = []
         panel._hideProgress = lambda *a: None
@@ -584,6 +591,9 @@ class RenderOnImportTest(ImportPreviewTest):
         """A cohort arrives as a folder and never reaches the scene."""
         panel = self._panel()
         panel._testFileCache = {}
+        # The cache is keyed by (scope, name): the panel reads the scope off
+        # its schema, two arguments being able to offer the same entry name.
+        panel._schema = {"arguments": {}}
         panel._checkCanApply = lambda *a: None
         panel._lastTestFileTimings = []
         panel._hideProgress = lambda *a: None

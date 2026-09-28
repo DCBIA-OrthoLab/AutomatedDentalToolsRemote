@@ -685,12 +685,21 @@ class ToolServerClient:
             self._server_url, tool_name, len(data.get("models", [])), len(data.get("testfiles", [])),
         )
         entries = data.get("entries")
+        # One list per SCOPE, beside the flat one, for a tool whose deployment
+        # points an argument at a subfolder of its hosted files -- AREG's CBCT
+        # baseline picker must not offer the intraoral cohorts staged beside
+        # them. Rebuilt rather than passed through, like the rest of this
+        # payload, which is exactly how the section was dropped on the floor
+        # once already: the server sent it, the panel never saw it, and the
+        # picker quietly went on showing everything.
+        scoped = data.get("scoped")
         return {
             "models": data.get("models", []),
             "testfiles": data.get("testfiles", []),
             # {} rather than None for an older server, so every caller can
             # index it without asking which server it is talking to.
             "entries": entries if isinstance(entries, dict) else {},
+            "scoped": scoped if isinstance(scoped, dict) else {},
         }
 
     def download_testfile(
@@ -699,6 +708,7 @@ class ToolServerClient:
         filename: str,
         destination: str,
         progress_cb: Optional[Callable[[str], None]] = None,
+        scope: str = "",
     ) -> str:
         """Fetch one of the tool's server-hosted test files to `destination`.
 
@@ -717,6 +727,13 @@ class ToolServerClient:
         # listing, but it lands in a URL path and a stray "/" or "?" in it must
         # address the same file rather than a different route.
         url = f"{self._server_url}/tools/{tool_name}/testfiles/{quote(filename, safe='')}"
+        # The subfolder the name was LISTED under, when a deployment scopes an
+        # argument's hosted files. Said rather than guessed: a name is bare and
+        # two scopes may hold the same one. Without it the server looks in the
+        # tool's own folder and answers "No such testfile" for an entry its own
+        # picker had just offered.
+        if scope:
+            url += f"?scope={quote(scope, safe='')}"
         headers = {"Authorization": f"Bearer {self._token}"}
         label = f"Downloading {filename}..."
 

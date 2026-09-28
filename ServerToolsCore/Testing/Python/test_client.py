@@ -206,8 +206,10 @@ class ToolServerClientTest(unittest.TestCase):
                 "models": ["stacking_v1.zip", "stacking_v2.zip"],
                 "testfiles": ["demo.zip"],
                 # {} rather than absent, so no caller has to ask which server
-                # version it is talking to.
+                # version it is talking to. Same for `scoped`, the per-subfolder
+                # lists a deployment that scopes an argument sends.
                 "entries": {},
+                "scoped": {},
             },
         )
         args, kwargs = mock_get.call_args
@@ -224,7 +226,7 @@ class ToolServerClientTest(unittest.TestCase):
 
         self.assertEqual(
             self.client.list_tool_data("SurgMovPred"),
-            {"models": [], "testfiles": [], "entries": {}},
+            {"models": [], "testfiles": [], "entries": {}, "scoped": {}},
         )
 
     @mock.patch("requests.Session.get")
