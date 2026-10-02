@@ -172,6 +172,10 @@ class _Cohort:
         # time so `_readRunReport` answers for the cohort and no module has to
         # know this feature exists.
         self.report = None
+        # Sent with every batch, so the server can tell this cohort's batches
+        # apart from another's and order them. Random rather than a counter:
+        # two workstations, or two panels, must never mint the same one.
+        self.batch_id = new_run_id()
 
     @property
     def complete(self) -> bool:
@@ -1800,6 +1804,11 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         sizes = [len(batch[1]) for batch in batches] if batches[0] else []
         cohort = _Cohort(len(prepared), sum(sizes)) if len(prepared) > 1 else None
+        if cohort:
+            # Asked once per cohort, when it is queued: whether this
+            # workstation's batches may run side by side is the server
+            # operator's decision, and it can change between two cohorts.
+            self._batchPolicy = self.client.batch_policy()
         chosen = (self._outputFolderWidget.currentPath
                   if self._outputFolderWidget else None)
         if cohort:
@@ -1911,11 +1920,25 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return name
 
     def _concurrentRuns(self) -> int:
-        """How many runs may be in flight at once, never below one."""
+        """How many runs may be in flight at once, never below one.
+
+        The configured number, raised to what the server allows this
+        workstation when its operator lets this workstation's batches run in
+        parallel. The server enforces its rule either way -- a serial
+        workstation's batches run one at a time whatever is sent -- so this
+        only decides how much is uploaded ahead of time.
+        """
         try:
-            return max(1, int(config.CONCURRENT_RUNS))
+            configured = max(1, int(config.CONCURRENT_RUNS))
         except (AttributeError, TypeError, ValueError):
-            return 1
+            configured = 1
+        policy = getattr(self, "_batchPolicy", None) or {}
+        if policy.get("batches") == "parallel" and any(run.cohort for run in self._runs):
+            try:
+                return max(configured, int(policy.get("max_parallel") or configured))
+            except (TypeError, ValueError):
+                return configured
+        return configured
 
     def _pumpRuns(self) -> None:
         """Start queued runs up to the admission limit.
@@ -1952,6 +1975,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 run_id=run.run_id,
                 event_cb=progress_cb,
                 cancel_event=run.cancel_event,
+                batch=({"id": run.cohort.batch_id, "index": run.cohort_index,
+                        "total": run.cohort.total} if run.cohort else None),
             )
 
         run.phase = _("Sending request...")

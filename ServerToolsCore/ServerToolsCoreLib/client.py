@@ -96,6 +96,13 @@ STOP_AFTER_ARGUMENT = "stop_after"
 # known to BOTH sides before the response exists, since the whole point is to
 # say something while the request is still in flight.
 RUN_ID_HEADER = "X-Run-Id"
+# A run that is one batch of a divided cohort says which, so the server can
+# group the batches and decide whether they run side by side. Headers for the
+# same reason the run id is one: a server that has never heard of them ignores
+# them and answers exactly as before.
+BATCH_ID_HEADER = "X-Batch-Id"
+BATCH_INDEX_HEADER = "X-Batch-Index"
+BATCH_TOTAL_HEADER = "X-Batch-Total"
 
 # The closed set of terminal states. Reaching one ends the stream, on both
 # sides: the server stops writing, and the watcher stops reading rather than
@@ -619,6 +626,27 @@ class ToolServerClient:
             logger.debug("Health check failed: %s", exc)
             return False
 
+    def batch_policy(self) -> Optional[dict]:
+        """How the server will run this workstation's cohort batches, or None.
+
+        `{"batches": "serial" | "parallel", "max_parallel": N}`, decided per
+        workstation by the server's operator. None from a server that predates
+        the endpoint, or that cannot be reached: the caller then keeps its own
+        configured concurrency, which is what it did before.
+        """
+        try:
+            response = self._session.get(
+                f"{self._server_url}/clients/me", headers={"Authorization": f"Bearer {self._token}"},
+                timeout=_HEALTH_CHECK_TIMEOUT, verify=self._verify_tls,
+            )
+            if not response.ok:
+                return None
+            answer = response.json()
+            return answer if isinstance(answer, dict) else None
+        except (requests.RequestException, ValueError) as exc:
+            logger.debug("Batch policy unavailable: %s", exc)
+            return None
+
     def list_tools(self, force_refresh: bool = False) -> dict:
         """Return {tool_name: schema}, cached after the first call."""
         if self._tools_cache is None or force_refresh:
@@ -857,6 +885,7 @@ class ToolServerClient:
         run_id: Optional[str] = None,
         event_cb: Optional[Callable[[dict], None]] = None,
         cancel_event=None,
+        batch: Optional[dict] = None,
     ) -> ToolResult:
         """`files`: {schema_argument_name: local_file_path}, one entry per
         `type: "file"` argument you're providing. Each is uploaded as its own
@@ -939,6 +968,11 @@ class ToolServerClient:
             # addresses, and a caller may well want to be able to cancel a run
             # it is not watching.
             post_headers[RUN_ID_HEADER] = run_id
+        if batch:
+            # `{"id", "index", "total"}`: which batch of which cohort this is.
+            post_headers[BATCH_ID_HEADER] = str(batch["id"])
+            post_headers[BATCH_INDEX_HEADER] = str(batch["index"])
+            post_headers[BATCH_TOTAL_HEADER] = str(batch["total"])
 
         # Debug visibility only: argument/file *names*, never the token or the
         # argument/file contents. Silent unless the caller has raised this
