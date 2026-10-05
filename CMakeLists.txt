@@ -4,12 +4,12 @@ project(AutomatedDentalToolsRemote)
 
 #-----------------------------------------------------------------------------
 # Extension meta-information
-set(EXTENSION_HOMEPAGE "https://github.com/DCBIA-OrthoLab/AutomatedDentalToolsRemote/blob/main/README.md")
+set(EXTENSION_HOMEPAGE "https://github.com/DCBIA-OrthoLab/SlicerAutomatedDentalToolsRemote/blob/main/README.md")
 set(EXTENSION_CATEGORY "Orthodontics")
 set(EXTENSION_CONTRIBUTORS "Maxime Gillot (University of Michigan), Baptiste Baquero (UoM), Juan Carlos Prieto (University of North Carolina), Nathan Hutin (UoM), Luc Anchling (UoM), Jeanne Claret (UoM), Gaelle Leroux(UoM) Lucie Dole (University of North Carolina)")
 set(EXTENSION_DESCRIPTION "Cloud client for Automated Dental Tools: each module is a thin panel over a remote inference server, so a laptop that cannot run a segmentation can still ask for one. Nothing is installed into Slicer and no model is downloaded.")
-set(EXTENSION_ICONURL "https://raw.githubusercontent.com/DCBIA-OrthoLab/AutomatedDentalToolsRemote/main/SlicerAutomaticTools.png")
-set(EXTENSION_SCREENSHOTURLS "https://raw.githubusercontent.com/DCBIA-OrthoLab/AutomatedDentalToolsRemote/main/ADT-exemple.png")
+set(EXTENSION_ICONURL "https://raw.githubusercontent.com/DCBIA-OrthoLab/SlicerAutomatedDentalToolsRemote/main/SlicerAutomaticTools.png")
+set(EXTENSION_SCREENSHOTURLS "https://raw.githubusercontent.com/DCBIA-OrthoLab/SlicerAutomatedDentalToolsRemote/main/ADT-exemple.png")
 # No extension dependencies: every computation runs on the remote tool server,
 # so this client needs neither SlicerConda, nor SlicerDentalModelSeg, nor NNUNet.
 set(EXTENSION_DEPENDS "NA") # Specified as a list or "NA" if no dependencies

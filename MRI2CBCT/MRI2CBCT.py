@@ -158,7 +158,7 @@ class MRI2CBCT(ScriptedLoadableModule):
         self.parent.helpText = _("""
 Registration of magnetic resonance images onto cone-beam computed tomography
 scans of the temporomandibular joint. See the
-<a href="https://github.com/DCBIA-OrthoLab/AutomatedDentalToolsRemote#mri2cbct-module">module documentation</a>.
+<a href="https://github.com/DCBIA-OrthoLab/SlicerAutomatedDentalToolsRemote#mri2cbct-module">module documentation</a>.
 
 Unlike the other modules of this extension, MRI2CBCT still computes locally: it
 installs nnU-Net into Slicer's interpreter and downloads its model on first use.
