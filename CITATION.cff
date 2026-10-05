@@ -23,7 +23,7 @@ keywords:
 - research software
 - dental imaging
 - dependency isolation
-license-url: https://github.com/DCBIA-OrthoLab/AutomatedDentalToolsRemote/blob/main/LICENSE
+license-url: https://github.com/DCBIA-OrthoLab/AutomatedDentalToolsRemote/blob/main/LICENSE.txt
 identifiers:
 - type: doi
   value: 10.5281/zenodo.22150410
