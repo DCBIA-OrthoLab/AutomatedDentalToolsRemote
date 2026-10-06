@@ -7,7 +7,6 @@ exactly one place in the whole extension.
 """
 
 import hashlib
-import html
 import os
 import tempfile
 
@@ -57,9 +56,6 @@ _LIGHT = {
     "DANGER_HOVER": "#b32f2f",
     "DANGER_PRESSED": "#8f2424",
     "SUCCESS": "#17864a",
-    # A tool's warning in the run's Messages pane. Amber, and dark enough on
-    # white to read as text rather than as a highlight.
-    "WARNING": "#9a5b00",
     "TEXT": "#12202e",
     "TEXT_MUTED": "#4a5b6d",
     "BORDER": "#9aabbe",
@@ -82,7 +78,6 @@ _DARK = {
     "DANGER_HOVER": "#f4837e",
     "DANGER_PRESSED": "#c54a45",
     "SUCCESS": "#3ddc84",
-    "WARNING": "#f0b45a",
     "TEXT": "#eef2f7",
     "TEXT_MUTED": "#9dabbb",
     "BORDER": "#4e5865",
@@ -1112,58 +1107,6 @@ def progress_label() -> qt.QLabel:
     t = tokens()
     label.setStyleSheet(f"color: {t['TEXT_MUTED']}; padding: {SPACING_XS}px;")
     return label
-
-
-# --- what a tool says while it runs -------------------------------------------
-#
-# The run's Messages pane: lines a tool wrote FOR the person who started it
-# ("scan 4 has no mandible and was skipped"), which the progress line cannot
-# carry -- it shows the latest word only, and a warning is exactly the word that
-# must not be overwritten a second later by "scan 5 of 8".
-
-# Tall enough for five or six lines, and no taller: the pane sits under the
-# progress line, and a log that grew to fill the panel would push the inputs a
-# user is about to change for the next run out of sight.
-MESSAGE_LOG_HEIGHT = 110
-
-
-def message_log_view() -> qt.QTextEdit:
-    """The read-only text area of a run's Messages pane.
-
-    Rich text, so a warning and an error can be coloured, and every line is
-    escaped before it gets here (see `message_log_html`). No wrapping: a line
-    is short by contract (200 characters at most) and a wrapped one breaks the
-    column of times that makes the pane scannable.
-    """
-    view = qt.QTextEdit()
-    view.setReadOnly(True)
-    view.setLineWrapMode(qt.QTextEdit.NoWrap)
-    view.setMaximumHeight(MESSAGE_LOG_HEIGHT)
-    t = tokens()
-    view.setStyleSheet(
-        f"QTextEdit {{ font-family: monospace; font-size: 9pt; color: {t['TEXT']}; }}")
-    return view
-
-
-def message_log_html(text: str, level: str) -> str:
-    """One line of the Messages pane, coloured by its level.
-
-    Escaped here and nowhere else: the text was written by a tool, and in a
-    rich-text widget an unescaped `<` is markup. `white-space: pre` keeps the
-    double spaces that separate the columns, which HTML would otherwise fold.
-    Resolved against the theme in force when the line arrives; a line already
-    on screen keeps its colour across a theme switch, which for a log is the
-    honest behaviour anyway.
-    """
-    t = tokens()
-    color = {
-        "error": t["DANGER"],
-        "warning": t["WARNING"],
-        "debug": t["TEXT_MUTED"],
-    }.get(level, t["TEXT"])
-    weight = " font-weight: 600;" if level in ("warning", "error") else ""
-    return (f'<span style="white-space: pre; color: {color};{weight}">'
-            f"{html.escape(text)}</span>")
 
 
 # --- a cohort in flight ----------------------------------------------------

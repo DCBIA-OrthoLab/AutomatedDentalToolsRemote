@@ -1543,20 +1543,17 @@ are told apart now, and the mechanism is one connection and no new machinery.
   and may name a file, which on this extension's data means it may name a
   patient. It is rendered on the panel of the person who started the run and
   goes nowhere else.
-- **A log line goes to the Messages pane and nowhere else.** `_onJobProgress`
-  routes `is_log_event` payloads to `_onRunLog` BEFORE the progress branch, so
-  a line never touches the run's phase, message, fraction or depth -- and
-  therefore never the bar, the progress line or a cohort's count. The pane is a
-  collapsible "Messages" box under the progress line (`_buildMessageBox`, a
-  `design.message_log_view()` capped at `_MESSAGE_LOG_MAX_BLOCKS` lines like
-  SlicerCloud's Log box), hidden until the first line arrives. A line reads
-  `HH:MM:SS  [source]  LEVEL  message` (`format_run_log_line`), escaped and
-  coloured by level (`design.message_log_html`: errors in `DANGER`, warnings in
-  `WARNING`, both bold). With several runs in flight it is prefixed with the
-  run it came from, named as its progress line names it ("Run 2:", or "Batch
-  2:" inside a cohort); a lone run gains no prefix. Apply empties and hides the
-  pane only when nothing is in flight -- a run still going keeps its warnings.
-  Like a progress message it is never written to the Python or Slicer log.
+- **A log line is printed to the Python console, and nothing else.**
+  `_onJobProgress` routes `is_log_event` payloads to `_onRunLog` BEFORE the
+  progress branch, so a line never touches the run's phase, message, fraction
+  or depth -- and therefore never the bar, the progress line or a cohort's
+  count. There is no widget for it: the line is `print`ed as
+  `[<TOOL_NAME>] HH:MM:SS  [source]  LEVEL  message` (`format_run_log_line`),
+  the panel's tool first since every panel prints to the same console. With
+  several runs in flight it is prefixed with the run it came from, named as
+  its progress line names it ("Run 2:", or "Batch 2:" inside a cohort). It
+  never goes through Python's `logging`, which would also write it to
+  Slicer's log file.
 
 A supervised chain (AREG → ASO → ALI) is shown as nesting: one arrow per
 `depth`. The child is named only when the server named it -- the marker that

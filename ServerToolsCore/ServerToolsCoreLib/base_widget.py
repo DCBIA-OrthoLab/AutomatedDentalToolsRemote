@@ -59,21 +59,14 @@ _INTERMEDIATE_DIRNAME = "intermediate"
 # run is still going to write its real answer beside it.
 _CHECKPOINT_DIRNAME = "quality_control"
 
-# The Messages pane is a ring buffer, the same as SlicerCloud's Log box and for
-# the same reason: a cohort of a hundred scans can say something about every
-# one of them, and an unbounded QTextEdit makes the panel crawl long before
-# anyone reads that far back. The server caps what it sends as well; this is
-# the side that protects Slicer.
-_MESSAGE_LOG_MAX_BLOCKS = 1000
-
-# How a level reads in the pane. Fixed English words rather than translated
+# How a level reads in the console. Fixed English words rather than translated
 # ones: they are a column a reader scans for "ERROR", and a fixed width keeps
 # the messages after them aligned.
 _LOG_LEVEL_WORDS = {"debug": "DEBUG", "info": "INFO", "warning": "WARNING", "error": "ERROR"}
 
 
 def format_run_log_line(event, prefix: str = "", now=None) -> str:
-    """One line of the Messages pane: `HH:MM:SS  [source]  LEVEL  message`.
+    """One console line: `HH:MM:SS  [source]  LEVEL  message`.
 
     `prefix` names the run ("Run 2") when several are in flight, and is left
     out for a lone run for the reason _describeRun leaves it out. The time is
@@ -446,10 +439,6 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.uiWidget = None
         self._progressLabel = None
         self._progressBar = None  # determinate, and only while a tool reports a fraction
-        # The Messages pane: a tool's own lines for the user, apart from the
-        # progress line. Hidden until the first line arrives.
-        self._messageBox = None
-        self._messageView = None
         # One Cancel per run, rebuilt whenever the set of runs changes. The
         # host widget stays put in the layout; only its single child is
         # replaced, the same swap _buildForm makes for the schema-driven part.
@@ -509,8 +498,6 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._runControlsLayout.setContentsMargins(0, 0, 0, 0)
         self._runControlsLayout.setSpacing(design.SPACING_XS)
         rootLayout.addWidget(runControlsHost)
-
-        self._buildMessageBox(rootLayout)
 
         self.applyButton.clicked.connect(self.onApplyButton)
         self.cancelButton.clicked.connect(self.onCancelButton)
@@ -1856,13 +1843,6 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer.util.errorDisplay(str(exc))
             return
 
-        # A fresh Apply starts a fresh Messages pane -- but only when nothing
-        # is still in flight. Runs queued behind each other keep each other's
-        # lines, prefixed with the run they came from (see _onRunLog), since
-        # clearing them would throw away a warning about a run still going.
-        if not self._runs:
-            self._clearMessages()
-
         sizes = [len(batch[1]) for batch in batches] if batches[0] else []
         cohort = _Cohort(len(prepared), sum(sizes)) if len(prepared) > 1 else None
         if cohort:
@@ -2668,12 +2648,14 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._renderProgress()
 
     def _onRunLog(self, run, event) -> None:
-        """One of the tool's log lines for the user, into the Messages pane.
+        """One of the tool's log lines for the user, printed to the Python console.
 
-        Never logged, for the reason _onRunEvent logs nothing: the line was
-        written by a tool about a clinician's data, and it is shown on the
-        panel of the person who started the run and goes nowhere else -- not
-        to the Python console, not to Slicer's log file.
+        The console and nothing else: no widget of its own, and never Python's
+        `logging`, which would also send it to Slicer's log file -- the line
+        was written by a tool about a clinician's data, and the console is
+        read by the person who started the run, on their own workstation.
+        Prefixed with this panel's tool, since every panel prints to the same
+        console.
         """
         prefix = ""
         if len(self._runs) > 1:
@@ -2682,53 +2664,7 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             prefix = (_("Batch {index}").format(index=run.cohort_index)
                       if run.cohort_index else
                       _("Run {number}").format(number=run.number))
-        level = event.get("level") or "info"
-        self._writeMessage(format_run_log_line(event, prefix), level)
-
-    def _writeMessage(self, text: str, level: str) -> None:
-        """Append one line to the Messages pane, showing it on the first."""
-        # getattr: a panel built without __init__ (the unit tests) has no pane.
-        view = getattr(self, "_messageView", None)
-        if view is None:
-            return
-        view.append(design.message_log_html(text, level))
-        view.ensureCursorVisible()
-        box = getattr(self, "_messageBox", None)
-        if box is not None:
-            box.setVisible(True)
-
-    def _clearMessages(self) -> None:
-        """Empty and hide the Messages pane, for a fresh Apply."""
-        view = getattr(self, "_messageView", None)
-        if view is not None:
-            view.clear()
-        box = getattr(self, "_messageBox", None)
-        if box is not None:
-            box.setVisible(False)
-
-    def _buildMessageBox(self, layout) -> None:
-        """The Messages pane, under the progress line and hidden until needed.
-
-        Collapsible like every section of the panel, and open by default: the
-        first line a tool sends for the user is usually a warning, and one
-        that arrives folded away is one nobody reads. Most runs send none at
-        all, which is why it stays out of the panel until the first one does.
-        """
-        box = ctk.ctkCollapsibleButton()
-        box.text = _("Messages")
-        boxLayout = qt.QVBoxLayout(box)
-        view = design.message_log_view()
-        # PythonQt may expose `document` as a property rather than a method,
-        # and a wrong guess raised inside setup() would leave the panel half
-        # built -- the trap SlicerCloud's `_qt_get` documents.
-        document = view.document
-        document = document() if callable(document) else document
-        document.setMaximumBlockCount(_MESSAGE_LOG_MAX_BLOCKS)
-        boxLayout.addWidget(view)
-        box.setVisible(False)
-        layout.addWidget(box)
-        self._messageBox = box
-        self._messageView = view
+        print("[{}] {}".format(self.TOOL_NAME, format_run_log_line(event, prefix)))
 
     def _finishRun(self, run) -> None:
         run.job = None

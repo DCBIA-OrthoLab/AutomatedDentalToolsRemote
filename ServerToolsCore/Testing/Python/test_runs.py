@@ -18,6 +18,8 @@ than copying 120 lines of stubs keeps one definition of what Slicer looks like;
 its own test classes stay in its namespace and are not re-run here.
 """
 
+import contextlib
+import io
 import os
 import sys
 import threading
@@ -162,10 +164,6 @@ class RunQueueTest(unittest.TestCase):
         panel.applyButton = qt.QPushButton("Apply")
         panel.cancelButton = qt.QPushButton("Cancel")
         panel.client = self
-        # The Messages pane, built exactly as setup() builds it: hidden until
-        # its first line arrives.
-        panel._buildMessageBox(qt.QVBoxLayout())
-
         # Every run id the panel asked the server to cancel, in order. The
         # point of recording them is the runs that must NOT appear: a queued
         # run has never been sent, so cancelling it makes no HTTP call at all.
@@ -584,65 +582,43 @@ class RunQueueTest(unittest.TestCase):
 
         self.assertEqual(cohort.progress([run]), progress)
 
-    def test_the_pane_is_a_ring_buffer_and_starts_hidden(self):
-        self.assertFalse(self.panel._messageBox.isVisible())
-        self.assertEqual(self.panel._messageView.document().maximumBlockCount,
-                         base_widget._MESSAGE_LOG_MAX_BLOCKS)
-        self.assertTrue(self.panel._messageView.readOnly)
+    def _printed(self, act):
+        """What `act` printed to the console, line by line."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            act()
+        return out.getvalue().splitlines()
 
-    def test_a_log_line_lands_in_the_messages_pane_which_then_shows(self):
+    def test_a_log_line_is_printed_to_the_console_with_its_tool(self):
         self._apply()
-        self.assertFalse(self.panel._messageBox.isVisible())
 
-        _Job.started[0].log(level="warning", message="scan 4 skipped", source="ALI_CBCT")
+        (line,) = self._printed(lambda: _Job.started[0].log(
+            level="warning", message="scan 4 skipped", source="ALI_CBCT"))
 
-        self.assertTrue(self.panel._messageBox.isVisible())
-        (line,) = self.panel._messageView.lines
+        self.assertTrue(line.startswith("[{}] ".format(self.panel.TOOL_NAME)), line)
         self.assertIn("[ALI_CBCT]", line)
         self.assertIn("WARNING", line)
         self.assertIn("scan 4 skipped", line)
         self.assertNotIn("Run 1", line, "a lone run gains no prefix")
 
-    def test_a_log_line_is_escaped_before_it_reaches_a_rich_text_pane(self):
+    def test_progress_is_never_printed(self):
         self._apply()
-        _Job.started[0].log(message="<b>bold</b> & co")
-
-        (line,) = self.panel._messageView.lines
-        self.assertIn("&lt;b&gt;bold&lt;/b&gt; &amp; co", line)
-
-    def test_warnings_and_errors_look_different_from_information(self):
-        self._apply()
-        for seq, level in enumerate(("info", "warning", "error")):
-            _Job.started[0].log(seq=seq, level=level, message="m")
-
-        info, warning, error = self.panel._messageView.lines
-        self.assertNotEqual(info, warning.replace("WARNING", "INFO   "))
-        self.assertNotEqual(warning.replace("WARNING", "ERROR  "), error)
+        self.assertEqual(self._printed(
+            lambda: _Job.started[0].emit(seq=1, message="scan 5 of 8")), [])
 
     def test_several_runs_prefix_their_lines_with_the_run_they_came_from(self):
         config.CONCURRENT_RUNS = 2
         self._apply(path="/data/patient_01.nii.gz")
         self._apply(path="/data/patient_02.nii.gz")
 
-        _Job.started[1].log(message="from the second")
+        (line,) = self._printed(lambda: _Job.started[1].log(message="from the second"))
 
-        (line,) = self.panel._messageView.lines
         self.assertIn("Run 2:", line)
 
-    def test_a_new_apply_starts_a_fresh_pane_only_when_nothing_is_in_flight(self):
-        self._apply()
-        _Job.started[0].log(message="first run")
-        self._apply()  # queued behind the first: its lines are kept
-        self.assertEqual(len(self.panel._messageView.lines), 1)
-
-        self.panel.onCancelButton()
-        self._apply()
-        self.assertEqual(self.panel._messageView.lines, [])
-        self.assertFalse(self.panel._messageBox.isVisible())
-
     def test_nothing_a_tool_says_is_ever_logged(self):
-        """The line was written about a clinician's data. It is shown on this
-        panel and goes nowhere else -- not to the console, not to a log file."""
+        """The line was written about a clinician's data. It is printed to the
+        console and goes nowhere else -- never through `logging`, which would
+        also put it in Slicer's log file."""
         self._apply()
         with self.assertNoLogs(level="DEBUG"):
             _Job.started[0].log(level="error", message="scan 4 failed")
@@ -780,7 +756,7 @@ class RunQueueTest(unittest.TestCase):
 
 
 class LogLineFormatTest(unittest.TestCase):
-    """`HH:MM:SS  [source]  LEVEL  message`, the pane's one line shape."""
+    """`HH:MM:SS  [source]  LEVEL  message`, the console's one line shape."""
 
     def setUp(self):
         self.at = time.mktime((2026, 10, 6, 14, 3, 9, 0, 0, -1))

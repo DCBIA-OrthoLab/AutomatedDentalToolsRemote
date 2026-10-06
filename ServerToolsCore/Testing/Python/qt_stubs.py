@@ -673,47 +673,6 @@ class QProgressBar(QObject):
         self.maximumHeight = height
 
 
-class _TextDocument:
-    """What QTextEdit.document() hands back: only the ring-buffer cap."""
-
-    def __init__(self):
-        self.maximumBlockCount = 0
-
-    def setMaximumBlockCount(self, count):
-        self.maximumBlockCount = count
-
-
-class QTextEdit(QWidget):
-    """The Messages pane's text area (design.message_log_view). Records every
-    line appended to it, so a test reads what the user would see."""
-
-    NoWrap = 0
-
-    def __init__(self, parent=None):
-        QWidget.__init__(self, parent)
-        self.lines = []
-        self.readOnly = False
-        self._document = _TextDocument()
-
-    def setReadOnly(self, read_only):
-        self.readOnly = bool(read_only)
-
-    def setLineWrapMode(self, _mode):
-        pass
-
-    def document(self):
-        return self._document
-
-    def append(self, text):
-        self.lines.append(text)
-
-    def clear(self):
-        self.lines = []
-
-    def ensureCursorVisible(self):
-        pass
-
-
 class QFrame(QWidget):
     """The box a cohort's progress is drawn in (design.cohort_frame).
 
