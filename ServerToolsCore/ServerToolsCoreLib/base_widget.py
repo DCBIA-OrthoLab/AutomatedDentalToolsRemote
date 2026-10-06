@@ -27,8 +27,8 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleWidget
 from slicer.util import VTKObservationMixin
 
-from . import (config, design, digest, formgen, is_file_type, new_run_id,
-               slicer_io, testfile_entries)
+from . import (config, design, digest, formgen, is_file_type, is_log_event,
+               new_run_id, slicer_io, testfile_entries)
 from .errors import RunCancelled, ServerToolError
 from .worker import BackgroundJob
 
@@ -58,6 +58,48 @@ _INTERMEDIATE_DIRNAME = "intermediate"
 # checkpoint holds a copy of a step's output for a reader to correct, and the
 # run is still going to write its real answer beside it.
 _CHECKPOINT_DIRNAME = "quality_control"
+
+# The Messages pane is a ring buffer, the same as SlicerCloud's Log box and for
+# the same reason: a cohort of a hundred scans can say something about every
+# one of them, and an unbounded QTextEdit makes the panel crawl long before
+# anyone reads that far back. The server caps what it sends as well; this is
+# the side that protects Slicer.
+_MESSAGE_LOG_MAX_BLOCKS = 1000
+
+# How a level reads in the pane. Fixed English words rather than translated
+# ones: they are a column a reader scans for "ERROR", and a fixed width keeps
+# the messages after them aligned.
+_LOG_LEVEL_WORDS = {"debug": "DEBUG", "info": "INFO", "warning": "WARNING", "error": "ERROR"}
+
+
+def format_run_log_line(event, prefix: str = "", now=None) -> str:
+    """One line of the Messages pane: `HH:MM:SS  [source]  LEVEL  message`.
+
+    `prefix` names the run ("Run 2") when several are in flight, and is left
+    out for a lone run for the reason _describeRun leaves it out. The time is
+    the server's, when it sent a usable one, and the moment the line arrived
+    otherwise -- it is a time of day for a reader, not a key anything sorts on.
+    `[source]` is the tool of a chain that wrote the line, absent for the tool
+    the user asked for.
+    """
+    at = event.get("at")
+    if at is None:
+        at = time.time() if now is None else now
+    try:
+        stamp = time.strftime("%H:%M:%S", time.localtime(at))
+    except (OverflowError, OSError, ValueError):
+        stamp = "--:--:--"
+    level = event.get("level") or "info"
+    parts = []
+    if prefix:
+        parts.append(prefix + ":")
+    parts.append(stamp)
+    if event.get("source"):
+        parts.append("[{}]".format(event["source"]))
+    parts.append(_LOG_LEVEL_WORDS.get(level, "INFO").ljust(7))
+    parts.append(event.get("message") or "")
+    return "  ".join(parts)
+
 
 # Result kinds drawn by their own display node rather than by a slice
 # layer. A volume is not one: it is shown by being put in a layer, and
@@ -266,6 +308,12 @@ class _Run:
         self.server_message = ""
         self.fraction = None  # 0.0..1.0, or None for "the tool did not say"
         self.depth = 0  # 0 is the tool that was asked for; deeper is a chain
+        # Which tool of a supervised chain wrote the last progress event, when
+        # the server said: the opening marker of a nested call names the
+        # callee and its `call` id, and every record written inside that call
+        # carries the same id. {call id: tool name}, filled as markers arrive.
+        self.nested_tool = None
+        self.call_tools = {}
 
     @property
     def running(self) -> bool:
@@ -398,6 +446,10 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.uiWidget = None
         self._progressLabel = None
         self._progressBar = None  # determinate, and only while a tool reports a fraction
+        # The Messages pane: a tool's own lines for the user, apart from the
+        # progress line. Hidden until the first line arrives.
+        self._messageBox = None
+        self._messageView = None
         # One Cancel per run, rebuilt whenever the set of runs changes. The
         # host widget stays put in the layout; only its single child is
         # replaced, the same swap _buildForm makes for the schema-driven part.
@@ -457,6 +509,8 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._runControlsLayout.setContentsMargins(0, 0, 0, 0)
         self._runControlsLayout.setSpacing(design.SPACING_XS)
         rootLayout.addWidget(runControlsHost)
+
+        self._buildMessageBox(rootLayout)
 
         self.applyButton.clicked.connect(self.onApplyButton)
         self.cancelButton.clicked.connect(self.onCancelButton)
@@ -1802,6 +1856,13 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer.util.errorDisplay(str(exc))
             return
 
+        # A fresh Apply starts a fresh Messages pane -- but only when nothing
+        # is still in flight. Runs queued behind each other keep each other's
+        # lines, prefixed with the run they came from (see _onRunLog), since
+        # clearing them would throw away a warning about a run still going.
+        if not self._runs:
+            self._clearMessages()
+
         sizes = [len(batch[1]) for batch in batches] if batches[0] else []
         cohort = _Cohort(len(prepared), sum(sizes)) if len(prepared) > 1 else None
         if cohort:
@@ -2567,6 +2628,12 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         in this file allowed to cross a thread boundary, and a second one would
         be a second way to get Qt wrong.
         """
+        if is_log_event(payload):
+            # Before the progress branch, and never falling into it: a log
+            # line says nothing about where the run is, so it must not touch
+            # the phase, the message, the fraction or a cohort's count.
+            self._onRunLog(run, payload)
+            return
         if isinstance(payload, dict):
             self._onRunEvent(run, payload)
             return
@@ -2592,7 +2659,76 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
         run.server_message = event.get("message") or ""
         run.fraction = event.get("fraction")
         run.depth = event.get("depth") or 0
+        call = event.get("call")
+        if call and event.get("tool"):
+            run.call_tools[call] = event["tool"]
+        # Only below the root: the tool the user asked for is already named by
+        # the panel it is running in.
+        run.nested_tool = run.call_tools.get(call) if run.depth and call else None
         self._renderProgress()
+
+    def _onRunLog(self, run, event) -> None:
+        """One of the tool's log lines for the user, into the Messages pane.
+
+        Never logged, for the reason _onRunEvent logs nothing: the line was
+        written by a tool about a clinician's data, and it is shown on the
+        panel of the person who started the run and goes nowhere else -- not
+        to the Python console, not to Slicer's log file.
+        """
+        prefix = ""
+        if len(self._runs) > 1:
+            # Named the way the run's own progress line names it, so a reader
+            # can match the two: "Batch 2" inside a cohort, "Run 7" otherwise.
+            prefix = (_("Batch {index}").format(index=run.cohort_index)
+                      if run.cohort_index else
+                      _("Run {number}").format(number=run.number))
+        level = event.get("level") or "info"
+        self._writeMessage(format_run_log_line(event, prefix), level)
+
+    def _writeMessage(self, text: str, level: str) -> None:
+        """Append one line to the Messages pane, showing it on the first."""
+        # getattr: a panel built without __init__ (the unit tests) has no pane.
+        view = getattr(self, "_messageView", None)
+        if view is None:
+            return
+        view.append(design.message_log_html(text, level))
+        view.ensureCursorVisible()
+        box = getattr(self, "_messageBox", None)
+        if box is not None:
+            box.setVisible(True)
+
+    def _clearMessages(self) -> None:
+        """Empty and hide the Messages pane, for a fresh Apply."""
+        view = getattr(self, "_messageView", None)
+        if view is not None:
+            view.clear()
+        box = getattr(self, "_messageBox", None)
+        if box is not None:
+            box.setVisible(False)
+
+    def _buildMessageBox(self, layout) -> None:
+        """The Messages pane, under the progress line and hidden until needed.
+
+        Collapsible like every section of the panel, and open by default: the
+        first line a tool sends for the user is usually a warning, and one
+        that arrives folded away is one nobody reads. Most runs send none at
+        all, which is why it stays out of the panel until the first one does.
+        """
+        box = ctk.ctkCollapsibleButton()
+        box.text = _("Messages")
+        boxLayout = qt.QVBoxLayout(box)
+        view = design.message_log_view()
+        # PythonQt may expose `document` as a property rather than a method,
+        # and a wrong guess raised inside setup() would leave the panel half
+        # built -- the trap SlicerCloud's `_qt_get` documents.
+        document = view.document
+        document = document() if callable(document) else document
+        document.setMaximumBlockCount(_MESSAGE_LOG_MAX_BLOCKS)
+        boxLayout.addWidget(view)
+        box.setVisible(False)
+        layout.addWidget(box)
+        self._messageBox = box
+        self._messageView = view
 
     def _finishRun(self, run) -> None:
         run.job = None
@@ -2976,11 +3112,14 @@ class ServerToolWidgetBase(ScriptedLoadableModuleWidget, VTKObservationMixin):
             parts.append("{:.0%}".format(run.fraction))
         text = " — ".join(part for part in parts if part)
         if run.depth:
-            # A supervised chain: AREG drives ASO, which drives ALI. The panel
-            # is never told the child's NAME -- depth is all the contract
-            # carries, and naming the tool would be guessing which one is
-            # running -- so nesting is shown as nesting and the message says
-            # the rest.
+            # A supervised chain: AREG drives ASO, which drives ALI. Nesting is
+            # shown as nesting, and the child is named only when the server
+            # named it -- on the marker that opened the call this record came
+            # from (see _onRunEvent). An older server sends no name, and
+            # guessing which tool of a chain is running would be worse than
+            # the arrows alone.
+            if run.nested_tool:
+                text = "{}: {}".format(run.nested_tool, text)
             text = ("→ " * run.depth) + text
         return text
 
